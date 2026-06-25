@@ -1,189 +1,222 @@
 import { json, requireAuth } from "../_lib/auth.js";
+import { recalculateRoute, runBatch } from "../_lib/recalculate.js";
+
+const VALID_ROUTES = new Set(["homeplus", "electroland"]);
 
 export async function onRequestGet(context) {
-  const denied = await requireAuth(context); if (denied) return denied;
+  const denied = await requireAuth(context);
+  if (denied) return denied;
+
   const result = await context.env.DB.prepare(`
-    SELECT id, company, month, cutoff_date, check_mode, plan_file_name, attendance_file_name,
+    SELECT id, company AS route, month, cutoff_date, plan_file_name, attendance_file_name,
            plan_people, attendance_people, matched_people, match_rate,
            missing_count, missing_people, unexpected_count, unexpected_people,
-           dayoff_excess_people, substitute_shortage_people, created_at
+           mismatch_count, mismatch_people, dayoff_excess_people,
+           substitute_shortage_people, annual_leave_people, created_at
     FROM attendance_closures
-    ORDER BY month DESC, created_at DESC LIMIT 120
+    ORDER BY month DESC, company ASC, created_at DESC
+    LIMIT 240
   `).all();
+
   return json({ items: result.results || [] });
 }
 
 export async function onRequestPost(context) {
-  const denied = await requireAuth(context); if (denied) return denied;
+  const denied = await requireAuth(context);
+  if (denied) return denied;
+
   const body = await context.request.json().catch(() => null);
-  if (!body || !["homeplus", "electroland"].includes(body.company) || !/^\d{4}-\d{2}$/.test(body.month || "")) {
-    return json({ error: "저장 데이터 형식이 올바르지 않습니다." }, 400);
+  const route = String(body?.route || "");
+  const month = String(body?.month || "");
+  if (!body || !VALID_ROUTES.has(route) || !/^\d{4}-\d{2}$/.test(month)) {
+    return json({ error: "경로와 대상 월을 확인해 주세요." }, 400);
   }
 
   const issueRows = Array.isArray(body.issueRows) ? body.issueRows.slice(0, 10000) : [];
-  const employeeSummaries = Array.isArray(body.employeeSummaries) ? body.employeeSummaries.slice(0, 1000) : [];
-  const old = await context.env.DB.prepare("SELECT id FROM attendance_closures WHERE company = ? AND month = ?")
-    .bind(body.company, body.month).all();
-  const oldIds = (old.results || []).map((item) => item.id);
+  const mismatchRows = Array.isArray(body.mismatchRows) ? body.mismatchRows.slice(0, 10000) : [];
+  const employeeFacts = Array.isArray(body.employeeFacts) ? body.employeeFacts.slice(0, 3000) : [];
+  if (!employeeFacts.length) return json({ error: "저장할 직원별 월 마감 원본이 없습니다." }, 400);
 
-  for (const oldId of oldIds) {
-    await runBatch(context.env.DB, [
-      context.env.DB.prepare("DELETE FROM substitute_dayoff_allocations WHERE closure_id = ?").bind(oldId),
-      context.env.DB.prepare("DELETE FROM attendance_employee_summaries WHERE closure_id = ?").bind(oldId),
-      context.env.DB.prepare("DELETE FROM attendance_issue_items WHERE closure_id = ?").bind(oldId),
-      context.env.DB.prepare("DELETE FROM attendance_missing_items WHERE closure_id = ?").bind(oldId),
-      context.env.DB.prepare("DELETE FROM attendance_closures WHERE id = ?").bind(oldId),
-    ]);
+  const existing = await context.env.DB.prepare(
+    "SELECT id FROM attendance_closures WHERE company = ? AND month = ? LIMIT 1"
+  ).bind(route, month).first();
+  const replaced = Boolean(existing?.id);
+  const closureId = crypto.randomUUID();
+
+  const initialStatements = [];
+  if (existing?.id) {
+    initialStatements.push(
+      context.env.DB.prepare("DELETE FROM route_substitute_allocations WHERE closure_id = ?").bind(existing.id),
+      context.env.DB.prepare("DELETE FROM attendance_monthly_summaries_v3 WHERE closure_id = ?").bind(existing.id),
+      context.env.DB.prepare("DELETE FROM attendance_monthly_employee_facts WHERE closure_id = ?").bind(existing.id),
+      context.env.DB.prepare("DELETE FROM attendance_mismatch_items WHERE closure_id = ?").bind(existing.id),
+      context.env.DB.prepare("DELETE FROM attendance_issue_items WHERE closure_id = ?").bind(existing.id),
+      context.env.DB.prepare("DELETE FROM attendance_missing_items WHERE closure_id = ?").bind(existing.id),
+      context.env.DB.prepare("DELETE FROM attendance_closures WHERE id = ?").bind(existing.id)
+    );
   }
 
-  const id = crypto.randomUUID();
-  await context.env.DB.prepare(`
+  initialStatements.push(context.env.DB.prepare(`
     INSERT INTO attendance_closures
     (id, company, month, cutoff_date, check_mode, plan_file_name, attendance_file_name,
-     plan_people, attendance_people, matched_people, match_rate, missing_count, missing_people,
-     unexpected_count, unexpected_people, dayoff_excess_people, substitute_shortage_people)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     plan_people, attendance_people, matched_people, match_rate,
+     missing_count, missing_people, unexpected_count, unexpected_people,
+     mismatch_count, mismatch_people, dayoff_excess_people,
+     substitute_shortage_people, annual_leave_people)
+    VALUES (?, ?, ?, ?, 'auto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(
-    id, body.company, body.month, body.cutoffDate || `${body.month}-01`, body.checkMode || "strict",
-    body.planFileName || "", body.attendanceFileName || "", Number(body.planPeople || 0),
-    Number(body.attendancePeople || 0), Number(body.matchedPeople || 0), Number(body.matchRate || 0),
-    Number(body.missingCount || 0), Number(body.missingPeople || 0), Number(body.unexpectedCount || 0),
-    Number(body.unexpectedPeople || 0), Number(body.dayoffExcessPeople || 0), Number(body.substituteShortagePeople || 0)
-  ).run();
+    closureId,
+    route,
+    month,
+    body.cutoffDate || endOfMonth(month),
+    body.planFileName || "",
+    body.attendanceFileName || "",
+    toNumber(body.planPeople),
+    toNumber(body.attendancePeople),
+    toNumber(body.matchedPeople),
+    toNumber(body.matchRate),
+    issueRows.filter((row) => row.issueType === "missing_clock_in").length,
+    uniquePeople(issueRows.filter((row) => row.issueType === "missing_clock_in")),
+    issueRows.filter((row) => row.issueType === "unexpected_clock_in").length,
+    uniquePeople(issueRows.filter((row) => row.issueType === "unexpected_clock_in")),
+    mismatchRows.length,
+    uniquePeople(mismatchRows),
+    employeeFacts.filter((row) => Number(row.baseExcess || 0) > 0).length,
+    0,
+    employeeFacts.filter((row) => Number(row.annualLeaveUsed || 0) > 0).length
+  ));
 
-  if (issueRows.length) {
-    await context.env.DB.prepare(`
+  try {
+    await context.env.DB.batch(initialStatements);
+
+    const issueStatements = issueRows.map((row) => context.env.DB.prepare(`
       INSERT OR IGNORE INTO attendance_issue_items
-      (closure_id, issue_type, company, store, employee_id, employee_name, issue_date, weekday,
-       plan_status, actual_in, changed_in, clock_status, result, reason, duplicate_plan_note)
-      SELECT ?,
-             COALESCE(json_extract(value, '$.issueType'), 'missing_clock_in'), ?,
-             COALESCE(json_extract(value, '$.store'), ''),
-             COALESCE(json_extract(value, '$.employeeId'), ''),
-             COALESCE(json_extract(value, '$.name'), ''),
-             COALESCE(json_extract(value, '$.date'), ''),
-             COALESCE(json_extract(value, '$.weekday'), ''),
-             COALESCE(json_extract(value, '$.planStatus'), ''),
-             COALESCE(json_extract(value, '$.actualIn'), ''),
-             COALESCE(json_extract(value, '$.changedIn'), ''),
-             COALESCE(json_extract(value, '$.clockStatus'), ''),
-             COALESCE(json_extract(value, '$.result'), ''),
-             COALESCE(json_extract(value, '$.reason'), ''),
-             COALESCE(json_extract(value, '$.duplicatePlanNote'), '')
-      FROM json_each(?)
-    `).bind(id, body.company, JSON.stringify(issueRows)).run();
-
-    const missingRows = issueRows.filter((row) => row.issueType === "missing_clock_in");
-    if (missingRows.length) {
-      await context.env.DB.prepare(`
-        INSERT OR IGNORE INTO attendance_missing_items
-        (closure_id, company, store, employee_id, employee_name, missing_date, weekday, plan_status,
-         actual_in, changed_in, clock_status, result, reason, duplicate_plan_note)
-        SELECT ?, ?,
-               COALESCE(json_extract(value, '$.store'), ''),
-               COALESCE(json_extract(value, '$.employeeId'), ''),
-               COALESCE(json_extract(value, '$.name'), ''),
-               COALESCE(json_extract(value, '$.date'), ''),
-               COALESCE(json_extract(value, '$.weekday'), ''),
-               COALESCE(json_extract(value, '$.planStatus'), ''),
-               COALESCE(json_extract(value, '$.actualIn'), ''),
-               COALESCE(json_extract(value, '$.changedIn'), ''),
-               COALESCE(json_extract(value, '$.clockStatus'), ''),
-               COALESCE(json_extract(value, '$.result'), ''),
-               COALESCE(json_extract(value, '$.reason'), ''),
-               COALESCE(json_extract(value, '$.duplicatePlanNote'), '')
-        FROM json_each(?)
-      `).bind(id, body.company, JSON.stringify(missingRows)).run();
-    }
-  }
-
-  const monthStart = `${body.month}-01`;
-  const [year, monthNumber] = body.month.split("-").map(Number);
-  const monthEnd = `${body.month}-${String(new Date(year, monthNumber, 0).getDate()).padStart(2, "0")}`;
-  const summaryStatements = [];
-  const allocationStatements = [];
-  let actualShortagePeople = 0;
-
-  for (const source of employeeSummaries) {
-    const employeeId = String(source.employeeId || "").trim();
-    if (!employeeId) continue;
-    const substituteNeeded = roundHalf(Number(source.substituteNeeded || 0));
-    const grantsResult = await context.env.DB.prepare(`
-      SELECT g.id, g.granted_days, g.valid_from, g.valid_to,
-             COALESCE(SUM(a.used_days), 0) AS used_days
-      FROM substitute_dayoff_grants g
-      LEFT JOIN substitute_dayoff_allocations a ON a.grant_id = g.id
-      WHERE g.company = ? AND g.employee_id = ? AND g.valid_from <= ? AND g.valid_to >= ?
-      GROUP BY g.id
-      ORDER BY g.valid_to ASC, g.valid_from ASC, g.created_at ASC
-    `).bind(body.company, employeeId, monthEnd, monthStart).all();
-
-    const grants = (grantsResult.results || []).map((grant) => ({
-      ...grant,
-      remaining: roundHalf(Math.max(0, Number(grant.granted_days || 0) - Number(grant.used_days || 0))),
-    }));
-    const available = roundHalf(grants.reduce((sum, grant) => sum + grant.remaining, 0));
-    let needLeft = substituteNeeded;
-    let applied = 0;
-
-    for (const grant of grants) {
-      if (needLeft <= 0) break;
-      const use = roundHalf(Math.min(needLeft, grant.remaining));
-      if (use <= 0) continue;
-      applied = roundHalf(applied + use);
-      needLeft = roundHalf(needLeft - use);
-      allocationStatements.push(context.env.DB.prepare(`
-        INSERT INTO substitute_dayoff_allocations
-        (grant_id, closure_id, company, employee_id, month, used_days)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).bind(grant.id, id, body.company, employeeId, body.month, use));
-    }
-
-    const shortage = roundHalf(Math.max(0, substituteNeeded - applied));
-    const remaining = roundHalf(Math.max(0, available - applied));
-    if (shortage > 0) actualShortagePeople += 1;
-    const judgment = buildJudgment({
-      baseAllowance: Number(source.baseAllowance || 0),
-      basicDayoffUsed: Number(source.basicDayoffUsed || 0),
-      baseExcess: Number(source.baseExcess || 0),
-      explicitSubDayoffUsed: Number(source.explicitSubDayoffUsed || 0),
-      substituteNeeded, available, shortage, remaining,
-    });
-
-    summaryStatements.push(context.env.DB.prepare(`
-      INSERT INTO attendance_employee_summaries
-      (closure_id, company, month, store, employee_id, employee_name, base_allowance,
-       basic_dayoff_used, explicit_sub_dayoff_used, base_excess, substitute_needed,
-       available_substitute, substitute_applied, remaining_substitute, shortage, judgment)
+      (closure_id, issue_type, route, store, employee_id, employee_name, issue_date, weekday,
+       plan_status, actual_status, actual_in, changed_in, clock_status, result, reason, duplicate_plan_note)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
-      id, body.company, body.month, source.store || "", employeeId, source.name || "",
-      Number(source.baseAllowance || 0), Number(source.basicDayoffUsed || 0),
-      Number(source.explicitSubDayoffUsed || 0), Number(source.baseExcess || 0), substituteNeeded,
-      available, applied, remaining, shortage, judgment
+      closureId,
+      row.issueType === "unexpected_clock_in" ? "unexpected_clock_in" : "missing_clock_in",
+      route,
+      row.store || "",
+      row.employeeId || "",
+      row.name || "",
+      row.date || "",
+      row.weekday || "",
+      row.planStatus || "",
+      row.actualStatus || "",
+      row.actualIn || "",
+      row.changedIn || "",
+      row.clockStatus || "",
+      row.result || "",
+      row.reason || "",
+      row.duplicatePlanNote || ""
     ));
+
+    const missingStatements = issueRows
+      .filter((row) => row.issueType === "missing_clock_in")
+      .map((row) => context.env.DB.prepare(`
+        INSERT OR IGNORE INTO attendance_missing_items
+        (closure_id, company, store, employee_id, employee_name, missing_date, weekday,
+         plan_status, actual_in, changed_in, clock_status, result, reason, duplicate_plan_note)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        closureId, route, row.store || "", row.employeeId || "", row.name || "",
+        row.date || "", row.weekday || "", row.planStatus || "", row.actualIn || "",
+        row.changedIn || "", row.clockStatus || "", row.result || "", row.reason || "",
+        row.duplicatePlanNote || ""
+      ));
+
+    const mismatchStatements = mismatchRows.map((row) => context.env.DB.prepare(`
+      INSERT OR IGNORE INTO attendance_mismatch_items
+      (closure_id, route, store, employee_id, employee_name, issue_date, weekday,
+       plan_status, actual_status, actual_in, changed_in, result, reason, duplicate_plan_note)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      closureId, route, row.store || "", row.employeeId || "", row.name || "",
+      row.date || "", row.weekday || "", row.planStatus || "", row.actualStatus || "",
+      row.actualIn || "", row.changedIn || "", row.result || "", row.reason || "",
+      row.duplicatePlanNote || ""
+    ));
+
+    const factStatements = employeeFacts.map((row) => context.env.DB.prepare(`
+      INSERT INTO attendance_monthly_employee_facts
+      (closure_id, route, month, store, employee_id, employee_name,
+       base_allowance, basic_dayoff_used, explicit_sub_dayoff_used, base_excess,
+       substitute_needed, annual_leave_used, substitute_events_json, annual_leave_events_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      closureId,
+      route,
+      month,
+      row.store || "",
+      String(row.employeeId || "").trim(),
+      row.name || "",
+      roundHalf(row.baseAllowance),
+      roundHalf(row.basicDayoffUsed),
+      roundHalf(row.explicitSubDayoffUsed),
+      roundHalf(row.baseExcess),
+      roundHalf(row.substituteNeeded),
+      roundHalf(row.annualLeaveUsed),
+      JSON.stringify(Array.isArray(row.substituteEvents) ? row.substituteEvents : []),
+      JSON.stringify(Array.isArray(row.annualLeaveEvents) ? row.annualLeaveEvents : [])
+    ));
+
+    await runBatch(context.env.DB, issueStatements);
+    await runBatch(context.env.DB, missingStatements);
+    await runBatch(context.env.DB, mismatchStatements);
+    await runBatch(context.env.DB, factStatements);
+
+    const recalculated = await recalculateRoute(context.env.DB, route);
+    const summaries = await context.env.DB.prepare(`
+      SELECT *
+      FROM attendance_monthly_summaries_v3
+      WHERE closure_id = ?
+      ORDER BY shortage DESC, base_excess DESC, store ASC, employee_name ASC
+    `).bind(closureId).all();
+
+    return json({
+      ok: true,
+      id: closureId,
+      replaced,
+      affectedMonths: recalculated.affectedMonths,
+      summaries: summaries.results || [],
+    }, 201);
+  } catch (error) {
+    await cleanupFailedClosure(context.env.DB, closureId);
+    return json({ error: `월 마감 저장 중 오류가 발생했습니다: ${error.message || "알 수 없는 오류"}` }, 500);
   }
-
-  await runBatch(context.env.DB, allocationStatements);
-  await runBatch(context.env.DB, summaryStatements);
-  await context.env.DB.prepare("UPDATE attendance_closures SET substitute_shortage_people = ? WHERE id = ?")
-    .bind(actualShortagePeople, id).run();
-
-  return json({ ok: true, id, substituteShortagePeople: actualShortagePeople }, 201);
 }
 
-async function runBatch(db, statements) {
-  for (let index = 0; index < statements.length; index += 80) {
-    const chunk = statements.slice(index, index + 80);
-    if (chunk.length) await db.batch(chunk);
+async function cleanupFailedClosure(db, closureId) {
+  try {
+    await db.batch([
+      db.prepare("DELETE FROM route_substitute_allocations WHERE closure_id = ?").bind(closureId),
+      db.prepare("DELETE FROM attendance_monthly_summaries_v3 WHERE closure_id = ?").bind(closureId),
+      db.prepare("DELETE FROM attendance_monthly_employee_facts WHERE closure_id = ?").bind(closureId),
+      db.prepare("DELETE FROM attendance_mismatch_items WHERE closure_id = ?").bind(closureId),
+      db.prepare("DELETE FROM attendance_issue_items WHERE closure_id = ?").bind(closureId),
+      db.prepare("DELETE FROM attendance_missing_items WHERE closure_id = ?").bind(closureId),
+      db.prepare("DELETE FROM attendance_closures WHERE id = ?").bind(closureId),
+    ]);
+  } catch {
+    // 원래 오류를 우선 반환합니다.
   }
 }
 
-function roundHalf(value) { return Math.round((Number(value) || 0) * 2) / 2; }
-function formatDays(value) { const numberValue = roundHalf(value); return `${Number.isInteger(numberValue) ? numberValue : numberValue.toFixed(1)}일`; }
-function buildJudgment({ baseAllowance, basicDayoffUsed, baseExcess, explicitSubDayoffUsed, substituteNeeded, available, shortage, remaining }) {
-  if (shortage > 0) return `휴무 ${formatDays(basicDayoffUsed)} / 기준 ${formatDays(baseAllowance)} · 대체휴무 필요 ${formatDays(substituteNeeded)}, 가용 ${formatDays(available)} → ${formatDays(shortage)} 초과 사용`;
-  if (baseExcess > 0) return `휴무 ${formatDays(basicDayoffUsed)} / 기준 ${formatDays(baseAllowance)} · 초과 ${formatDays(baseExcess)}은 대체휴무 여분 활용 · 잔여 ${formatDays(remaining)}`;
-  if (explicitSubDayoffUsed > 0) return `기본 휴무 정상 · 대체휴무 ${formatDays(explicitSubDayoffUsed)} 사용 · 잔여 ${formatDays(remaining)}`;
-  return `정상 · 기본 휴무 ${formatDays(basicDayoffUsed)} / 기준 ${formatDays(baseAllowance)}`;
+function uniquePeople(rows) {
+  return new Set(rows.map((row) => String(row.employeeId || "").trim()).filter(Boolean)).size;
+}
+
+function toNumber(value) {
+  return Number(value) || 0;
+}
+
+function roundHalf(value) {
+  return Math.round((Number(value) || 0) * 2) / 2;
+}
+
+function endOfMonth(monthText) {
+  const [year, month] = monthText.split("-").map(Number);
+  return `${monthText}-${String(new Date(year, month, 0).getDate()).padStart(2, "0")}`;
 }
