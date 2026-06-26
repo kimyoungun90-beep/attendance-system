@@ -34,12 +34,12 @@ export async function onRequestGet(context) {
     context.env.DB.prepare(`
       SELECT * FROM attendance_monthly_summaries_v3
       WHERE closure_id = ?
-      ORDER BY shortage DESC, base_excess DESC, store, employee_name
+      ORDER BY MAX(shortage, compensation_shortage) DESC, base_excess DESC, store, employee_name
     `).bind(id).all(),
     context.env.DB.prepare(`
-      SELECT a.*, g.grant_month, g.valid_from, g.valid_to, g.reason
-      FROM route_substitute_allocations a
-      JOIN route_substitute_grants g ON g.id = a.grant_id
+      SELECT a.*, g.grant_month, g.valid_from, g.valid_to, g.reason, g.grant_type, g.grant_scope
+      FROM attendance_leave_allocations_v5 a
+      JOIN attendance_leave_grants_v5 g ON g.id = a.grant_id
       WHERE a.closure_id = ?
       ORDER BY g.valid_to, a.employee_id
     `).bind(id).all(),
@@ -67,6 +67,7 @@ export async function onRequestDelete(context) {
   if (!closure) return json({ error: "월 마감 기록을 찾지 못했습니다." }, 404);
 
   await context.env.DB.batch([
+    context.env.DB.prepare("DELETE FROM attendance_leave_allocations_v5 WHERE closure_id = ?").bind(id),
     context.env.DB.prepare("DELETE FROM route_substitute_allocations WHERE closure_id = ?").bind(id),
     context.env.DB.prepare("DELETE FROM attendance_monthly_summaries_v3 WHERE closure_id = ?").bind(id),
     context.env.DB.prepare("DELETE FROM attendance_monthly_employee_facts WHERE closure_id = ?").bind(id),

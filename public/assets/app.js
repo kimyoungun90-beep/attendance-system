@@ -1,3 +1,5 @@
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js";
+
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 
@@ -25,6 +27,8 @@ const state = {
   pageSize: 50,
   grants: [],
   archiveFiles: [],
+  workforceUploads: [],
+  workforce: null,
 };
 
 init();
@@ -36,7 +40,7 @@ async function init() {
   setupDropzone("attendanceDropzone", "attendanceFile", setAttendanceFile);
   await checkBackend();
   syncRouteRuleHelp();
-  if (state.backend.loggedIn) await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles()]);
+  if (state.backend.loggedIn) await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads()]);
 }
 
 function bindEvents() {
@@ -50,18 +54,25 @@ function bindEvents() {
   $("#refreshGrantButton").addEventListener("click", loadGrants);
   $("#grantRouteFilter").addEventListener("change", loadGrants);
   $("#grantForm").addEventListener("submit", saveGrant);
-  $("#grantMonth").addEventListener("change", syncGrantDates);
+  $("#grantMonth").addEventListener("change", () => { syncGrantDates(); syncGrantFormVisibility(); });
+  $("#grantScope").addEventListener("change", syncGrantFormVisibility);
+  $("#grantEligibility").addEventListener("change", syncGrantFormVisibility);
   $("#grantCancelEdit").addEventListener("click", resetGrantForm);
   $("#archiveForm").addEventListener("submit", saveArchiveFile);
   $("#refreshArchiveButton").addEventListener("click", loadArchiveFiles);
   $("#archiveRouteFilter").addEventListener("change", loadArchiveFiles);
   $("#archiveMonthFilter").addEventListener("change", loadArchiveFiles);
+  $("#workforceForm").addEventListener("submit", saveWorkforceFile);
+  $("#refreshWorkforceButton").addEventListener("click", loadWorkforceUploads);
+  $("#workforceMonth").addEventListener("change", previewWorkforceFile);
+  $("#workforceFile").addEventListener("change", previewWorkforceFile);
+  $("#portalReferenceFile").addEventListener("change", previewWorkforceFile);
   $("#loginButton").addEventListener("click", openLogin);
   $("#logoutButton").addEventListener("click", logout);
   $("#loginCancel").addEventListener("click", () => $("#loginDialog").close());
   $("#loginForm").addEventListener("submit", login);
-  $("#targetMonth").addEventListener("change", () => { syncCutoffWithMonth(); syncRouteRuleHelp(); });
-  $$('input[name="route"]').forEach((input) => input.addEventListener("change", syncRouteRuleHelp));
+  $("#targetMonth").addEventListener("change", () => { syncCutoffWithMonth(); syncRouteRuleHelp(); updateWorkforceStatus(); });
+  $$('input[name="route"]').forEach((input) => input.addEventListener("change", () => { syncRouteRuleHelp(); updateWorkforceStatus(); }));
   $$(".tab[data-view]").forEach((tab) => tab.addEventListener("click", () => switchView(tab.dataset.view)));
   $$(".inner-tab").forEach((tab) => tab.addEventListener("click", () => switchResultTab(tab.dataset.resultTab)));
 }
@@ -73,7 +84,9 @@ function setDefaultDates() {
   $("#cutoffDate").value = toISODate(now);
   $("#grantMonth").value = month;
   $("#archiveMonth").value = month;
+  $("#workforceMonth").value = month;
   syncGrantDates();
+  syncGrantFormVisibility();
 }
 
 function syncCutoffWithMonth() {
@@ -91,6 +104,23 @@ function syncGrantDates() {
   const [year, monthNumber] = month.split("-").map(Number);
   $("#grantValidFrom").value = `${month}-01`;
   $("#grantValidTo").value = toISODate(new Date(year, monthNumber + 1, 0));
+}
+
+function syncGrantFormVisibility() {
+  const scope = $("#grantScope")?.value || "route";
+  const eligibility = $("#grantEligibility")?.value || "all";
+  $("#grantEmployeeField")?.style.setProperty("display", scope === "employee" ? "block" : "none");
+  $("#grantAmountRow")?.classList.toggle("single", scope !== "employee");
+  $("#grantEligibilityField")?.classList.toggle("hidden", scope !== "route");
+  $("#grantExclusionField")?.classList.toggle("hidden", scope !== "route");
+  $("#grantCriterionField")?.classList.toggle("hidden", scope !== "route" || eligibility !== "worked_on_date");
+  if (scope === "employee") {
+    $("#grantEligibility").value = "all";
+    $("#grantCriterionDate").value = "";
+  } else if (eligibility === "worked_on_date" && !$("#grantCriterionDate").value) {
+    const month = $("#grantMonth").value;
+    if (month) $("#grantCriterionDate").value = `${month}-01`;
+  }
 }
 
 function syncRouteRuleHelp() {
@@ -144,15 +174,22 @@ async function analyzeFiles() {
     button.disabled = true;
     button.textContent = "파일 분석 중...";
 
-    const [planWorkbook, attendanceWorkbook] = await Promise.all([
+    if (!(state.backend.available && state.backend.configured && state.backend.loggedIn)) {
+      openLogin();
+      throw new Error("월별 인력·매장매칭 자료를 불러오려면 관리자 로그인이 필요합니다.");
+    }
+    const [planWorkbook, attendanceWorkbook, workforce] = await Promise.all([
       fileToWorkbookSheets(state.planFile),
       fileToWorkbookSheets(state.attendanceFile),
+      loadWorkforceMonth(targetMonth, route),
     ]);
+    if (!workforce?.members?.length) throw new Error(`${targetMonth} ${ROUTE_LABELS[route]} 경로의 인력·매장매칭 파일이 없습니다. 시스템 수정에서 먼저 등록해 주세요.`);
     const plan = parsePlan(planWorkbook, targetMonth);
     const attendance = parseAttendance(attendanceWorkbook, targetMonth);
     state.priorLedger = await loadPriorLedger(route, targetMonth);
 
     const result = compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, ledger: state.priorLedger });
+    appendWorkforceMatchingIssues(result, workforce, plan, route, targetMonth);
     state.result = {
       ...result,
       route,
@@ -162,6 +199,7 @@ async function analyzeFiles() {
       planFileName: state.planFile.name,
       attendanceFileName: state.attendanceFile.name,
       analyzedAt: new Date().toISOString(),
+      workforce,
     };
 
     renderResult();
@@ -188,7 +226,7 @@ async function loadPriorLedger(route, month) {
     return {
       lotsByEmployee: data.lotsByEmployee || {},
       annualLeaveBefore: data.annualLeaveBefore || {},
-      currentGrant: data.currentGrant || null,
+      currentGrants: data.currentGrants || [],
     };
   } catch (error) {
     showToast(`${error.message}. 이번 분석은 저장된 이전 월 누적을 제외하고 계산합니다.`);
@@ -197,7 +235,7 @@ async function loadPriorLedger(route, month) {
 }
 
 function emptyLedger() {
-  return { lotsByEmployee: {}, annualLeaveBefore: {}, currentGrant: null };
+  return { lotsByEmployee: {}, annualLeaveBefore: {}, currentGrants: [] };
 }
 
 async function fileToWorkbookSheets(file) {
@@ -245,7 +283,6 @@ function tryParsePlanSheet(sheet, targetMonth) {
     employment: findHeaderIndex(headers, ["재직상태", "근무상태", "재직여부"]),
   };
 
-  // 사용 중인 계획표의 고정 구조(A 매장명, B 사번, D 이름)도 보조 인식합니다.
   if (columns.store < 0 && headers.length > 0) columns.store = 0;
   if (columns.employeeId < 0 && headers.length > 1) columns.employeeId = 1;
   if (columns.name < 0 && headers.length > 3) columns.name = 3;
@@ -255,8 +292,6 @@ function tryParsePlanSheet(sheet, targetMonth) {
     const day = parsePlanHeaderDay(header, targetMonth);
     if (day && !dayColumns.has(day)) dayColumns.set(day, index);
   });
-
-  // 날짜가 두 줄 머리글인 파일은 바로 위·아래 행도 함께 확인합니다.
   for (const nearbyIndex of [headerIndex - 1, headerIndex + 1]) {
     if (nearbyIndex < 0 || nearbyIndex >= matrix.length) continue;
     (matrix[nearbyIndex] || []).forEach((header, index) => {
@@ -265,7 +300,6 @@ function tryParsePlanSheet(sheet, targetMonth) {
       if (day && !dayColumns.has(day)) dayColumns.set(day, index);
     });
   }
-
   if (!dayColumns.size) throw new Error("01일~31일 날짜 열 없음");
 
   const rows = matrix.slice(headerIndex + 1).map((row, sourceIndex) => ({
@@ -274,6 +308,7 @@ function tryParsePlanSheet(sheet, targetMonth) {
     name: columns.name >= 0 ? text(row[columns.name]) : "",
     employment: columns.employment >= 0 ? text(row[columns.employment]) : "",
     plans: Object.fromEntries([...dayColumns.entries()].map(([day, col]) => [day, text(row[col])])),
+    rawRow: [...row],
     sourceIndex: sourceIndex + headerIndex + 2,
   })).filter((row) => looksLikeEmployeeId(row.employeeId) && row.name && (!row.employment || !row.employment.includes("퇴사")));
 
@@ -281,6 +316,9 @@ function tryParsePlanSheet(sheet, targetMonth) {
   return {
     rows,
     headerIndex,
+    rawHeaders: [...rawHeaders],
+    matrix,
+    columns,
     dayColumns,
     detectedRoute: detectRouteFromPlan(rows),
     sheetName: sheet.sheetName,
@@ -338,10 +376,10 @@ function tryParseAttendanceSheet(sheet, targetMonth) {
       employeeId: normalizeEmployeeId(row[columns.employeeId]),
       name: columns.name >= 0 ? text(row[columns.name]) : "",
       date,
-      actualIn: columns.actualIn >= 0 ? text(row[columns.actualIn]) : "",
-      changedIn: columns.changedIn >= 0 ? text(row[columns.changedIn]) : "",
-      location: columns.location >= 0 ? text(row[columns.location]) : "",
-      actualStatus: columns.actualStatus >= 0 ? text(row[columns.actualStatus]) : "",
+      actualIn: columns.actualIn >= 0 ? cleanClockValue(row[columns.actualIn]) : "",
+      changedIn: columns.changedIn >= 0 ? cleanClockValue(row[columns.changedIn]) : "",
+      location: columns.location >= 0 ? cleanPlaceholderValue(row[columns.location]) : "",
+      actualStatus: columns.actualStatus >= 0 ? cleanPlaceholderValue(row[columns.actualStatus]) : "",
       sourceIndex: sourceIndex + headerIndex + 2,
     };
   }).filter((row) => looksLikeEmployeeId(row.employeeId) && row.date && row.date.startsWith(targetMonth));
@@ -350,6 +388,8 @@ function tryParseAttendanceSheet(sheet, targetMonth) {
   return {
     rows,
     headerIndex,
+    matrix,
+    columns,
     detectedRoute: detectRouteFromAttendance(rows),
     hasActualStatusColumn: columns.actualStatus >= 0,
     sheetName: sheet.sheetName,
@@ -448,25 +488,34 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
 
   const missingRows = [];
   const unexpectedRows = [];
-  const mismatchRows = [];
+  const mismatchMap = new Map();
   const employeeSummaries = [];
   const employeeFacts = [];
+
+  const addMismatch = (row) => {
+    const key = `${row.employeeId}|${row.date}`;
+    if (!mismatchMap.has(key)) mismatchMap.set(key, row);
+  };
 
   for (const person of selectedPlans) {
     const basicDayoffDates = [];
     const explicitSubstituteEvents = [];
+    const compensationEvents = [];
     const annualLeaveEvents = [];
+    const workedDates = [];
 
     for (let day = 1; day <= daysInMonth; day += 1) {
       const date = `${targetMonth}-${String(day).padStart(2, "0")}`;
       const planCode = normalizePlanCode(person.plans[day]);
       if (planCode === "휴무") basicDayoffDates.push(date);
       const substituteDays = substitutePlanValue(planCode);
-      if (substituteDays > 0) {
-        explicitSubstituteEvents.push({ date, days: substituteDays, source: "표기 대체휴무", planStatus: planCode });
-      }
+      if (substituteDays > 0) explicitSubstituteEvents.push({ date, days: substituteDays, source: "표기 대체휴무", planStatus: planCode });
+      const compensationDays = compensationPlanValue(planCode);
+      if (compensationDays > 0) compensationEvents.push({ date, days: compensationDays, source: "표기 보상휴가", planStatus: planCode });
       const annualDays = annualLeaveValue(planCode);
       if (annualDays > 0) annualLeaveEvents.push({ date, days: annualDays, planStatus: planCode });
+      const attendanceValue = attendanceMap.get(`${person.employeeId}|${date}`) || emptyAttendanceValue();
+      if (attendanceValue.hasClockIn) workedDates.push(date);
     }
 
     const baseExcessEvents = basicDayoffDates.slice(baseAllowance).map((date) => ({
@@ -475,18 +524,17 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       source: "기본 휴무 초과",
       planStatus: "휴무",
     }));
-    const substituteEvents = [...explicitSubstituteEvents, ...baseExcessEvents]
-      .sort((a, b) => a.date.localeCompare(b.date));
+    const substituteEvents = [...explicitSubstituteEvents, ...baseExcessEvents].sort((a, b) => a.date.localeCompare(b.date));
 
     for (let day = 1; day <= lastDay; day += 1) {
-      const rawPlanStatus = person.plans[day];
-      const planStatus = normalizePlanCode(rawPlanStatus);
+      const planStatus = normalizePlanCode(person.plans[day]);
       const date = `${targetMonth}-${String(day).padStart(2, "0")}`;
       const dateObject = new Date(`${date}T00:00:00`);
       const attendanceValue = attendanceMap.get(`${person.employeeId}|${date}`) || emptyAttendanceValue();
+      let hasPrimaryIssue = false;
 
       if (REQUIRED_CLOCK_PLANS.has(planStatus) && !attendanceValue.hasClockIn) {
-        missingRows.push(makeIssueRow({
+        const row = makeIssueRow({
           issueType: "missing_clock_in",
           route,
           person,
@@ -496,11 +544,14 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
           attendanceValue,
           result: "근무인데 출근기록 없음",
           reason: `${planStatus} 계획이나 실제 출근시간과 변경 출근시간이 모두 없음`,
-        }));
+        });
+        missingRows.push(row);
+        addMismatch(makeMismatchRow({ ...row, route, person, date, dateObject, planStatus, attendanceValue, result: row.result, reason: row.reason }));
+        hasPrimaryIssue = true;
       }
 
       if (UNEXPECTED_CLOCK_PLANS.has(planStatus) && attendanceValue.hasClockIn) {
-        unexpectedRows.push(makeIssueRow({
+        const row = makeIssueRow({
           issueType: "unexpected_clock_in",
           route,
           person,
@@ -510,32 +561,41 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
           attendanceValue,
           result: "휴무·휴가인데 출근기록 있음",
           reason: `${planStatus} 계획이나 출근기록이 있음`,
-        }));
+        });
+        unexpectedRows.push(row);
+        addMismatch(makeMismatchRow({ ...row, route, person, date, dateObject, planStatus, attendanceValue, result: row.result, reason: row.reason }));
+        hasPrimaryIssue = true;
       }
 
-      const mismatch = evaluateMismatch(planStatus, attendanceValue.actualStatus, attendance.hasActualStatusColumn);
-      if (mismatch) {
-        mismatchRows.push(makeMismatchRow({
-          route,
-          person,
-          date,
-          dateObject,
-          planStatus,
-          attendanceValue,
-          result: mismatch.result,
-          reason: mismatch.reason,
-        }));
+      if (!hasPrimaryIssue) {
+        const mismatch = evaluateMismatch(planStatus, attendanceValue, attendance.hasActualStatusColumn);
+        if (mismatch) {
+          addMismatch(makeMismatchRow({
+            route,
+            person,
+            date,
+            dateObject,
+            planStatus,
+            attendanceValue,
+            result: mismatch.result,
+            reason: mismatch.reason,
+          }));
+        }
       }
     }
 
     const basicDayoffUsed = roundHalf(basicDayoffDates.length);
     const explicitSubDayoffUsed = roundHalf(explicitSubstituteEvents.reduce((sum, event) => sum + event.days, 0));
+    const compensationLeaveUsed = roundHalf(compensationEvents.reduce((sum, event) => sum + event.days, 0));
     const baseExcess = roundHalf(Math.max(0, basicDayoffUsed - baseAllowance));
     const substituteNeeded = roundHalf(baseExcess + explicitSubDayoffUsed);
+    const compensationNeeded = compensationLeaveUsed;
     const annualLeaveUsed = roundHalf(annualLeaveEvents.reduce((sum, event) => sum + event.days, 0));
     const preview = calculatePreviewLedger({
       employeeId: person.employeeId,
       substituteEvents,
+      compensationEvents,
+      workedDates,
       targetMonth,
       ledger,
     });
@@ -546,7 +606,15 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       explicitSubDayoffUsed,
       baseExcess,
       substituteNeeded,
-      ...preview,
+      remainingSubstitute: preview.remainingSubstitute,
+      expiredSubstitute: preview.expiredSubstitute,
+      shortage: preview.shortage,
+    });
+    const compensationJudgment = buildCompensationJudgment({
+      compensationNeeded,
+      remainingCompensation: preview.remainingCompensation,
+      expiredCompensation: preview.expiredCompensation,
+      compensationShortage: preview.compensationShortage,
     });
 
     const fact = {
@@ -558,11 +626,15 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       baseAllowance,
       basicDayoffUsed,
       explicitSubDayoffUsed,
+      compensationLeaveUsed,
       baseExcess,
       substituteNeeded,
+      compensationNeeded,
       annualLeaveUsed,
       substituteEvents,
+      compensationEvents,
       annualLeaveEvents,
+      workedDates,
       duplicatePlanNote: person.duplicatePlanNote || "",
     };
     employeeFacts.push(fact);
@@ -573,26 +645,25 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       remainingSubstitute: preview.remainingSubstitute,
       expiredSubstitute: preview.expiredSubstitute,
       shortage: preview.shortage,
+      availableCompensation: preview.availableCompensation,
+      compensationApplied: preview.compensationApplied,
+      remainingCompensation: preview.remainingCompensation,
+      expiredCompensation: preview.expiredCompensation,
+      compensationShortage: preview.compensationShortage,
       currentAnnualLeave: annualLeaveUsed,
       cumulativeAnnualLeave,
       judgment,
+      compensationJudgment,
     });
   }
 
+  const mismatchRows = [...mismatchMap.values()];
   missingRows.sort(issueSort);
   unexpectedRows.sort(issueSort);
   mismatchRows.sort(issueSort);
   sortSummaries(employeeSummaries);
 
-  const diagnostics = buildDiagnostics({
-    route,
-    plan,
-    attendance,
-    matchRate,
-    planIds,
-    attendanceIds,
-    baseAllowance,
-  });
+  const diagnostics = buildDiagnostics({ route, plan, attendance, matchRate, planIds, attendanceIds, baseAllowance });
 
   return assembleResultCollections({
     missingRows,
@@ -600,6 +671,8 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
     mismatchRows,
     employeeSummaries,
     employeeFacts,
+    plan,
+    attendance,
     planPeople: planIds.size,
     attendancePeople: attendanceIds.size,
     matchedPeople: matchedIds.length,
@@ -607,6 +680,51 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
     baseAllowance,
     diagnostics,
   });
+}
+
+function appendWorkforceMatchingIssues(result, workforce, plan, route, targetMonth) {
+  const members = (workforce?.members || []).filter((row) => row.route === route);
+  const workforceById = new Map();
+  for (const member of members) {
+    const id = normalizeEmployeeId(member.employeeId || member.employee_id);
+    if (id && !workforceById.has(id)) workforceById.set(id, member);
+  }
+  const planById = new Map();
+  for (const row of plan?.rows || []) {
+    const id = normalizeEmployeeId(row.employeeId);
+    if (id && !planById.has(id)) planById.set(id, row);
+  }
+  const existing = new Set((result.mismatchRows || []).map((row) => `${normalizeEmployeeId(row.employeeId)}|${row.date}|${row.reason}`));
+  const date = `${targetMonth}-01`;
+  const dateObject = new Date(`${date}T00:00:00`);
+  const weekday = WEEKDAY_LABELS[dateObject.getDay()];
+  const add = (row) => {
+    const key = `${normalizeEmployeeId(row.employeeId)}|${row.date}|${row.reason}`;
+    if (existing.has(key)) return;
+    existing.add(key);
+    result.mismatchRows.push(row);
+  };
+
+  for (const [employeeId, member] of workforceById.entries()) {
+    if (planById.has(employeeId)) continue;
+    add({
+      route, routeLabel: ROUTE_LABELS[route], store: member.storeName || member.store_name || "",
+      employeeId, name: member.employeeName || member.employee_name || "", date, weekday,
+      planStatus: "미등록", actualStatus: "", actualIn: "", changedIn: "", clockStatus: "미기록",
+      result: "검토 필요", reason: "인력·매장매칭에는 있으나 근무계획에 사번 없음", duplicatePlanNote: "",
+    });
+  }
+  for (const [employeeId, person] of planById.entries()) {
+    if (workforceById.has(employeeId)) continue;
+    add({
+      route, routeLabel: ROUTE_LABELS[route], store: person.store || "",
+      employeeId, name: person.name || "", date, weekday,
+      planStatus: normalizePlanCode(person.plans?.[1]), actualStatus: "", actualIn: "", changedIn: "", clockStatus: "미기록",
+      result: "검토 필요", reason: "근무계획에는 있으나 인력·매장매칭에 사번 없음", duplicatePlanNote: "",
+    });
+  }
+  result.mismatchRows.sort(issueSort);
+  result.mismatchPeople = uniquePeople(result.mismatchRows);
 }
 
 function assembleResultCollections(base) {
@@ -617,46 +735,75 @@ function assembleResultCollections(base) {
     mismatchPeople: uniquePeople(base.mismatchRows),
     dayoffExcessRows: base.employeeSummaries.filter((row) => row.baseExcess > 0),
     balanceRows: [...base.employeeSummaries],
-    shortageRows: base.employeeSummaries.filter((row) => row.shortage > 0),
+    shortageRows: base.employeeSummaries.filter((row) => row.shortage > 0 || row.compensationShortage > 0),
     annualRows: base.employeeSummaries.filter((row) => row.currentAnnualLeave > 0 || row.cumulativeAnnualLeave > 0),
     dayoffExcessPeople: base.employeeSummaries.filter((row) => row.baseExcess > 0).length,
     substituteShortagePeople: base.employeeSummaries.filter((row) => row.shortage > 0).length,
+    compensationShortagePeople: base.employeeSummaries.filter((row) => row.compensationShortage > 0).length,
     annualLeavePeople: base.employeeSummaries.filter((row) => row.currentAnnualLeave > 0).length,
   };
 }
 
-function calculatePreviewLedger({ employeeId, substituteEvents, targetMonth, ledger }) {
+function calculatePreviewLedger({ employeeId, substituteEvents, compensationEvents, workedDates, targetMonth, ledger }) {
   const lots = (ledger.lotsByEmployee[employeeId] || []).map((lot) => ({
     grantId: lot.grantId,
+    grantType: lot.grantType || "substitute",
     grantMonth: lot.grantMonth,
     validFrom: lot.validFrom,
     validTo: lot.validTo,
     remaining: roundHalf(lot.remaining),
   }));
 
-  const currentGrant = ledger.currentGrant;
-  if (currentGrant && currentGrant.grant_month === targetMonth) {
+  for (const grant of ledger.currentGrants || []) {
+    if (grant.grantMonth !== targetMonth || !isCurrentGrantEligible(grant, employeeId, workedDates)) continue;
     lots.push({
-      grantId: currentGrant.id,
-      grantMonth: currentGrant.grant_month,
-      validFrom: currentGrant.valid_from,
-      validTo: currentGrant.valid_to,
-      remaining: roundHalf(currentGrant.granted_days),
+      grantId: grant.id,
+      grantType: grant.grantType || "substitute",
+      grantMonth: grant.grantMonth,
+      validFrom: grant.validFrom,
+      validTo: grant.validTo,
+      remaining: roundHalf(grant.grantedDays),
     });
   }
 
+  const substitute = consumePreviewPool(lots, "substitute", substituteEvents, targetMonth);
+  const compensation = consumePreviewPool(lots, "compensation", compensationEvents, targetMonth);
+  return {
+    availableSubstitute: substitute.available,
+    substituteApplied: substitute.applied,
+    remainingSubstitute: substitute.remaining,
+    expiredSubstitute: substitute.expired,
+    shortage: substitute.shortage,
+    availableCompensation: compensation.available,
+    compensationApplied: compensation.applied,
+    remainingCompensation: compensation.remaining,
+    expiredCompensation: compensation.expired,
+    compensationShortage: compensation.shortage,
+  };
+}
+
+function isCurrentGrantEligible(grant, employeeId, workedDates) {
+  const normalizedId = normalizeEmployeeId(employeeId);
+  if (grant.grantScope === "employee" && normalizedId !== normalizeEmployeeId(grant.employeeId)) return false;
+  if (grant.grantScope !== "employee" && (grant.excludedEmployeeIds || []).map(normalizeEmployeeId).includes(normalizedId)) return false;
+  if (grant.eligibilityMode === "worked_on_date") return (workedDates || []).includes(grant.criterionDate);
+  return true;
+}
+
+function consumePreviewPool(lots, grantType, events, targetMonth) {
+  const typedLots = lots.filter((lot) => lot.grantType === grantType);
   const monthStart = `${targetMonth}-01`;
   const monthEnd = endOfMonth(targetMonth);
   const nextMonthStart = startOfNextMonth(targetMonth);
-  const availableSubstitute = roundHalf(lots
+  const available = roundHalf(typedLots
     .filter((lot) => lot.remaining > 0 && lot.validFrom <= monthEnd && lot.validTo >= monthStart)
     .reduce((sum, lot) => sum + lot.remaining, 0));
 
-  let substituteApplied = 0;
+  let applied = 0;
   let shortage = 0;
-  for (const event of [...substituteEvents].sort((a, b) => a.date.localeCompare(b.date))) {
+  for (const event of [...(events || [])].sort((a, b) => a.date.localeCompare(b.date))) {
     let need = roundHalf(event.days);
-    const candidates = lots
+    const candidates = typedLots
       .filter((lot) => lot.remaining > 0 && lot.validFrom <= event.date && lot.validTo >= event.date)
       .sort((a, b) => a.validTo.localeCompare(b.validTo) || a.validFrom.localeCompare(b.validFrom) || a.grantMonth.localeCompare(b.grantMonth));
     for (const lot of candidates) {
@@ -664,19 +811,14 @@ function calculatePreviewLedger({ employeeId, substituteEvents, targetMonth, led
       const used = roundHalf(Math.min(need, lot.remaining));
       lot.remaining = roundHalf(lot.remaining - used);
       need = roundHalf(need - used);
-      substituteApplied = roundHalf(substituteApplied + used);
+      applied = roundHalf(applied + used);
     }
     shortage = roundHalf(shortage + Math.max(0, need));
   }
 
-  const remainingSubstitute = roundHalf(lots
-    .filter((lot) => lot.remaining > 0 && lot.validTo >= nextMonthStart)
-    .reduce((sum, lot) => sum + lot.remaining, 0));
-  const expiredSubstitute = roundHalf(lots
-    .filter((lot) => lot.remaining > 0 && lot.validTo >= monthStart && lot.validTo < nextMonthStart)
-    .reduce((sum, lot) => sum + lot.remaining, 0));
-
-  return { availableSubstitute, substituteApplied, remainingSubstitute, expiredSubstitute, shortage };
+  const remaining = roundHalf(typedLots.filter((lot) => lot.remaining > 0 && lot.validTo >= nextMonthStart).reduce((sum, lot) => sum + lot.remaining, 0));
+  const expired = roundHalf(typedLots.filter((lot) => lot.remaining > 0 && lot.validTo >= monthStart && lot.validTo < nextMonthStart).reduce((sum, lot) => sum + lot.remaining, 0));
+  return { available, applied, remaining, expired, shortage };
 }
 
 function buildAttendanceMap(rows) {
@@ -685,11 +827,11 @@ function buildAttendanceMap(rows) {
     const key = `${row.employeeId}|${row.date}`;
     const existing = map.get(key) || emptyAttendanceValue();
     map.set(key, {
-      hasClockIn: existing.hasClockIn || Boolean(row.actualIn || row.changedIn),
-      actualIn: row.actualIn || existing.actualIn,
-      changedIn: row.changedIn || existing.changedIn,
-      location: row.location || existing.location,
-      actualStatus: row.actualStatus || existing.actualStatus,
+      hasClockIn: existing.hasClockIn || Boolean(cleanClockValue(row.actualIn) || cleanClockValue(row.changedIn)),
+      actualIn: cleanClockValue(row.actualIn) || existing.actualIn,
+      changedIn: cleanClockValue(row.changedIn) || existing.changedIn,
+      location: cleanPlaceholderValue(row.location) || existing.location,
+      actualStatus: cleanPlaceholderValue(row.actualStatus) || existing.actualStatus,
     });
   }
   return map;
@@ -740,25 +882,28 @@ function makeMismatchRow({ route, person, date, dateObject, planStatus, attendan
   };
 }
 
-function evaluateMismatch(planStatus, actualStatusRaw, hasActualStatusColumn) {
+function evaluateMismatch(planStatus, attendanceValue, hasActualStatusColumn) {
   if (planStatus === "기타") {
     return { result: "검토 필요", reason: "기타는 자동 단정하지 않고 계획·실제 근태 확인이 필요함" };
   }
   if (!VALID_PLAN_CODES.has(planStatus)) {
     return { result: "검토 필요", reason: `등록되지 않은 계획 코드 ‘${planStatus}’ 확인 필요` };
   }
-  if (!hasActualStatusColumn || !text(actualStatusRaw)) return null;
 
+  const actualStatusRaw = attendanceValue.actualStatus;
+  if (["오전반차", "오후반차"].includes(planStatus)) {
+    if (!attendanceValue.hasClockIn) return null;
+    if (!hasActualStatusColumn || !text(actualStatusRaw)) return null;
+    const actualStatus = normalizeActualCode(actualStatusRaw);
+    if (["근무", "근무A", "근무B", "근무C", "오전반차", "오후반차", "반일근무"].includes(actualStatus)) return null;
+    return { result: "계획·실제 근태 불일치", reason: `계획 ${planStatus} / 실제 ${actualStatusRaw}` };
+  }
+
+  if (!hasActualStatusColumn || !text(actualStatusRaw)) return null;
   const actualStatus = normalizeActualCode(actualStatusRaw);
   if (!actualStatus) return null;
-  const planComparable = comparableCode(planStatus);
-  const actualComparable = comparableCode(actualStatus);
-  if (planComparable === actualComparable) return null;
-
-  return {
-    result: "계획·실제 근태 불일치",
-    reason: `계획 ${planStatus} / 실제 ${actualStatusRaw}`,
-  };
+  if (comparableCode(planStatus) === comparableCode(actualStatus)) return null;
+  return { result: "계획·실제 근태 불일치", reason: `계획 ${planStatus} / 실제 ${actualStatusRaw}` };
 }
 
 function choosePlanRows(planRows, attendanceById) {
@@ -779,7 +924,7 @@ function choosePlanRows(planRows, attendanceById) {
 
 function normalizePlanCode(value) {
   const status = normalizeStatus(value);
-  return status || "공백";
+  return !status || status === "546" ? "공백" : status;
 }
 
 function normalizeActualCode(value) {
@@ -787,10 +932,12 @@ function normalizeActualCode(value) {
   if (!raw || raw === "공백") return "";
   if (raw.includes("오전반차") || raw.includes("반차(오전)")) return "오전반차";
   if (raw.includes("오후반차") || raw.includes("반차(오후)")) return "오후반차";
+  // 대체휴일·보상휴가의 0.5일 표기는 일반 반일근무보다 먼저 구분해야 합니다.
   if (raw.includes("대체") && (raw.includes("0.5") || raw.includes("반일"))) return "대체휴일(0.5일)";
   if (raw.includes("대체")) return "대체휴일(1일)";
   if (raw.includes("보상") && (raw.includes("0.5") || raw.includes("반일"))) return "보상휴가(0.5일)";
   if (raw.includes("보상")) return "보상휴가(1일)";
+  if (raw.includes("0.5") || raw.includes("반일근무") || raw === "반차") return "반일근무";
   if (raw.includes("무급")) return "무급휴가";
   if (raw.includes("연차")) return "연차";
   if (raw.includes("공가")) return "공가";
@@ -804,12 +951,19 @@ function normalizeActualCode(value) {
 
 function comparableCode(code) {
   if (["공백", "근무", "근무A", "근무B", "근무C"].includes(code)) return "근무";
+  if (["오전반차", "오후반차", "반일근무"].includes(code)) return "반일근무";
   return code;
 }
 
 function substitutePlanValue(planCode) {
-  if (["대체휴일(0.5일)", "보상휴가(0.5일)"].includes(planCode)) return 0.5;
-  if (["대체휴일(1일)", "보상휴가(1일)"].includes(planCode)) return 1;
+  if (planCode === "대체휴일(0.5일)") return 0.5;
+  if (planCode === "대체휴일(1일)") return 1;
+  return 0;
+}
+
+function compensationPlanValue(planCode) {
+  if (planCode === "보상휴가(0.5일)") return 0.5;
+  if (planCode === "보상휴가(1일)") return 1;
   return 0;
 }
 
@@ -834,14 +988,25 @@ function buildDayoffJudgment({ baseAllowance, basicDayoffUsed, explicitSubDayoff
   return `정상 · 기본 휴무 ${formatDays(basicDayoffUsed)} / 기준 ${formatDays(baseAllowance)} · 잔여 ${formatDays(remainingSubstitute)}`;
 }
 
+function buildCompensationJudgment({ compensationNeeded, remainingCompensation, expiredCompensation, compensationShortage }) {
+  if (compensationShortage > 0) return `보상휴가 ${formatDays(compensationShortage)} 초과 사용`;
+  if (compensationNeeded > 0) {
+    const expired = expiredCompensation > 0 ? ` · ${formatDays(expiredCompensation)} 만료` : "";
+    return `보상휴가 ${formatDays(compensationNeeded)} 사용 · 잔여 ${formatDays(remainingCompensation)}${expired}`;
+  }
+  if (expiredCompensation > 0) return `미사용 보상휴가 ${formatDays(expiredCompensation)} 만료`;
+  return `보상휴가 사용 없음 · 잔여 ${formatDays(remainingCompensation)}`;
+}
+
 function buildDiagnostics({ route, plan, attendance, matchRate, planIds, attendanceIds, baseAllowance }) {
   const messages = [`${ROUTE_LABELS[route]} 경로 기본 휴무 기준: ${baseAllowance}일`];
   if (plan.detectedRoute && plan.detectedRoute !== route) messages.push(`계획표 내용은 ‘${ROUTE_LABELS[plan.detectedRoute]} 경로’로 감지되었습니다.`);
   if (attendance.detectedRoute && attendance.detectedRoute !== route) messages.push(`근태표 내용은 ‘${ROUTE_LABELS[attendance.detectedRoute]} 경로’로 감지되었습니다.`);
   if (matchRate < 50) messages.push(`사번 매칭률이 ${matchRate}%로 낮습니다. 서로 다른 경로 또는 월 파일인지 확인해 주세요.`);
   if (planIds.size && attendanceIds.size && matchRate >= 50) messages.push(`사번 ${[...planIds].filter((id) => attendanceIds.has(id)).length}명이 정상 매칭되었습니다.`);
-  if (!attendance.hasActualStatusColumn) messages.push("실제 근태 열을 찾지 못해 계획·실제 불일치는 ‘기타/미등록 계획 코드’만 표시합니다.");
-  if (!(state.backend.available && state.backend.configured && state.backend.loggedIn)) messages.push("관리자 로그인 전에는 이전 월 대체휴무 잔여와 누적 연차를 제외하고 계산합니다.");
+  if (!attendance.hasActualStatusColumn) messages.push("실제 근태 열이 없어도 출근시간 기준으로 근무 미출근·휴무 출근을 계획 불일치에 함께 표시합니다. 세부 근태명 비교는 실제 근태 열이 있을 때만 적용합니다.");
+  messages.push("오전반차·오후반차·0.5일 근무는 출근기록이 있으면 정상이며, 출근기록이 전혀 없을 때만 미출근으로 표시합니다.");
+  if (!(state.backend.available && state.backend.configured && state.backend.loggedIn)) messages.push("관리자 로그인 전에는 이전 월 대체휴무·보상휴가 잔여와 누적 연차를 제외하고 계산합니다.");
   return messages;
 }
 
@@ -871,6 +1036,7 @@ function refreshResultMetrics() {
   $("#mismatchCount").textContent = number(result.mismatchRows.length);
   $("#dayoffExcessPeople").textContent = number(result.dayoffExcessPeople);
   $("#substituteShortagePeople").textContent = number(result.substituteShortagePeople);
+  $("#compensationShortagePeople").textContent = number(result.compensationShortagePeople);
   $("#annualLeavePeople").textContent = number(result.annualLeavePeople);
   $("#matchRate").textContent = `${result.matchRate}%`;
   $("#missingTabCount").textContent = result.missingRows.length;
@@ -957,13 +1123,15 @@ function tableConfig(tab) {
       rows: state.result.balanceRows,
       columns: [
         ...commonSummary,
-        { label: "당월 가용", render: (row) => formatDays(row.availableSubstitute) },
-        { label: "당월 필요", render: (row) => formatDays(row.substituteNeeded) },
-        { label: "당월 적용", render: (row) => formatDays(row.substituteApplied) },
-        { label: "다음 달 이월 잔여", render: (row) => formatDays(row.remainingSubstitute) },
-        { label: "당월 만료", render: (row) => formatDays(row.expiredSubstitute) },
-        { label: "초과 사용", render: (row) => formatDays(row.shortage) },
-        { label: "판정", className: "message-cell", render: renderJudgment },
+        { label: "대체 가용", render: (row) => formatDays(row.availableSubstitute) },
+        { label: "대체 사용", render: (row) => formatDays(row.substituteNeeded) },
+        { label: "대체 잔여", render: (row) => formatDays(row.remainingSubstitute) },
+        { label: "대체 초과", render: (row) => formatDays(row.shortage) },
+        { label: "보상 가용", render: (row) => formatDays(row.availableCompensation) },
+        { label: "보상 사용", render: (row) => formatDays(row.compensationNeeded) },
+        { label: "보상 잔여", render: (row) => formatDays(row.remainingCompensation) },
+        { label: "보상 초과", render: (row) => formatDays(row.compensationShortage) },
+        { label: "판정", className: "message-cell", render: renderCombinedJudgment },
       ],
     },
     shortage: {
@@ -971,9 +1139,12 @@ function tableConfig(tab) {
       columns: [
         ...commonSummary,
         { label: "대체휴무 필요", render: (row) => formatDays(row.substituteNeeded) },
-        { label: "적용 가능", render: (row) => formatDays(row.substituteApplied) },
-        { label: "초과 사용", render: (row) => `<span class="status-pill">${formatDays(row.shortage)}</span>` },
-        { label: "판정", className: "message-cell", render: renderJudgment },
+        { label: "대체휴무 적용", render: (row) => formatDays(row.substituteApplied) },
+        { label: "대체휴무 초과", render: (row) => `<span class="${row.shortage > 0 ? "status-pill" : "neutral-pill"}">${formatDays(row.shortage)}</span>` },
+        { label: "보상휴가 필요", render: (row) => formatDays(row.compensationNeeded) },
+        { label: "보상휴가 적용", render: (row) => formatDays(row.compensationApplied) },
+        { label: "보상휴가 초과", render: (row) => `<span class="${row.compensationShortage > 0 ? "status-pill" : "neutral-pill"}">${formatDays(row.compensationShortage)}</span>` },
+        { label: "판정", className: "message-cell", render: renderCombinedJudgment },
       ],
     },
     annual: {
@@ -992,6 +1163,13 @@ function tableConfig(tab) {
 function renderJudgment(row) {
   const statusClass = row.shortage > 0 ? "status-pill" : row.baseExcess > 0 || row.substituteNeeded > 0 ? "warning-pill" : "success-pill";
   return `<span class="${statusClass}">${escapeHtml(row.judgment)}</span>`;
+}
+
+function renderCombinedJudgment(row) {
+  const hasShortage = row.shortage > 0 || row.compensationShortage > 0;
+  const hasUsage = row.substituteNeeded > 0 || row.compensationNeeded > 0 || row.baseExcess > 0;
+  const statusClass = hasShortage ? "status-pill" : hasUsage ? "warning-pill" : "success-pill";
+  return `<span class="${statusClass}">${escapeHtml(`${row.judgment} / ${row.compensationJudgment}`)}</span>`;
 }
 
 function filterRows(rows) {
@@ -1018,38 +1196,205 @@ function renderPagination(rowCount) {
   }));
 }
 
-function exportResults() {
+async function exportResults() {
   if (!state.result) return;
-  const result = state.result;
-  const workbook = XLSX.utils.book_new();
+  const button = $("#exportButton");
+  try {
+    button.disabled = true;
+    button.textContent = "최종본 양식 생성 중...";
+    const workbook = await buildFinalTemplateWorkbook(state.result);
+    XLSX.writeFile(workbook, `${state.result.targetMonth.replace("-", "년 ")}월_${state.result.routeLabel}_출퇴근현황_최종본.xlsx`, { cellStyles: true });
+    showToast("기존 최종본 양식으로 엑셀을 생성했습니다.");
+  } catch (error) {
+    console.error(error);
+    showToast(error.message || "최종본 엑셀 생성 중 오류가 발생했습니다.");
+  } finally {
+    button.disabled = false;
+    button.textContent = "최종본 양식 엑셀 저장";
+  }
+}
 
-  appendSheet(workbook, "1_근무인데 출근없음", result.missingRows, issueExportColumns());
-  appendSheet(workbook, "2_휴무휴가인데 출근", result.unexpectedRows, issueExportColumns());
-  appendSheet(workbook, "3_계획실제 불일치", result.mismatchRows, [
+function buildResultsWorkbook(result) {
+  const workbook = XLSX.utils.book_new();
+  appendCorrectedPlanSheet(workbook, result);
+  appendAttendanceSheet(workbook, result);
+  appendSheet(workbook, "3_근무인데 출근없음", result.missingRows, issueExportColumns());
+  appendSheet(workbook, "4_휴무휴가인데 출근", result.unexpectedRows, issueExportColumns());
+  appendSheet(workbook, "5_계획실제 불일치", result.mismatchRows, [
     ["경로", (row) => row.routeLabel], ["매장명", (row) => row.store], ["사번", (row) => row.employeeId], ["이름", (row) => row.name],
     ["일자", (row) => row.date], ["요일", (row) => row.weekday], ["계획 근태", (row) => row.planStatus], ["실제 근태", (row) => row.actualStatus],
     ["실제출근시간", (row) => row.actualIn], ["변경출근시간", (row) => row.changedIn], ["판정", (row) => row.result], ["사유", (row) => row.reason],
   ]);
-  appendSheet(workbook, "4_기본휴무 초과", result.dayoffExcessRows, [
+  appendSheet(workbook, "6_기본휴무 초과", result.dayoffExcessRows, [
     ...summaryIdentityExportColumns(), ["기본 휴무 기준", (row) => row.baseAllowance], ["휴무 사용", (row) => row.basicDayoffUsed],
     ["초과 휴무", (row) => row.baseExcess], ["표기 대체휴무", (row) => row.explicitSubDayoffUsed],
     ["총 대체휴무 필요", (row) => row.substituteNeeded], ["판정", (row) => row.judgment],
   ]);
-  appendSheet(workbook, "5_대체휴무 잔여", result.balanceRows, [
-    ...summaryIdentityExportColumns(), ["당월 가용", (row) => row.availableSubstitute], ["당월 필요", (row) => row.substituteNeeded],
-    ["당월 적용", (row) => row.substituteApplied], ["다음 달 이월 잔여", (row) => row.remainingSubstitute],
-    ["당월 만료", (row) => row.expiredSubstitute], ["초과 사용", (row) => row.shortage], ["판정", (row) => row.judgment],
+  appendSheet(workbook, "7_대체보상 잔여", result.balanceRows, [
+    ...summaryIdentityExportColumns(),
+    ["대체휴무 가용", (row) => row.availableSubstitute], ["대체휴무 필요", (row) => row.substituteNeeded],
+    ["대체휴무 적용", (row) => row.substituteApplied], ["대체휴무 잔여", (row) => row.remainingSubstitute],
+    ["대체휴무 만료", (row) => row.expiredSubstitute], ["대체휴무 초과", (row) => row.shortage],
+    ["보상휴가 가용", (row) => row.availableCompensation], ["보상휴가 필요", (row) => row.compensationNeeded],
+    ["보상휴가 적용", (row) => row.compensationApplied], ["보상휴가 잔여", (row) => row.remainingCompensation],
+    ["보상휴가 만료", (row) => row.expiredCompensation], ["보상휴가 초과", (row) => row.compensationShortage],
+    ["대체휴무 판정", (row) => row.judgment], ["보상휴가 판정", (row) => row.compensationJudgment],
   ]);
-  appendSheet(workbook, "6_대체휴무 초과", result.shortageRows, [
-    ...summaryIdentityExportColumns(), ["대체휴무 필요", (row) => row.substituteNeeded], ["적용 가능", (row) => row.substituteApplied],
-    ["초과 사용", (row) => row.shortage], ["판정", (row) => row.judgment],
+  appendSheet(workbook, "8_대체보상 초과", result.shortageRows, [
+    ...summaryIdentityExportColumns(), ["대체휴무 필요", (row) => row.substituteNeeded], ["대체휴무 적용", (row) => row.substituteApplied],
+    ["대체휴무 초과", (row) => row.shortage], ["보상휴가 필요", (row) => row.compensationNeeded],
+    ["보상휴가 적용", (row) => row.compensationApplied], ["보상휴가 초과", (row) => row.compensationShortage],
+    ["대체휴무 판정", (row) => row.judgment], ["보상휴가 판정", (row) => row.compensationJudgment],
   ]);
-  appendSheet(workbook, "7_연차 등록누적", result.annualRows, [
+  appendSheet(workbook, "9_연차 등록누적", result.annualRows, [
     ...summaryIdentityExportColumns(), ["당월 연차", (row) => row.currentAnnualLeave], ["누적 연차", (row) => row.cumulativeAnnualLeave],
     ["당월 등록 내역", (row) => formatAnnualEvents(row.annualLeaveEvents)],
   ]);
+  return workbook;
+}
 
-  XLSX.writeFile(workbook, `${result.routeLabel}_${result.targetMonth}_근태종합결과.xlsx`);
+function appendCorrectedPlanSheet(workbook, result) {
+  const plan = result.plan;
+  const attendanceById = groupBy(result.attendance.rows, (row) => row.employeeId);
+  const people = choosePlanRows(plan.rows, attendanceById);
+  const maxDayColumn = Math.max(...plan.dayColumns.values());
+  const maxCol = Math.max(plan.rawHeaders.length, ...people.map((person) => person.rawRow.length), maxDayColumn + 1);
+  const header = [...plan.rawHeaders];
+  while (header.length < maxCol) header.push("");
+  const values = [header];
+  const issueMap = new Map();
+  for (const issue of result.mismatchRows) {
+    addPlanExportIssue(issueMap, issue.employeeId, issue.date, issue.reason || issue.result);
+  }
+  for (const summary of result.employeeSummaries) {
+    for (const event of summary.substituteEvents || []) {
+      if (event.source === "기본 휴무 초과") {
+        addPlanExportIssue(issueMap, summary.employeeId, event.date, `기본 휴무 기준 ${formatDays(summary.baseAllowance)} 초과분`);
+      }
+    }
+    if (Number(summary.shortage || 0) > 0) {
+      for (const event of summary.substituteEvents || []) {
+        addPlanExportIssue(issueMap, summary.employeeId, event.date, `대체휴무 잔여 부족 · 총 ${formatDays(summary.shortage)} 초과 사용`);
+      }
+    }
+    if (Number(summary.compensationShortage || 0) > 0) {
+      for (const event of summary.compensationEvents || []) {
+        addPlanExportIssue(issueMap, summary.employeeId, event.date, `보상휴가 잔여 부족 · 총 ${formatDays(summary.compensationShortage)} 초과 사용`);
+      }
+    }
+  }
+
+  const redCells = [];
+  const reasonRows = [];
+  const firstDayCol = Math.min(...plan.dayColumns.values());
+  for (const person of people) {
+    const row = [...person.rawRow];
+    while (row.length < maxCol) row.push("");
+    values.push(row);
+    const personRowIndex = values.length - 1;
+    const reasons = new Array(maxCol).fill("");
+    let hasIssue = false;
+    for (const [day, col] of plan.dayColumns.entries()) {
+      const messages = issueMap.get(`${person.employeeId}|${day}`) || [];
+      if (!messages.length) continue;
+      hasIssue = true;
+      reasons[col] = [...new Set(messages)].join(" / ");
+      redCells.push({ row: personRowIndex, col });
+    }
+    if (hasIssue) {
+      const reasonLabel = person.duplicatePlanNote
+        ? `빨간색 체크 사유(확인 필요) · ${person.duplicatePlanNote}`
+        : "빨간색 체크 사유(확인 필요)";
+      reasons[0] = reasonLabel;
+      values.push(reasons);
+      reasonRows.push(values.length - 1);
+    }
+  }
+
+  const sheet = XLSX.utils.aoa_to_sheet(values);
+  sheet["!freeze"] = { xSplit: 0, ySplit: 1 };
+  sheet["!cols"] = Array.from({ length: maxCol }, (_, index) => ({ wch: index < firstDayCol ? (index === 3 ? 14 : 11) : 13 }));
+  sheet["!rows"] = values.map((_, index) => ({ hpt: reasonRows.includes(index) ? 34 : 22 }));
+  sheet["!merges"] = sheet["!merges"] || [];
+  if (firstDayCol > 1) {
+    for (const row of reasonRows) sheet["!merges"].push({ s: { r: row, c: 0 }, e: { r: row, c: firstDayCol - 1 } });
+  }
+
+  for (let col = 0; col < maxCol; col += 1) {
+    const cell = sheet[XLSX.utils.encode_cell({ r: 0, c: col })];
+    if (cell) cell.s = excelHeaderStyle();
+  }
+  for (const { row, col } of redCells) {
+    const ref = XLSX.utils.encode_cell({ r: row, c: col });
+    if (!sheet[ref]) sheet[ref] = { t: "s", v: "" };
+    sheet[ref].s = {
+      fill: { patternType: "solid", fgColor: { rgb: "FFFF0000" } },
+      font: { bold: true, color: { rgb: "FF000000" } },
+      alignment: { horizontal: "center", vertical: "center", wrapText: true },
+      border: excelThinBorder(),
+    };
+  }
+  for (const row of reasonRows) {
+    for (let col = 0; col < maxCol; col += 1) {
+      const ref = XLSX.utils.encode_cell({ r: row, c: col });
+      if (!sheet[ref]) sheet[ref] = { t: "s", v: "" };
+      sheet[ref].s = {
+        fill: { patternType: "solid", fgColor: { rgb: col < firstDayCol ? "FFF4F4F4" : "FFFFFFFF" } },
+        font: { bold: col === 0, color: { rgb: col === 0 ? "FFCC0000" : "FF333333" }, sz: 10 },
+        alignment: { horizontal: col < firstDayCol ? "center" : "left", vertical: "center", wrapText: true },
+        border: excelThinBorder(),
+      };
+    }
+  }
+  applyBodyBorders(sheet, values.length, maxCol);
+  XLSX.utils.book_append_sheet(workbook, sheet, "1_근무 계획표");
+}
+
+function addPlanExportIssue(issueMap, employeeId, date, message) {
+  const day = Number(String(date || "").slice(-2));
+  if (!employeeId || !day || !message) return;
+  const key = `${employeeId}|${day}`;
+  if (!issueMap.has(key)) issueMap.set(key, []);
+  issueMap.get(key).push(message);
+}
+
+function appendAttendanceSheet(workbook, result) {
+  const rows = [...result.attendance.rows].sort((a, b) => a.date.localeCompare(b.date) || a.employeeId.localeCompare(b.employeeId));
+  appendSheet(workbook, "2_근태 관리", rows, [
+    ["이름", (row) => row.name], ["근무일자", (row) => row.date], ["실제출근시간", (row) => row.actualIn],
+    ["변경출근시간", (row) => row.changedIn], ["사번", (row) => row.employeeId], ["출근지점", (row) => row.location],
+    ["실제 근태", (row) => row.actualStatus], ["출근 판정", (row) => (row.actualIn || row.changedIn ? "출근 기록 있음" : "출근 기록 없음")],
+  ]);
+}
+
+function excelHeaderStyle() {
+  return {
+    fill: { patternType: "solid", fgColor: { rgb: "FFD9E1F2" } },
+    font: { bold: true, color: { rgb: "FF1F1F1F" } },
+    alignment: { horizontal: "center", vertical: "center", wrapText: true },
+    border: excelThinBorder(),
+  };
+}
+
+function excelThinBorder() {
+  const side = { style: "thin", color: { rgb: "FFB7B7B7" } };
+  return { top: side, bottom: side, left: side, right: side };
+}
+
+function applyBodyBorders(sheet, rowCount, colCount) {
+  for (let row = 1; row < rowCount; row += 1) {
+    for (let col = 0; col < colCount; col += 1) {
+      const ref = XLSX.utils.encode_cell({ r: row, c: col });
+      if (!sheet[ref]) continue;
+      sheet[ref].s = sheet[ref].s || {};
+      sheet[ref].s.border = sheet[ref].s.border || excelThinBorder();
+      sheet[ref].s.alignment = sheet[ref].s.alignment || { horizontal: "center", vertical: "center", wrapText: true };
+    }
+  }
+}
+
+async function buildResultFile(result) {
+  return buildFinalTemplateFile(result);
 }
 
 function issueExportColumns() {
@@ -1070,8 +1415,13 @@ function appendSheet(workbook, sheetName, rows, columns) {
   const values = [columns.map(([header]) => header)];
   for (const row of rows) values.push(columns.map(([, getter]) => getter(row)));
   const sheet = XLSX.utils.aoa_to_sheet(values);
-  const widths = columns.map(([header]) => ({ wch: Math.max(12, Math.min(32, String(header).length * 2 + 4)) }));
-  sheet["!cols"] = widths;
+  sheet["!cols"] = columns.map(([header]) => ({ wch: Math.max(12, Math.min(34, String(header).length * 2 + 4)) }));
+  sheet["!rows"] = values.map((_, index) => ({ hpt: index === 0 ? 24 : 21 }));
+  for (let col = 0; col < columns.length; col += 1) {
+    const cell = sheet[XLSX.utils.encode_cell({ r: 0, c: col })];
+    if (cell) cell.s = excelHeaderStyle();
+  }
+  applyBodyBorders(sheet, values.length, columns.length);
   XLSX.utils.book_append_sheet(workbook, sheet, sheetName);
 }
 
@@ -1121,6 +1471,7 @@ async function saveClosure() {
 
     applyServerSummaries(data.summaries || []);
 
+    const correctedResultFile = await buildResultFile(state.result);
     const fileResults = await Promise.allSettled([
       uploadArchiveFile({
         file: state.planFile,
@@ -1142,14 +1493,24 @@ async function saveClosure() {
         closureId: data.id,
         replace: true,
       }),
+      uploadArchiveFile({
+        file: correctedResultFile,
+        route: result.route,
+        month: result.targetMonth,
+        fileKind: "result",
+        note: "기존 최종본 양식 · 매장매칭 B~J 자동 반영 · 이상 날짜 빨간색 결과본",
+        sourceType: "closure",
+        closureId: data.id,
+        replace: true,
+      }),
     ]);
-    await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles()]);
+    await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads()]);
     const action = data.replaced ? "기존 월 마감을 완전히 교체했습니다." : "새 월 마감을 저장했습니다.";
     const failedFiles = fileResults.filter((item) => item.status === "rejected");
     const fileMessage = failedFiles.length
       ? ` 월 마감은 정상 저장됐지만 원본 파일 ${failedFiles.length}개는 보관하지 못했습니다: ${failedFiles.map((item) => item.reason?.message || "파일 보관 오류").join(" / ")}`
-      : " 사용한 계획표와 근태표도 파일 보관함에 저장했습니다.";
-    showToast(`${action} ${data.affectedMonths || 0}개 월의 연차·대체휴무 누적을 다시 계산했습니다.${fileMessage}`);
+      : " 계획표·근태표·빨간색 이상 표시 결과본을 파일 보관함에 저장했습니다.";
+    showToast(`${action} ${data.affectedMonths || 0}개 월의 연차·대체휴무·보상휴가 누적을 다시 계산했습니다.${fileMessage}`);
   } catch (error) {
     showToast(error.message || "월 마감 저장 중 오류가 발생했습니다.");
   } finally {
@@ -1375,20 +1736,27 @@ function applyServerSummaries(serverRows) {
       remainingSubstitute: roundHalf(row.remaining_substitute),
       expiredSubstitute: roundHalf(row.expired_substitute),
       shortage: roundHalf(row.shortage),
+      compensationNeeded: roundHalf(row.compensation_needed),
+      availableCompensation: roundHalf(row.available_compensation),
+      compensationApplied: roundHalf(row.compensation_applied),
+      remainingCompensation: roundHalf(row.remaining_compensation),
+      expiredCompensation: roundHalf(row.expired_compensation),
+      compensationShortage: roundHalf(row.compensation_shortage),
       currentAnnualLeave: roundHalf(row.current_annual_leave),
       cumulativeAnnualLeave: roundHalf(row.cumulative_annual_leave),
       judgment: row.judgment || "",
+      compensationJudgment: row.compensation_judgment || "",
       annualLeaveEvents: fact.annualLeaveEvents || [],
       substituteEvents: fact.substituteEvents || [],
+      compensationEvents: fact.compensationEvents || [],
     };
   });
   sortSummaries(employeeSummaries);
-  const updated = assembleResultCollections({
+  state.result = assembleResultCollections({
     ...state.result,
     employeeSummaries,
     employeeFacts: state.result.employeeFacts,
   });
-  state.result = updated;
   refreshResultMetrics();
   renderActiveTable();
 }
@@ -1425,17 +1793,15 @@ function renderHistory(items) {
         <div><span>출근기록 없음</span><strong>${number(item.missing_count || 0)}</strong></div>
         <div><span>휴무·휴가 출근</span><strong>${number(item.unexpected_count || 0)}</strong></div>
         <div><span>불일치</span><strong>${number(item.mismatch_count || 0)}</strong></div>
-        <div><span>대체휴무 초과</span><strong>${number(item.substitute_shortage_people || 0)}</strong></div>
+        <div><span>대체 초과</span><strong>${number(item.substitute_shortage_people || 0)}</strong></div>
+        <div><span>보상 초과</span><strong>${number(item.compensation_shortage_people || 0)}</strong></div>
         <div><span>연차 등록자</span><strong>${number(item.annual_leave_people || 0)}</strong></div>
-      </div>
-      <div class="history-actions">
-        <button class="btn secondary small history-files" data-route="${escapeHtml(item.route)}" data-month="${escapeHtml(item.month)}" type="button">보관 파일 보기</button>
-        <button class="btn danger small history-delete" data-id="${escapeHtml(item.id)}" data-route="${escapeHtml(routeLabel)}" data-month="${escapeHtml(item.month)}" type="button">마감 삭제</button>
+        <div class="action-cell"><button class="btn secondary small history-files" data-route="${escapeHtml(item.route)}" data-month="${escapeHtml(item.month)}" type="button">파일 보기</button><button class="btn danger small history-delete" data-id="${escapeHtml(item.id)}" data-route-label="${escapeHtml(routeLabel)}" data-month="${escapeHtml(item.month)}" type="button">마감 삭제</button></div>
       </div>
     </article>`;
   }).join("");
   $$(".history-files").forEach((button) => button.addEventListener("click", () => openHistoryFiles(button.dataset.route, button.dataset.month)));
-  $$(".history-delete").forEach((button) => button.addEventListener("click", () => deleteClosure(button.dataset.id, button.dataset.route, button.dataset.month)));
+  $$(".history-delete").forEach((button) => button.addEventListener("click", () => deleteClosure(button.dataset.id, button.dataset.routeLabel, button.dataset.month)));
 }
 
 function openHistoryFiles(route, month) {
@@ -1445,7 +1811,7 @@ function openHistoryFiles(route, month) {
 }
 
 async function deleteClosure(id, routeLabel, month) {
-  if (!confirm(`${routeLabel} 경로 ${month} 월 마감을 삭제하시겠습니까? 이후 월의 연차·대체휴무 누적도 다시 계산됩니다.`)) return;
+  if (!confirm(`${routeLabel} 경로 ${month} 월 마감을 삭제하시겠습니까? 이후 월의 연차·대체휴무·보상휴가 누적도 다시 계산됩니다.`)) return;
   try {
     const response = await fetch(`/api/closures/${encodeURIComponent(id)}`, { method: "DELETE" });
     const data = await readJsonResponse(response);
@@ -1465,20 +1831,35 @@ async function saveGrant(event) {
   }
 
   const payload = {
+    id: $("#grantEditingId").value,
     route: $("#grantRoute").value,
+    grantType: $("#grantType").value,
+    grantScope: $("#grantScope").value,
     grantMonth: $("#grantMonth").value,
     grantedDays: Number($("#grantDays").value),
     validFrom: $("#grantValidFrom").value,
     validTo: $("#grantValidTo").value,
+    eligibilityMode: $("#grantScope").value === "route" ? $("#grantEligibility").value : "all",
+    criterionDate: $("#grantCriterionDate").value,
+    employeeId: normalizeEmployeeId($("#grantEmployeeId").value),
+    excludedEmployeeIds: parseEmployeeIdInput($("#grantExcludedIds").value),
     reason: text($("#grantReason").value),
     note: text($("#grantNote").value),
   };
   if (!payload.grantMonth || !(payload.grantedDays > 0) || !payload.validFrom || !payload.validTo) {
-    showToast("발생 월·공통 부여 일수·사용기간을 확인해 주세요.");
+    showToast("발생 월·부여 일수·사용기간을 확인해 주세요.");
     return;
   }
   if (payload.validFrom > payload.validTo) {
     showToast("사용 종료일은 시작일보다 빠를 수 없습니다.");
+    return;
+  }
+  if (payload.grantScope === "employee" && !payload.employeeId) {
+    showToast("사번별 개별 부여는 대상 사번을 입력해 주세요.");
+    return;
+  }
+  if (payload.eligibilityMode === "worked_on_date" && !payload.criterionDate) {
+    showToast("실제 출근 기준일을 입력해 주세요.");
     return;
   }
 
@@ -1497,22 +1878,22 @@ async function saveGrant(event) {
       return;
     }
     const data = await readJsonResponse(response);
-    if (!response.ok) throw new Error(data.error || "공통 대체휴무 저장 실패");
+    if (!response.ok) throw new Error(data.error || "휴가 부여 저장 실패");
     resetGrantForm();
     await Promise.all([loadGrants(), loadHistory()]);
-    showToast(`${data.replaced ? "기존 경로·월 설정을 교체" : "공통 부여 설정을 저장"}하고 ${data.affectedMonths || 0}개 월을 다시 계산했습니다.`);
+    showToast(`${data.replaced ? "기존 부여 설정을 수정" : "새 부여 설정을 저장"}하고 ${data.affectedMonths || 0}개 월의 대체휴무·보상휴가를 다시 계산했습니다.`);
   } catch (error) {
     showToast(error.message);
   } finally {
     button.disabled = false;
-    button.textContent = "경로 공통 부여 저장";
+    button.textContent = "휴가 부여 저장";
   }
 }
 
 async function loadGrants() {
   if (!(state.backend.available && state.backend.configured && state.backend.loggedIn)) {
     state.grants = [];
-    $("#grantTableBody").innerHTML = `<tr><td colspan="11" class="empty-cell">관리자 로그인 후 조회할 수 있습니다.</td></tr>`;
+    $("#grantTableBody").innerHTML = `<tr><td colspan="14" class="empty-cell">관리자 로그인 후 조회할 수 있습니다.</td></tr>`;
     renderGrantSummary([]);
     return;
   }
@@ -1527,13 +1908,13 @@ async function loadGrants() {
       return;
     }
     const data = await readJsonResponse(response);
-    if (!response.ok) throw new Error(data.error || "공통 대체휴무 조회 실패");
+    if (!response.ok) throw new Error(data.error || "휴가 부여 내역 조회 실패");
     state.grants = data.items || [];
     renderGrants(state.grants);
   } catch (error) {
     state.grants = [];
     renderGrants([]);
-    showToast(error.message || "공통 대체휴무 조회 실패");
+    showToast(error.message || "휴가 부여 내역 조회 실패");
   }
 }
 
@@ -1542,34 +1923,42 @@ function renderGrants(items) {
   $("#grantTableBody").innerHTML = items.length ? items.map((item) => {
     const status = grantStatus(item);
     const statusClass = status === "사용 가능" ? "success-pill" : status === "만료" ? "status-pill" : "neutral-pill";
+    const typeLabel = item.grant_type === "compensation" ? "보상휴가" : "대체휴무";
+    const scopeLabel = item.grant_scope === "employee" ? `사번별 · ${item.employee_id || "-"}` : "경로 일괄";
+    const criterion = item.eligibility_mode === "worked_on_date"
+      ? `${item.criterion_date} 실제 출근자`
+      : item.grant_scope === "employee" ? "지정 사번" : "월 마감 대상 전원";
     return `<tr>
       <td>${escapeHtml(ROUTE_LABELS[item.route] || item.route)}</td>
+      <td><span class="${item.grant_type === "compensation" ? "warning-pill" : "plan-pill"}">${escapeHtml(typeLabel)}</span></td>
+      <td>${escapeHtml(scopeLabel)}</td>
       <td><strong>${escapeHtml(item.grant_month)}</strong></td>
       <td>${formatDays(item.granted_days)}</td>
       <td>${number(item.eligible_people || 0)}명</td>
       <td>${formatDays(item.assigned_days)}</td>
       <td>${formatDays(item.used_days)}</td>
       <td>${formatDays(item.unused_days)}</td>
+      <td class="message-cell">${escapeHtml(criterion)}<br><span class="${statusClass}">${escapeHtml(status)}</span></td>
+      <td>${number(item.excluded_count || 0)}명</td>
       <td>${escapeHtml(item.valid_from)} ~ ${escapeHtml(item.valid_to)}</td>
-      <td><span class="${statusClass}">${escapeHtml(status)}</span></td>
       <td class="message-cell">${escapeHtml([item.reason, item.note].filter(Boolean).join(" · "))}</td>
       <td class="action-cell"><button class="btn secondary small grant-edit" data-id="${escapeHtml(item.id)}" type="button">수정</button><button class="btn danger small grant-delete" data-id="${escapeHtml(item.id)}" type="button">삭제</button></td>
     </tr>`;
-  }).join("") : `<tr><td colspan="11" class="empty-cell">등록된 경로 공통 대체휴무가 없습니다.</td></tr>`;
+  }).join("") : `<tr><td colspan="14" class="empty-cell">등록된 대체휴무·보상휴가 부여 내역이 없습니다.</td></tr>`;
 
   $$(".grant-edit").forEach((button) => button.addEventListener("click", () => editGrant(button.dataset.id)));
   $$(".grant-delete").forEach((button) => button.addEventListener("click", () => deleteGrant(button.dataset.id)));
 }
 
 function renderGrantSummary(items) {
-  const eligiblePeople = items.reduce((sum, item) => sum + Number(item.eligible_people || 0), 0);
-  const assigned = items.reduce((sum, item) => sum + Number(item.assigned_days || 0), 0);
+  const substituteAssigned = items.filter((item) => item.grant_type !== "compensation").reduce((sum, item) => sum + Number(item.assigned_days || 0), 0);
+  const compensationAssigned = items.filter((item) => item.grant_type === "compensation").reduce((sum, item) => sum + Number(item.assigned_days || 0), 0);
   const used = items.reduce((sum, item) => sum + Number(item.used_days || 0), 0);
   const unused = items.reduce((sum, item) => sum + Number(item.unused_days || 0), 0);
   $("#grantSummary").innerHTML = [
-    ["공통 설정", `${items.length}건`],
-    ["적용 인원 합계", `${number(eligiblePeople)}명`],
-    ["총 부여", formatDays(assigned)],
+    ["부여 설정", `${items.length}건`],
+    ["대체휴무 총 부여", formatDays(substituteAssigned)],
+    ["보상휴가 총 부여", formatDays(compensationAssigned)],
     ["총 사용", formatDays(used)],
     ["총 미사용", formatDays(unused)],
   ].map(([label, value]) => `<div class="summary-chip"><span>${label}</span><strong>${value}</strong></div>`).join("");
@@ -1580,37 +1969,64 @@ function editGrant(id) {
   if (!item) return;
   $("#grantEditingId").value = item.id;
   $("#grantRoute").value = item.route;
+  $("#grantType").value = item.grant_type || "substitute";
+  $("#grantScope").value = item.grant_scope || "route";
   $("#grantMonth").value = item.grant_month;
   $("#grantDays").value = Number(item.granted_days || 0);
+  $("#grantEmployeeId").value = item.employee_id || "";
   $("#grantValidFrom").value = item.valid_from;
   $("#grantValidTo").value = item.valid_to;
+  $("#grantEligibility").value = item.eligibility_mode || "all";
+  $("#grantCriterionDate").value = item.criterion_date || "";
+  $("#grantExcludedIds").value = parseStoredEmployeeIds(item.excluded_employee_ids_json).join("\n");
   $("#grantReason").value = item.reason || "";
   $("#grantNote").value = item.note || "";
-  $("#grantSubmitButton").textContent = "경로·월 공통 설정 교체";
+  $("#grantSubmitButton").textContent = "부여 설정 수정 저장";
   $("#grantCancelEdit").classList.remove("hidden");
+  syncGrantFormVisibility();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
 function resetGrantForm() {
   $("#grantEditingId").value = "";
+  $("#grantType").value = "substitute";
+  $("#grantScope").value = "route";
   $("#grantDays").value = "1";
+  $("#grantEmployeeId").value = "";
+  $("#grantEligibility").value = "all";
+  $("#grantCriterionDate").value = "";
+  $("#grantExcludedIds").value = "";
   $("#grantReason").value = "";
   $("#grantNote").value = "";
-  $("#grantSubmitButton").textContent = "경로 공통 부여 저장";
+  $("#grantSubmitButton").textContent = "휴가 부여 저장";
   $("#grantCancelEdit").classList.add("hidden");
+  syncGrantFormVisibility();
 }
 
 async function deleteGrant(id) {
-  if (!confirm("이 경로 공통 대체휴무 설정을 삭제하시겠습니까? 관련 월의 잔여·초과·이월이 모두 다시 계산됩니다.")) return;
+  if (!confirm("이 대체휴무·보상휴가 부여 설정을 삭제하시겠습니까? 관련 월의 잔여·초과·이월이 다시 계산됩니다.")) return;
   try {
     const response = await fetch(`/api/substitute-grants/${encodeURIComponent(id)}`, { method: "DELETE" });
     const data = await readJsonResponse(response);
     if (!response.ok) throw new Error(data.error || "삭제 실패");
     resetGrantForm();
     await Promise.all([loadGrants(), loadHistory()]);
-    showToast(`공통 부여 설정을 삭제하고 ${data.affectedMonths || 0}개 월을 다시 계산했습니다.`);
+    showToast(`부여 설정을 삭제하고 ${data.affectedMonths || 0}개 월을 다시 계산했습니다.`);
   } catch (error) {
     showToast(error.message);
+  }
+}
+
+function parseEmployeeIdInput(value) {
+  return [...new Set(String(value || "").split(/[\s,;]+/).map(normalizeEmployeeId).filter(Boolean))];
+}
+
+function parseStoredEmployeeIds(value) {
+  try {
+    const parsed = JSON.parse(value || "[]");
+    return Array.isArray(parsed) ? parsed.map(normalizeEmployeeId).filter(Boolean) : [];
+  } catch {
+    return [];
   }
 }
 
@@ -1621,6 +2037,310 @@ function grantStatus(item) {
   if (item.valid_from > today) return "사용 전";
   if (Number(item.unused_days || 0) <= 0) return "소진";
   return "사용 가능";
+}
+
+
+async function previewWorkforceFile() {
+  const file = $("#workforceFile")?.files?.[0];
+  const reference = $("#portalReferenceFile")?.files?.[0];
+  const textNode = $("#workforcePreview");
+  if (!textNode) return;
+  if (!file) {
+    textNode.textContent = "인력 및 매장매칭 엑셀을 선택해 주세요.";
+    return;
+  }
+  textNode.textContent = `선택 파일: ${file.name}${reference ? ` · 포탈사번 참고: ${reference.name}` : ""}`;
+}
+
+async function saveWorkforceFile(event) {
+  event.preventDefault();
+  if (!(state.backend.available && state.backend.configured && state.backend.loggedIn)) {
+    openLogin();
+    return;
+  }
+  const file = $("#workforceFile").files?.[0];
+  const month = $("#workforceMonth").value;
+  const referenceFile = $("#portalReferenceFile").files?.[0] || null;
+  if (!file || !month) {
+    showToast("적용 월과 인력 및 매장매칭 엑셀을 선택해 주세요.");
+    return;
+  }
+
+  const button = $("#workforceSubmitButton");
+  try {
+    button.disabled = true;
+    button.textContent = "파일 분석·저장 중...";
+    const sheets = await fileToWorkbookSheets(file);
+    const members = parseWorkforceWorkbook(sheets);
+    if (!members.length) throw new Error("인력DB와 매장매칭 시트에서 유효한 사번을 찾지 못했습니다.");
+    let portalMappings = [];
+    if (referenceFile) {
+      const referenceSheets = await fileToWorkbookSheets(referenceFile);
+      portalMappings = parsePortalMappings(referenceSheets);
+    }
+
+    const form = new FormData();
+    form.append("file", file, file.name);
+    form.append("month", month);
+    form.append("members", JSON.stringify(members));
+    form.append("portalMappings", JSON.stringify(portalMappings));
+    const response = await fetch("/api/workforce", { method: "POST", body: form });
+    if (response.status === 401) {
+      await checkBackend();
+      openLogin();
+      return;
+    }
+    const data = await readJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "인력·매장매칭 저장 실패");
+    $("#workforceFile").value = "";
+    $("#portalReferenceFile").value = "";
+    $("#workforcePreview").textContent = "저장할 새 파일을 선택해 주세요.";
+    state.workforce = null;
+    await loadWorkforceUploads();
+    showToast(`${month} 인력·매장매칭을 ${data.replaced ? "교체" : "저장"}했습니다. 전자랜드 ${number(data.electrolandCount)}명 · 홈플러스 ${number(data.homeplusCount)}명 · 포탈사번 ${number(data.portalCount)}명`);
+  } catch (error) {
+    console.error(error);
+    showToast(error.message || "인력·매장매칭 저장 중 오류가 발생했습니다.");
+  } finally {
+    button.disabled = false;
+    button.textContent = "월별 인력·매장매칭 저장";
+  }
+}
+
+function parseWorkforceWorkbook(sheets) {
+  const normalizedSheets = normalizeWorkbookInput(sheets);
+  const matchingSheet = normalizedSheets.find((sheet) => normalizeHeader(sheet.sheetName).includes("매장매칭"));
+  if (!matchingSheet) throw new Error("‘매장매칭’ 시트를 찾지 못했습니다.");
+  const storeMap = parseStoreMatchingSheet(matchingSheet);
+  const output = [];
+  const definitions = [
+    { route: "electroland", keywords: ["랜드인력DB", "전자랜드인력DB"] },
+    { route: "homeplus", keywords: ["홈플인력DB", "홈플러스인력DB"] },
+  ];
+  for (const definition of definitions) {
+    const sheet = normalizedSheets.find((candidate) => definition.keywords.some((keyword) => normalizeHeader(candidate.sheetName).includes(keyword)));
+    if (!sheet) continue;
+    output.push(...parseWorkforcePeopleSheet(sheet, definition.route, storeMap));
+  }
+  if (!output.length) throw new Error("‘랜드 인력DB’ 또는 ‘홈플 인력DB’에서 유효한 사번을 찾지 못했습니다.");
+  return output;
+}
+
+function parseStoreMatchingSheet(sheet) {
+  const matrix = sheet.matrix || [];
+  const headerIndex = findFlexibleHeaderRow(matrix, (headers) => (
+    findHeaderIndex(headers, ["매장코드"]) >= 0
+    && findHeaderIndex(headers, ["경로"]) >= 0
+    && findHeaderIndex(headers, ["지역장"]) >= 0
+  ));
+  if (headerIndex < 0) throw new Error("매장매칭 시트의 매장코드·경로·지역장 머리글을 찾지 못했습니다.");
+  const headers = (matrix[headerIndex] || []).map(normalizeHeader);
+  const columns = {
+    storeCode: findHeaderIndex(headers, ["매장코드"]),
+    region2: findHeaderIndex(headers, ["지역", "지역2"]),
+    route: findHeaderIndex(headers, ["경로"]),
+    storeName: findHeaderIndex(headers, ["매장", "매장명"]),
+    regionalManager: findHeaderIndex(headers, ["지역장"]),
+    manager: findHeaderIndex(headers, ["매니저"]),
+    closedDate: findHeaderIndex(headers, ["폐점날짜", "폐점일"]),
+    note: findHeaderIndex(headers, ["비고"]),
+  };
+  const map = new Map();
+  for (const row of matrix.slice(headerIndex + 1)) {
+    const code = normalizeStoreCode(row[columns.storeCode]);
+    if (!code) continue;
+    map.set(code, {
+      route: routeValue(row[columns.route]),
+      region2: text(row[columns.region2]),
+      storeName: text(row[columns.storeName]),
+      regionalManager: text(row[columns.regionalManager]),
+      manager: text(row[columns.manager]),
+      closedDate: columns.closedDate >= 0 ? parseDateCell(row[columns.closedDate]) : "",
+      note: columns.note >= 0 ? text(row[columns.note]) : "",
+    });
+  }
+  return map;
+}
+
+function parseWorkforcePeopleSheet(sheet, route, storeMap) {
+  const matrix = sheet.matrix || [];
+  const headerIndex = findFlexibleHeaderRow(matrix, (headers) => (
+    findHeaderIndex(headers, ["사번", "사원번호"]) >= 0
+    && findHeaderIndex(headers, ["성명", "이름"]) >= 0
+    && findHeaderIndex(headers, ["매장코드"]) >= 0
+  ));
+  if (headerIndex < 0) throw new Error(`${sheet.sheetName}의 사번·성명·매장코드 머리글을 찾지 못했습니다.`);
+  const headers = (matrix[headerIndex] || []).map(normalizeHeader);
+  const columns = {
+    manager: findHeaderIndex(headers, ["매니저"]),
+    region1: findHeaderIndex(headers, ["지역", "지역1"]),
+    storeCode: findHeaderIndex(headers, ["매장코드"]),
+    storeName: findHeaderIndex(headers, ["매장명", "매장"]),
+    employeeId: findHeaderIndex(headers, ["사번", "사원번호"]),
+    employeeName: findHeaderIndex(headers, ["성명", "이름"]),
+    hireDate: findHeaderIndex(headers, ["제니엘입사일", "입사일"]),
+    groupHireDate: findHeaderIndex(headers, ["그룹입사일"]),
+    portalId: findHeaderIndex(headers, ["포탈사번", "포털사번"]),
+    note: findHeaderIndex(headers, ["비고", "휴퇴사일", "휴/퇴사일"]),
+  };
+  const rows = [];
+  for (const row of matrix.slice(headerIndex + 1)) {
+    const employeeId = normalizeEmployeeId(row[columns.employeeId]);
+    const employeeName = text(row[columns.employeeName]);
+    if (!looksLikeEmployeeId(employeeId) || !employeeName) continue;
+    const storeCode = normalizeStoreCode(row[columns.storeCode]);
+    const matched = storeMap.get(storeCode) || {};
+    const matchedRoute = matched.route || route;
+    if (matchedRoute && matchedRoute !== route) continue;
+    const notes = [columns.note >= 0 ? text(row[columns.note]) : "", matched.closedDate ? `${matched.closedDate} 폐점` : "", matched.note || ""].filter(Boolean);
+    rows.push({
+      route,
+      regionalManager: matched.regionalManager || "",
+      manager: matched.manager || (columns.manager >= 0 ? text(row[columns.manager]) : ""),
+      region1: columns.region1 >= 0 ? text(row[columns.region1]) : "",
+      region2: matched.region2 || "",
+      storeCode,
+      storeName: text(row[columns.storeName]) || matched.storeName || "",
+      portalId: columns.portalId >= 0 ? text(row[columns.portalId]) : "",
+      employeeId,
+      employeeName,
+      hireDate: columns.hireDate >= 0 ? parseDateCell(row[columns.hireDate]) : "",
+      groupHireDate: columns.groupHireDate >= 0 ? parseDateCell(row[columns.groupHireDate]) : "",
+      note: [...new Set(notes)].join(" · "),
+    });
+  }
+  return rows;
+}
+
+function parsePortalMappings(sheets) {
+  const mappings = [];
+  for (const sheet of normalizeWorkbookInput(sheets)) {
+    const matrix = sheet.matrix || [];
+    const headerIndex = findFlexibleHeaderRow(matrix, (headers) => (
+      findHeaderIndex(headers, ["포탈사번", "포털사번"]) >= 0
+      && findHeaderIndex(headers, ["사번", "사원번호"]) >= 0
+    ));
+    if (headerIndex < 0) continue;
+    const headers = (matrix[headerIndex] || []).map(normalizeHeader);
+    const portalCol = findHeaderIndex(headers, ["포탈사번", "포털사번"]);
+    const employeeCol = findHeaderIndex(headers, ["사번", "사원번호"]);
+    const nameCol = findHeaderIndex(headers, ["성명", "이름"]);
+    for (const row of matrix.slice(headerIndex + 1)) {
+      const employeeId = normalizeEmployeeId(row[employeeCol]);
+      const portalId = text(row[portalCol]);
+      if (!looksLikeEmployeeId(employeeId) || !portalId) continue;
+      mappings.push({ employeeId, portalId, employeeName: nameCol >= 0 ? text(row[nameCol]) : "" });
+    }
+  }
+  return [...new Map(mappings.map((item) => [item.employeeId, item])).values()];
+}
+
+function normalizeStoreCode(value) {
+  const raw = text(value).replace(/\.0+$/, "").replace(/\s+/g, "");
+  return raw;
+}
+
+function routeValue(value) {
+  const raw = normalizeHeader(value);
+  if (raw.includes("홈플")) return "homeplus";
+  if (raw.includes("전자랜드") || raw === "랜드") return "electroland";
+  return "";
+}
+
+async function loadWorkforceMonth(month, route) {
+  if (state.workforce?.month === month && state.workforce?.route === route) return state.workforce;
+  const response = await fetch(`/api/workforce?month=${encodeURIComponent(month)}&route=${encodeURIComponent(route)}`, { cache: "no-store" });
+  if (response.status === 401) {
+    await checkBackend();
+    openLogin();
+    throw new Error("관리자 로그인이 필요합니다.");
+  }
+  const data = await readJsonResponse(response);
+  if (!response.ok) throw new Error(data.error || "인력·매장매칭 조회 실패");
+  state.workforce = { ...data, month, route };
+  return state.workforce;
+}
+
+async function loadWorkforceUploads() {
+  if (!(state.backend.available && state.backend.configured && state.backend.loggedIn)) {
+    state.workforceUploads = [];
+    renderWorkforceUploads([]);
+    updateWorkforceStatus();
+    return;
+  }
+  try {
+    const response = await fetch("/api/workforce", { cache: "no-store" });
+    if (response.status === 401) {
+      await checkBackend();
+      renderWorkforceUploads([]);
+      return;
+    }
+    const data = await readJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "인력·매장매칭 목록 조회 실패");
+    state.workforceUploads = data.items || [];
+    renderWorkforceUploads(state.workforceUploads);
+    updateWorkforceStatus();
+  } catch (error) {
+    renderWorkforceUploads([]);
+    showToast(error.message || "인력·매장매칭 목록 조회 실패");
+  }
+}
+
+function renderWorkforceUploads(items) {
+  const body = $("#workforceTableBody");
+  if (!body) return;
+  body.innerHTML = items.length ? items.map((item) => `<tr>
+    <td><strong>${escapeHtml(item.month)}</strong></td>
+    <td>${escapeHtml(item.file_name || "-")}</td>
+    <td>${number(item.electroland_count || 0)}명</td>
+    <td>${number(item.homeplus_count || 0)}명</td>
+    <td>${number(item.portal_count || 0)}명</td>
+    <td>${formatFileSize(item.size_bytes || 0)}</td>
+    <td>${escapeHtml(formatStoredDate(item.updated_at || item.created_at))}</td>
+    <td class="action-cell"><a class="btn secondary small" href="/api/workforce/${encodeURIComponent(item.month)}" download>원본 다운로드</a><button class="btn danger small workforce-delete" data-month="${escapeHtml(item.month)}" type="button">삭제</button></td>
+  </tr>`).join("") : `<tr><td colspan="8" class="empty-cell">등록된 월별 인력·매장매칭 파일이 없습니다.</td></tr>`;
+  $$(".workforce-delete").forEach((button) => button.addEventListener("click", () => deleteWorkforceMonth(button.dataset.month)));
+  const summary = $("#workforceSummary");
+  if (summary) {
+    const latest = items[0];
+    summary.innerHTML = [
+      ["등록 월", `${items.length}개`],
+      ["최근 적용 월", latest?.month || "-"],
+      ["전자랜드 인원", latest ? `${number(latest.electroland_count || 0)}명` : "-"],
+      ["홈플러스 인원", latest ? `${number(latest.homeplus_count || 0)}명` : "-"],
+      ["포탈사번 보유", latest ? `${number(latest.portal_count || 0)}명` : "-"],
+    ].map(([label, value]) => `<div class="summary-chip"><span>${label}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+  }
+}
+
+async function deleteWorkforceMonth(month) {
+  if (!confirm(`${month} 인력·매장매칭 파일과 직원 매칭 정보를 삭제하시겠습니까?`)) return;
+  try {
+    const response = await fetch(`/api/workforce/${encodeURIComponent(month)}`, { method: "DELETE" });
+    const data = await readJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "삭제 실패");
+    state.workforce = null;
+    await loadWorkforceUploads();
+    showToast(`${month} 인력·매장매칭을 삭제했습니다.`);
+  } catch (error) {
+    showToast(error.message || "인력·매장매칭 삭제 실패");
+  }
+}
+
+function updateWorkforceStatus() {
+  const target = $("#workforceStatus");
+  if (!target) return;
+  const month = $("#targetMonth")?.value;
+  const route = selectedRoute();
+  const item = state.workforceUploads.find((row) => row.month === month);
+  if (!item) {
+    target.className = "alert warning matching-status";
+    target.textContent = `${month || "대상 월"} 인력·매장매칭이 등록되지 않았습니다. 시스템 수정에서 먼저 저장해 주세요.`;
+    return;
+  }
+  const count = route === "homeplus" ? item.homeplus_count : item.electroland_count;
+  target.className = "alert success matching-status";
+  target.textContent = `${month} ${ROUTE_LABELS[route]} 인력·매장매칭 ${number(count || 0)}명 등록됨 · 상담사근태 B~J 자동 반영`;
 }
 
 async function checkBackend() {
@@ -1687,7 +2407,7 @@ async function login(event) {
     if (!response.ok) throw new Error(data.error || "로그인 실패");
     $("#loginDialog").close();
     await checkBackend();
-    await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles()]);
+    await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads()]);
     showToast("관리자 로그인되었습니다.");
   } catch (error) {
     $("#loginError").textContent = error.message;
@@ -1700,7 +2420,10 @@ async function logout() {
   renderHistory([]);
   renderGrants([]);
   state.archiveFiles = [];
+  state.workforceUploads = [];
+  state.workforce = null;
   renderArchiveFiles([]);
+  renderWorkforceUploads([]);
   showToast("로그아웃되었습니다.");
 }
 
@@ -1711,6 +2434,7 @@ function switchView(view) {
   if (view === "history") loadHistory();
   if (view === "substitute") loadGrants();
   if (view === "files") loadArchiveFiles();
+  if (view === "system") loadWorkforceUploads();
 }
 
 function resetAll() {
@@ -1726,6 +2450,7 @@ function resetAll() {
   syncRouteRuleHelp();
   $("#resultArea").classList.add("hidden");
   $("#emptyState").classList.remove("hidden");
+  updateWorkforceStatus();
 }
 
 function selectedRoute() {
@@ -1803,6 +2528,16 @@ function text(value) {
   return value == null ? "" : String(value).trim();
 }
 
+function cleanClockValue(value) {
+  const raw = text(value);
+  return !raw || raw === "546" || raw === "0" ? "" : raw;
+}
+
+function cleanPlaceholderValue(value) {
+  const raw = text(value);
+  return raw === "546" ? "" : raw;
+}
+
 function parseDateCell(value) {
   if (value instanceof Date && !Number.isNaN(value.getTime())) return toISODate(value);
   if (typeof value === "number" && Number.isFinite(value) && window.XLSX?.SSF?.parse_date_code) {
@@ -1861,7 +2596,10 @@ function uniquePeople(rows) {
 }
 
 function sortSummaries(rows) {
-  rows.sort((a, b) => b.shortage - a.shortage || b.baseExcess - a.baseExcess || a.store.localeCompare(b.store) || a.name.localeCompare(b.name));
+  rows.sort((a, b) => Math.max(b.shortage || 0, b.compensationShortage || 0) - Math.max(a.shortage || 0, a.compensationShortage || 0)
+    || (b.baseExcess || 0) - (a.baseExcess || 0)
+    || a.store.localeCompare(b.store)
+    || a.name.localeCompare(b.name));
 }
 
 function issueSort(a, b) {

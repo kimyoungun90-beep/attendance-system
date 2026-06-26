@@ -14,7 +14,8 @@ export async function onRequestGet(context) {
            c.plan_people, c.attendance_people, c.matched_people, c.match_rate,
            c.missing_count, c.missing_people, c.unexpected_count, c.unexpected_people,
            c.mismatch_count, c.mismatch_people, c.dayoff_excess_people,
-           c.substitute_shortage_people, c.annual_leave_people, c.created_at
+           c.substitute_shortage_people, c.compensation_shortage_people,
+           c.annual_leave_people, c.created_at
     FROM attendance_closures c
     WHERE EXISTS (
       SELECT 1 FROM attendance_monthly_employee_facts f WHERE f.closure_id = c.id
@@ -67,12 +68,14 @@ export async function onRequestPost(context) {
     uniquePeople(mismatchRows),
     employeeFacts.filter((row) => Number(row.baseExcess || 0) > 0).length,
     0,
+    0,
     employeeFacts.filter((row) => Number(row.annualLeaveUsed || 0) > 0).length,
   ];
 
   const initialStatements = [];
   if (replaced) {
     initialStatements.push(
+      context.env.DB.prepare("DELETE FROM attendance_leave_allocations_v5 WHERE closure_id = ?").bind(closureId),
       context.env.DB.prepare("DELETE FROM route_substitute_allocations WHERE closure_id = ?").bind(closureId),
       context.env.DB.prepare("DELETE FROM attendance_monthly_summaries_v3 WHERE closure_id = ?").bind(closureId),
       context.env.DB.prepare("DELETE FROM attendance_monthly_employee_facts WHERE closure_id = ?").bind(closureId),
@@ -85,7 +88,8 @@ export async function onRequestPost(context) {
             plan_people = ?, attendance_people = ?, matched_people = ?, match_rate = ?,
             missing_count = ?, missing_people = ?, unexpected_count = ?, unexpected_people = ?,
             mismatch_count = ?, mismatch_people = ?, dayoff_excess_people = ?,
-            substitute_shortage_people = ?, annual_leave_people = ?, created_at = datetime('now')
+            substitute_shortage_people = ?, compensation_shortage_people = ?, annual_leave_people = ?,
+            created_at = datetime('now')
         WHERE id = ?
       `).bind(...values, closureId)
     );
@@ -96,11 +100,10 @@ export async function onRequestPost(context) {
        plan_people, attendance_people, matched_people, match_rate,
        missing_count, missing_people, unexpected_count, unexpected_people,
        mismatch_count, mismatch_people, dayoff_excess_people,
-       substitute_shortage_people, annual_leave_people)
-      VALUES (?, ?, ?, ?, 'auto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       substitute_shortage_people, compensation_shortage_people, annual_leave_people)
+      VALUES (?, ?, ?, ?, 'auto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(closureId, route, month, ...values));
   }
-
 
   try {
     await context.env.DB.batch(initialStatements);
@@ -129,22 +132,20 @@ export async function onRequestPost(context) {
       row.duplicatePlanNote || ""
     ));
 
-    const missingStatements = issueRows
-      .filter((row) => row.issueType === "missing_clock_in")
-      .map((row) => context.env.DB.prepare(`
-        INSERT OR IGNORE INTO attendance_missing_items
-        (closure_id, company, store, employee_id, employee_name, missing_date, weekday,
-         plan_status, actual_in, changed_in, clock_status, result, reason, duplicate_plan_note)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).bind(
-        closureId, route, row.store || "", row.employeeId || "", row.name || "",
-        row.date || "", row.weekday || "", row.planStatus || "", row.actualIn || "",
-        row.changedIn || "", row.clockStatus || "", row.result || "", row.reason || "",
-        row.duplicatePlanNote || ""
-      ));
+    const missingStatements = missingRows.map((row) => context.env.DB.prepare(`
+      INSERT OR IGNORE INTO attendance_missing_items
+      (closure_id, company, store, employee_id, employee_name, missing_date, weekday,
+       plan_status, actual_in, changed_in, clock_status, result, reason, duplicate_plan_note)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      closureId, route, row.store || "", row.employeeId || "", row.name || "",
+      row.date || "", row.weekday || "", row.planStatus || "", row.actualIn || "",
+      row.changedIn || "", row.clockStatus || "", row.result || "", row.reason || "",
+      row.duplicatePlanNote || ""
+    ));
 
     const mismatchStatements = mismatchRows.map((row) => context.env.DB.prepare(`
-      INSERT OR IGNORE INTO attendance_mismatch_items
+      INSERT OR REPLACE INTO attendance_mismatch_items
       (closure_id, route, store, employee_id, employee_name, issue_date, weekday,
        plan_status, actual_status, actual_in, changed_in, result, reason, duplicate_plan_note)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -159,8 +160,10 @@ export async function onRequestPost(context) {
       INSERT INTO attendance_monthly_employee_facts
       (closure_id, route, month, store, employee_id, employee_name,
        base_allowance, basic_dayoff_used, explicit_sub_dayoff_used, base_excess,
-       substitute_needed, annual_leave_used, substitute_events_json, annual_leave_events_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       substitute_needed, compensation_leave_used, compensation_needed,
+       annual_leave_used, substitute_events_json, compensation_events_json,
+       annual_leave_events_json, worked_dates_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       closureId,
       route,
@@ -173,9 +176,13 @@ export async function onRequestPost(context) {
       roundHalf(row.explicitSubDayoffUsed),
       roundHalf(row.baseExcess),
       roundHalf(row.substituteNeeded),
+      roundHalf(row.compensationLeaveUsed),
+      roundHalf(row.compensationNeeded),
       roundHalf(row.annualLeaveUsed),
       JSON.stringify(Array.isArray(row.substituteEvents) ? row.substituteEvents : []),
-      JSON.stringify(Array.isArray(row.annualLeaveEvents) ? row.annualLeaveEvents : [])
+      JSON.stringify(Array.isArray(row.compensationEvents) ? row.compensationEvents : []),
+      JSON.stringify(Array.isArray(row.annualLeaveEvents) ? row.annualLeaveEvents : []),
+      JSON.stringify(Array.isArray(row.workedDates) ? row.workedDates : [])
     ));
 
     await runBatch(context.env.DB, issueStatements);
@@ -188,7 +195,7 @@ export async function onRequestPost(context) {
       SELECT *
       FROM attendance_monthly_summaries_v3
       WHERE closure_id = ?
-      ORDER BY shortage DESC, base_excess DESC, store ASC, employee_name ASC
+      ORDER BY MAX(shortage, compensation_shortage) DESC, base_excess DESC, store ASC, employee_name ASC
     `).bind(closureId).all();
 
     return json({
@@ -207,6 +214,7 @@ export async function onRequestPost(context) {
 async function cleanupFailedClosure(db, closureId) {
   try {
     await db.batch([
+      db.prepare("DELETE FROM attendance_leave_allocations_v5 WHERE closure_id = ?").bind(closureId),
       db.prepare("DELETE FROM route_substitute_allocations WHERE closure_id = ?").bind(closureId),
       db.prepare("DELETE FROM attendance_monthly_summaries_v3 WHERE closure_id = ?").bind(closureId),
       db.prepare("DELETE FROM attendance_monthly_employee_facts WHERE closure_id = ?").bind(closureId),

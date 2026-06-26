@@ -17,70 +17,129 @@ export async function onRequestGet(context) {
 
   const monthStart = `${month}-01`;
   const monthEnd = endOfMonth(month);
+  const [grantsResult, factsResult, allocationsResult, annualResult] = await Promise.all([
+    context.env.DB.prepare(`
+      SELECT * FROM attendance_leave_grants_v5
+      WHERE route = ? AND grant_month <= ? AND valid_from <= ? AND valid_to >= ?
+      ORDER BY grant_month, valid_to, valid_from, created_at
+    `).bind(route, month, monthEnd, monthStart).all(),
+    context.env.DB.prepare(`
+      SELECT * FROM attendance_monthly_employee_facts
+      WHERE route = ? AND month <= ?
+    `).bind(route, month).all(),
+    context.env.DB.prepare(`
+      SELECT grant_id, employee_id, ROUND(SUM(used_days), 1) AS used_days
+      FROM attendance_leave_allocations_v5
+      WHERE route = ? AND month < ?
+      GROUP BY grant_id, employee_id
+    `).bind(route, month).all(),
+    context.env.DB.prepare(`
+      SELECT employee_id, ROUND(SUM(annual_leave_used), 1) AS cumulative_days
+      FROM attendance_monthly_employee_facts
+      WHERE route = ? AND month < ?
+      GROUP BY employee_id
+    `).bind(route, month).all(),
+  ]);
 
-  // 대상 월 이전에 발생한 공통 부여분만 기존 마감 대상자를 기준으로 불러옵니다.
-  // 대상 월에 발생한 부여분은 현재 업로드한 마감 인원에게 적용해야 하므로 currentGrant로 별도 반환합니다.
-  const lotsResult = await context.env.DB.prepare(`
-    SELECT g.id AS grant_id, f.employee_id, g.grant_month, g.granted_days,
-           g.valid_from, g.valid_to,
-           ROUND(g.granted_days - COALESCE(SUM(a.used_days), 0), 1) AS remaining_days
-    FROM route_substitute_grants g
-    JOIN attendance_closures c
-      ON c.company = g.route AND c.month = g.grant_month
-    JOIN attendance_monthly_employee_facts f
-      ON f.closure_id = c.id
-    LEFT JOIN route_substitute_allocations a
-      ON a.grant_id = g.id
-     AND a.employee_id = f.employee_id
-     AND a.month < ?
-    WHERE g.route = ?
-      AND g.grant_month < ?
-      AND g.valid_from <= ?
-      AND g.valid_to >= ?
-    GROUP BY g.id, f.employee_id
-    HAVING remaining_days > 0
-    ORDER BY f.employee_id, g.valid_to, g.valid_from, g.grant_month
-  `).bind(month, route, month, monthEnd, monthStart).all();
-
-  const annualResult = await context.env.DB.prepare(`
-    SELECT f.employee_id, ROUND(SUM(f.annual_leave_used), 1) AS cumulative_days
-    FROM attendance_monthly_employee_facts f
-    WHERE f.route = ? AND f.month < ?
-    GROUP BY f.employee_id
-  `).bind(route, month).all();
-
-  const currentGrant = await context.env.DB.prepare(`
-    SELECT id, route, grant_month, granted_days, valid_from, valid_to, reason, note
-    FROM route_substitute_grants
-    WHERE route = ? AND grant_month = ?
-    LIMIT 1
-  `).bind(route, month).first();
+  const factsByMonth = new Map();
+  for (const fact of factsResult.results || []) {
+    if (!factsByMonth.has(fact.month)) factsByMonth.set(fact.month, []);
+    factsByMonth.get(fact.month).push(fact);
+  }
+  const usedMap = new Map((allocationsResult.results || []).map((row) => [
+    `${row.grant_id}|${normalizeEmployeeId(row.employee_id)}`,
+    roundHalf(row.used_days),
+  ]));
 
   const lotsByEmployee = {};
-  for (const row of lotsResult.results || []) {
-    const employeeId = row.employee_id;
-    if (!lotsByEmployee[employeeId]) lotsByEmployee[employeeId] = [];
-    lotsByEmployee[employeeId].push({
-      grantId: row.grant_id,
-      grantMonth: row.grant_month,
-      grantedDays: roundHalf(row.granted_days),
-      remaining: roundHalf(row.remaining_days),
-      validFrom: row.valid_from,
-      validTo: row.valid_to,
-    });
+  const currentGrants = [];
+  for (const grant of grantsResult.results || []) {
+    if (grant.grant_month === month) {
+      currentGrants.push(normalizeGrant(grant));
+      continue;
+    }
+    const grantFacts = factsByMonth.get(grant.grant_month) || [];
+    for (const fact of grantFacts) {
+      if (!isEligibleForGrant(grant, fact)) continue;
+      const employeeId = normalizeEmployeeId(fact.employee_id);
+      const remaining = roundHalf(Number(grant.granted_days || 0) - (usedMap.get(`${grant.id}|${employeeId}`) || 0));
+      if (!(remaining > 0)) continue;
+      if (!lotsByEmployee[employeeId]) lotsByEmployee[employeeId] = [];
+      lotsByEmployee[employeeId].push({
+        grantId: grant.id,
+        grantType: grant.grant_type || "substitute",
+        grantMonth: grant.grant_month,
+        grantedDays: roundHalf(grant.granted_days),
+        remaining,
+        validFrom: grant.valid_from,
+        validTo: grant.valid_to,
+      });
+    }
   }
 
   const annualLeaveBefore = {};
   for (const row of annualResult.results || []) {
-    annualLeaveBefore[row.employee_id] = roundHalf(row.cumulative_days);
+    annualLeaveBefore[normalizeEmployeeId(row.employee_id)] = roundHalf(row.cumulative_days);
   }
 
   const balances = {};
   for (const [employeeId, lots] of Object.entries(lotsByEmployee)) {
-    balances[employeeId] = roundHalf(lots.reduce((sum, lot) => sum + Number(lot.remaining || 0), 0));
+    balances[employeeId] = {
+      substitute: roundHalf(lots.filter((lot) => lot.grantType === "substitute").reduce((sum, lot) => sum + Number(lot.remaining || 0), 0)),
+      compensation: roundHalf(lots.filter((lot) => lot.grantType === "compensation").reduce((sum, lot) => sum + Number(lot.remaining || 0), 0)),
+    };
   }
 
-  return json({ lotsByEmployee, balances, annualLeaveBefore, currentGrant: currentGrant || null });
+  return json({ lotsByEmployee, balances, annualLeaveBefore, currentGrants });
+}
+
+function normalizeGrant(grant) {
+  return {
+    id: grant.id,
+    route: grant.route,
+    grantType: grant.grant_type || "substitute",
+    grantScope: grant.grant_scope || "route",
+    grantMonth: grant.grant_month,
+    grantedDays: roundHalf(grant.granted_days),
+    validFrom: grant.valid_from,
+    validTo: grant.valid_to,
+    eligibilityMode: grant.eligibility_mode || "all",
+    criterionDate: grant.criterion_date || "",
+    employeeId: normalizeEmployeeId(grant.employee_id),
+    excludedEmployeeIds: parseEmployeeIds(grant.excluded_employee_ids_json),
+  };
+}
+
+function isEligibleForGrant(grant, fact) {
+  const employeeId = normalizeEmployeeId(fact.employee_id);
+  if (!employeeId) return false;
+  if (grant.grant_scope === "employee") {
+    if (employeeId !== normalizeEmployeeId(grant.employee_id)) return false;
+  } else if (new Set(parseEmployeeIds(grant.excluded_employee_ids_json)).has(employeeId)) {
+    return false;
+  }
+  if (grant.eligibility_mode === "worked_on_date") {
+    const workedDates = new Set(parseJsonArray(fact.worked_dates_json).map((value) => typeof value === "string" ? value : value?.date).filter(Boolean));
+    return workedDates.has(grant.criterion_date);
+  }
+  return true;
+}
+
+function parseEmployeeIds(value) {
+  return parseJsonArray(value).map(normalizeEmployeeId).filter(Boolean);
+}
+
+function parseJsonArray(value) {
+  try {
+    const parsed = JSON.parse(value || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeEmployeeId(value) {
+  return String(value || "").trim().toUpperCase().replace(/\.0+$/, "").replace(/[\s\u00A0-]+/g, "").replace(/[^0-9A-Z가-힣]/g, "");
 }
 
 function endOfMonth(monthText) {

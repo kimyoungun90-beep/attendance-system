@@ -5,7 +5,25 @@ const CLOSURE_COLUMNS = {
   mismatch_people: "INTEGER NOT NULL DEFAULT 0",
   dayoff_excess_people: "INTEGER NOT NULL DEFAULT 0",
   substitute_shortage_people: "INTEGER NOT NULL DEFAULT 0",
+  compensation_shortage_people: "INTEGER NOT NULL DEFAULT 0",
   annual_leave_people: "INTEGER NOT NULL DEFAULT 0",
+};
+
+const FACT_COLUMNS = {
+  compensation_leave_used: "REAL NOT NULL DEFAULT 0",
+  compensation_needed: "REAL NOT NULL DEFAULT 0",
+  compensation_events_json: "TEXT NOT NULL DEFAULT '[]'",
+  worked_dates_json: "TEXT NOT NULL DEFAULT '[]'",
+};
+
+const SUMMARY_COLUMNS = {
+  compensation_needed: "REAL NOT NULL DEFAULT 0",
+  available_compensation: "REAL NOT NULL DEFAULT 0",
+  compensation_applied: "REAL NOT NULL DEFAULT 0",
+  remaining_compensation: "REAL NOT NULL DEFAULT 0",
+  expired_compensation: "REAL NOT NULL DEFAULT 0",
+  compensation_shortage: "REAL NOT NULL DEFAULT 0",
+  compensation_judgment: "TEXT",
 };
 
 let initialized = false;
@@ -38,16 +56,7 @@ async function initialize(db) {
     )
   `).run();
 
-  const columns = await db.prepare("PRAGMA table_info(attendance_closures)").all();
-  const existing = new Set((columns.results || []).map((row) => row.name));
-  for (const [name, definition] of Object.entries(CLOSURE_COLUMNS)) {
-    if (existing.has(name)) continue;
-    try {
-      await db.prepare(`ALTER TABLE attendance_closures ADD COLUMN ${name} ${definition}`).run();
-    } catch (error) {
-      if (!String(error?.message || error).toLowerCase().includes("duplicate column")) throw error;
-    }
-  }
+  await ensureColumns(db, "attendance_closures", CLOSURE_COLUMNS);
 
   await runStaticBatch(db, [
     `CREATE TABLE IF NOT EXISTS attendance_missing_items (
@@ -178,6 +187,36 @@ async function initialize(db) {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       UNIQUE(closure_id, employee_id)
     )`,
+    `CREATE TABLE IF NOT EXISTS attendance_leave_grants_v5 (
+      id TEXT PRIMARY KEY,
+      route TEXT NOT NULL CHECK (route IN ('homeplus', 'electroland')),
+      grant_type TEXT NOT NULL CHECK (grant_type IN ('substitute', 'compensation')),
+      grant_scope TEXT NOT NULL CHECK (grant_scope IN ('route', 'employee')),
+      grant_month TEXT NOT NULL,
+      granted_days REAL NOT NULL CHECK (granted_days > 0),
+      valid_from TEXT NOT NULL,
+      valid_to TEXT NOT NULL,
+      eligibility_mode TEXT NOT NULL DEFAULT 'all' CHECK (eligibility_mode IN ('all', 'worked_on_date')),
+      criterion_date TEXT,
+      employee_id TEXT,
+      excluded_employee_ids_json TEXT NOT NULL DEFAULT '[]',
+      reason TEXT,
+      note TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS attendance_leave_allocations_v5 (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      grant_id TEXT NOT NULL,
+      closure_id TEXT NOT NULL,
+      route TEXT NOT NULL CHECK (route IN ('homeplus', 'electroland')),
+      grant_type TEXT NOT NULL CHECK (grant_type IN ('substitute', 'compensation')),
+      employee_id TEXT NOT NULL,
+      month TEXT NOT NULL,
+      used_days REAL NOT NULL CHECK (used_days > 0),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(grant_id, closure_id, employee_id)
+    )`,
     `CREATE TABLE IF NOT EXISTS attendance_archive_files (
       id TEXT PRIMARY KEY,
       route TEXT NOT NULL CHECK (route IN ('homeplus', 'electroland')),
@@ -202,6 +241,61 @@ async function initialize(db) {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       UNIQUE(file_id, chunk_index)
     )`,
+    `CREATE TABLE IF NOT EXISTS attendance_workforce_uploads (
+      id TEXT PRIMARY KEY,
+      month TEXT NOT NULL UNIQUE,
+      file_name TEXT NOT NULL,
+      content_type TEXT,
+      size_bytes INTEGER NOT NULL DEFAULT 0,
+      storage_type TEXT NOT NULL CHECK (storage_type IN ('d1', 'r2')),
+      object_key TEXT,
+      employee_count INTEGER NOT NULL DEFAULT 0,
+      electroland_count INTEGER NOT NULL DEFAULT 0,
+      homeplus_count INTEGER NOT NULL DEFAULT 0,
+      portal_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS attendance_workforce_file_chunks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      upload_id TEXT NOT NULL,
+      chunk_index INTEGER NOT NULL,
+      chunk_blob BLOB NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(upload_id, chunk_index)
+    )`,
+    `CREATE TABLE IF NOT EXISTS attendance_portal_ids (
+      employee_id TEXT PRIMARY KEY,
+      portal_id TEXT NOT NULL,
+      employee_name TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS attendance_workforce_members (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      upload_id TEXT NOT NULL,
+      month TEXT NOT NULL,
+      route TEXT NOT NULL CHECK (route IN ('homeplus', 'electroland')),
+      regional_manager TEXT,
+      manager TEXT,
+      region1 TEXT,
+      region2 TEXT,
+      store_code TEXT,
+      store_name TEXT,
+      portal_id TEXT,
+      employee_id TEXT NOT NULL,
+      employee_name TEXT NOT NULL,
+      hire_date TEXT,
+      group_hire_date TEXT,
+      note TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(month, route, employee_id, store_code)
+    )`,
+  ]);
+
+  await ensureColumns(db, "attendance_monthly_employee_facts", FACT_COLUMNS);
+  await ensureColumns(db, "attendance_monthly_summaries_v3", SUMMARY_COLUMNS);
+
+  await runStaticBatch(db, [
     `DELETE FROM attendance_closures
       WHERE rowid NOT IN (SELECT MAX(rowid) FROM attendance_closures GROUP BY company, month)`,
     `CREATE UNIQUE INDEX IF NOT EXISTS ux_attendance_closures_route_month ON attendance_closures(company, month)`,
@@ -213,9 +307,34 @@ async function initialize(db) {
     `CREATE INDEX IF NOT EXISTS idx_route_substitute_grants_period ON route_substitute_grants(route, grant_month, valid_to, valid_from)`,
     `CREATE INDEX IF NOT EXISTS idx_route_substitute_allocations_employee ON route_substitute_allocations(route, employee_id, month, grant_id)`,
     `CREATE INDEX IF NOT EXISTS idx_monthly_summaries_v3_route_month ON attendance_monthly_summaries_v3(route, month, employee_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_leave_grants_v5_route_month ON attendance_leave_grants_v5(route, grant_month, grant_type, grant_scope)`,
+    `CREATE INDEX IF NOT EXISTS idx_leave_allocations_v5_employee ON attendance_leave_allocations_v5(route, grant_type, employee_id, month, grant_id)`,
     `CREATE INDEX IF NOT EXISTS idx_attendance_archive_files_route_month ON attendance_archive_files(route, month, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_attendance_archive_file_chunks_file ON attendance_archive_file_chunks(file_id, chunk_index)`,
+    `CREATE INDEX IF NOT EXISTS idx_workforce_uploads_month ON attendance_workforce_uploads(month DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_workforce_chunks_upload ON attendance_workforce_file_chunks(upload_id, chunk_index)`,
+    `CREATE INDEX IF NOT EXISTS idx_workforce_members_month_route ON attendance_workforce_members(month, route, employee_id, store_code)`,
+    `CREATE INDEX IF NOT EXISTS idx_workforce_members_upload ON attendance_workforce_members(upload_id)`,
+    `INSERT OR IGNORE INTO attendance_leave_grants_v5
+      (id, route, grant_type, grant_scope, grant_month, granted_days, valid_from, valid_to,
+       eligibility_mode, criterion_date, employee_id, excluded_employee_ids_json, reason, note, created_at, updated_at)
+      SELECT id, route, 'substitute', 'route', grant_month, granted_days, valid_from, valid_to,
+             'all', NULL, NULL, '[]', reason, note, created_at, updated_at
+      FROM route_substitute_grants`,
   ]);
+}
+
+async function ensureColumns(db, tableName, definitions) {
+  const columns = await db.prepare(`PRAGMA table_info(${tableName})`).all();
+  const existing = new Set((columns.results || []).map((row) => row.name));
+  for (const [name, definition] of Object.entries(definitions)) {
+    if (existing.has(name)) continue;
+    try {
+      await db.prepare(`ALTER TABLE ${tableName} ADD COLUMN ${name} ${definition}`).run();
+    } catch (error) {
+      if (!String(error?.message || error).toLowerCase().includes("duplicate column")) throw error;
+    }
+  }
 }
 
 async function runStaticBatch(db, sqlList) {
