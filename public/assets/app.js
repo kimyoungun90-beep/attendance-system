@@ -224,6 +224,7 @@ async function analyzeFiles() {
       annualFileName: state.annualFile?.name || "",
       referenceFileName: state.referenceFile?.name || "",
       annualComparison,
+      annualSourceSheets: annualWorkbook || [],
       referenceComparison,
       managerRequests,
       analyzedAt: new Date().toISOString(),
@@ -583,7 +584,7 @@ function parseReferenceFinalDate(value) {
 
 function parseReferenceFinalWorkbook(sheets) {
   const normalizedSheets = normalizeWorkbookInput(sheets);
-  const main = normalizedSheets.find((sheet) => /상담사근태/.test(sheet.sheetName)) || normalizedSheets[0];
+  const main = normalizedSheets.find((sheet) => /상담사\s*근태/.test(sheet.sheetName)) || normalizedSheets[0];
   if (!main) throw new Error("비교용 최종본의 상담사근태 시트를 찾지 못했습니다.");
   const matrix = main.matrix || [];
   const headerIndex = findFlexibleHeaderRow(matrix, (headers) => (
@@ -650,7 +651,7 @@ function normalizeFinalCompareValue(value) {
 function compareReferenceFinal(reference, result, targetMonth, cutoffDate, workforce) {
   const rows = [];
   if (reference.month && reference.month !== targetMonth) {
-    const currentNames = ["오류 요약", `${Number(targetMonth.slice(5, 7))}월 상담사근태`, "보상휴가(0.5일) 반영 인원", "증빙(필수기입)", `${Number(targetMonth.slice(5, 7))}월 근무계획`, `${Number(targetMonth.slice(5, 7))}월 연차사용`, "근태RAW", "연차RAW", "교육RAW"];
+    const currentNames = ["상담사 근태", "증빙", "계획&근태 매칭", "휴무&대체휴무 초과", "연차 계획&신청 매칭", "전체 요약", "매니저 공유용", "근무계획", "근태RAW", "연차RAW"];
     const normalizeName = (name) => String(name).replace(/^\d+월/, "O월");
     const currentSet = new Set(currentNames.map(normalizeName));
     const referenceSet = new Set(reference.sheetNames.map(normalizeName));
@@ -1937,7 +1938,7 @@ async function saveClosure() {
         route: result.route,
         month: result.targetMonth,
         fileKind: "result",
-        note: "보고용 최종본 · 증빙 O 자동반영 · 매니저 수정요청 · 연차/최종본 비교 포함",
+        note: "최종본 양식 자동생성 · 증빙 O 자동반영 · 매니저 공유용 · 연차/최종본 비교 포함",
         sourceType: "closure",
         closureId: data.id,
         replace: true,

@@ -13,31 +13,34 @@ export async function buildFinalTemplateWorkbook(result) {
   const monthNo = Number(String(result.targetMonth || "").slice(5, 7));
   const year = Number(String(result.targetMonth || "").slice(0, 4));
   const daysInMonth = new Date(year, monthNo, 0).getDate();
-  const mainName = `${monthNo}월 상담사근태`;
-  const planName = `${monthNo}월 근무계획`;
-  const annualName = `${monthNo}월 연차사용`;
 
-  renameSheet(workbook, "5월 상담사근태", mainName);
-  renameSheet(workbook, "5월 근무계획", planName);
-  renameSheet(workbook, "5월 연차사용", annualName);
+  renameSheet(workbook, "5월 상담사근태", "상담사 근태");
+  renameSheet(workbook, "증빙(필수기입)", "증빙");
+  renameSheet(workbook, "5월 근무계획", "근무계획");
 
   const context = buildContext(result, daysInMonth);
+  fillMainSheet(workbook.Sheets["상담사 근태"], result, context, year, monthNo, daysInMonth);
+  fillEvidenceSheet(workbook.Sheets["증빙"], result, context);
+  buildPlanAttendanceMatchSheet(workbook, result, context, year, monthNo);
+  buildDayoffSubstituteSheet(workbook, result, context, year, monthNo);
+  buildAnnualComparisonSheet(workbook, result, year, monthNo);
   buildIssueSummarySheet(workbook, result, context, year, monthNo);
   buildManagerRequestSheet(workbook, result, year, monthNo);
-  buildAnnualComparisonSheet(workbook, result, year, monthNo);
-  buildReferenceComparisonSheet(workbook, result, year, monthNo);
-  fillMainSheet(workbook.Sheets[mainName], result, context, year, monthNo, daysInMonth);
-  fillPlanSheet(workbook.Sheets[planName], result, context, daysInMonth);
-  fillAnnualSheet(workbook.Sheets[annualName], result, context);
-  fillCompensationSheet(workbook.Sheets["보상휴가(0.5일) 반영 인원"], result, context);
-  fillEvidenceSheet(workbook.Sheets["증빙(필수기입)"], result, context);
+  fillPlanSheet(workbook.Sheets["근무계획"], result, context, daysInMonth);
   fillAttendanceRawSheet(workbook.Sheets["근태RAW"], result);
   fillAnnualRawSheet(workbook.Sheets["연차RAW"], result, context);
-  fillEducationRawSheet(workbook.Sheets["교육RAW"], result, context);
 
   workbook.SheetNames = [
-    "오류 요약", "매니저 수정요청", "연차 신청 대조", "최종본 비교",
-    ...workbook.SheetNames.filter((name) => !["오류 요약", "매니저 수정요청", "연차 신청 대조", "최종본 비교"].includes(name)),
+    "상담사 근태",
+    "증빙",
+    "계획&근태 매칭",
+    "휴무&대체휴무 초과",
+    "연차 계획&신청 매칭",
+    "전체 요약",
+    "매니저 공유용",
+    "근무계획",
+    "근태RAW",
+    "연차RAW",
   ];
   workbook.Workbook = workbook.Workbook || {};
   workbook.Workbook.CalcPr = { calcMode: "auto", fullCalcOnLoad: true, forceFullCalc: true };
@@ -47,7 +50,7 @@ export async function buildFinalTemplateWorkbook(result) {
     Title: `${year}년 ${monthNo}월 ${result.routeLabel} 상담사 출퇴근현황`,
     Subject: "근태 관리 시스템 자동 생성 최종본",
     Author: "근태 관리 시스템",
-    Comments: "인력·매장매칭, 근무계획, 실제 근태를 기준으로 자동 생성",
+    Comments: "최종본 양식 기반 · 인력/근무계획/근태/연차신청 자동 매칭",
   };
   return workbook;
 }
@@ -152,7 +155,7 @@ function buildContext(result, daysInMonth) {
 
 
 function buildIssueSummarySheet(workbook, result, ctx, year, monthNo) {
-  const sheetName = "오류 요약";
+  const sheetName = "전체 요약";
   const groups = new Map();
   const ensureGroup = (employeeId, fallback = {}) => {
     const id = normalizeId(employeeId);
@@ -231,8 +234,8 @@ function buildIssueSummarySheet(workbook, result, ctx, year, monthNo) {
   const evidencePeople = rows.filter((row) => row.evidence.length).length;
   const urgentPeople = rows.filter((row) => row.priority === "긴급").length;
   const matrix = [
-    [`${year}년 ${monthNo}월 근태 오류 요약`],
-    ["잘못된 직원·사번·날짜·문제 내용을 한 행에서 확인할 수 있도록 정리했습니다."],
+    [`${year}년 ${monthNo}월 근태관리 전체 요약`],
+    [result.referenceComparison?.supplied ? `직원별 오류 요약 · 비교 최종본 결과: ${result.referenceComparison.summary || "확인 필요"}` : "직원별 이름·사번·날짜·문제 내용을 한 행에서 확인할 수 있도록 정리했습니다."],
     [],
     ["검토 대상 인원", "", "총 문제 건수", "", "증빙 필요 인원", "", "긴급 확인 인원", ""],
     [rows.length, "", totalIssues, "", evidencePeople, "", urgentPeople, ""],
@@ -256,6 +259,16 @@ function buildIssueSummarySheet(workbook, result, ctx, year, monthNo) {
     ]);
   });
   if (!rows.length) matrix.push([1, "", "", "", "", "", "", 0, "확인 필요한 근태 오류가 없습니다.", "", "정상", "완료"]);
+  const referenceRows = (result.referenceComparison?.rows || []).filter((row) => !row.match);
+  if (result.referenceComparison?.supplied) {
+    matrix.push([]);
+    matrix.push(["비교 최종본 불일치", "", "", "", "", "", "", referenceRows.length, result.referenceComparison.summary || "비교 결과 확인", "", "", ""]);
+    for (const row of referenceRows) {
+      matrix.push(["비교", row.regionalManager || "", row.manager || "", row.region || "", row.store || "", row.name || "", row.employeeId || "", 1,
+        `${row.date || row.comparisonType || "항목"} · 자동 ${row.generatedValue || "-"} / 비교 ${row.referenceValue || "-"}`,
+        row.reason || "", row.result || "불일치", "확인 필요"]);
+    }
+  }
 
   const sheet = XLSX.utils.aoa_to_sheet(matrix);
   sheet["!merges"] = [
@@ -362,7 +375,7 @@ function styleSummarySheet(sheet, lastRow) {
 function buildManagerRequestSheet(workbook, result, year, monthNo) {
   const rows = result.managerRequests || [];
   const matrix = [
-    [`${year}년 ${monthNo}월 매니저별 근태 수정요청`],
+    [`${year}년 ${monthNo}월 매니저 공유용 수정요청`],
     ["복사용 수정요청 멘트를 그대로 전달할 수 있으며, 근태·계획·연차 신청 불일치가 함께 반영됩니다."],
     [],
     ["지역장", "매니저", "지역", "매장명", "이름", "사번", "문제 건수", "문제 요약", "복사용 수정요청 멘트", "전달상태"],
@@ -384,8 +397,8 @@ function buildManagerRequestSheet(workbook, result, year, monthNo) {
   sheet["!rows"] = [{ hpt: 30 }, { hpt: 24 }, { hpt: 8 }, { hpt: 30 }];
   styleSimpleReportSheet(sheet, matrix.length, 10, [7, 8]);
   for (let r = 4; r < matrix.length; r += 1) sheet["!rows"][r] = { hpt: 48 };
-  workbook.Sheets["매니저 수정요청"] = sheet;
-  if (!workbook.SheetNames.includes("매니저 수정요청")) workbook.SheetNames.push("매니저 수정요청");
+  workbook.Sheets["매니저 공유용"] = sheet;
+  if (!workbook.SheetNames.includes("매니저 공유용")) workbook.SheetNames.push("매니저 공유용");
 }
 
 function buildAnnualComparisonSheet(workbook, result, year, monthNo) {
@@ -445,8 +458,65 @@ function buildAnnualComparisonSheet(workbook, result, year, monthNo) {
       sheet[resultAddr].s.font = { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: value.includes("신청내역 없음") ? "FF7F6000" : "FF9C0006" } };
     }
   }
-  workbook.Sheets["연차 신청 대조"] = sheet;
-  if (!workbook.SheetNames.includes("연차 신청 대조")) workbook.SheetNames.push("연차 신청 대조");
+  workbook.Sheets["연차 계획&신청 매칭"] = sheet;
+  if (!workbook.SheetNames.includes("연차 계획&신청 매칭")) workbook.SheetNames.push("연차 계획&신청 매칭");
+}
+
+
+function buildPlanAttendanceMatchSheet(workbook, result, ctx, year, monthNo) {
+  const rows = [...(result.mismatchRows || [])].sort((a, b) => String(a.date).localeCompare(String(b.date)) || String(a.store).localeCompare(String(b.store), "ko"));
+  const matrix = [
+    [`${year}년 ${monthNo}월 계획 & 근태 매칭 결과`],
+    ["사번과 날짜를 기준으로 근무계획과 실제 근태를 비교했습니다."],
+    [],
+    ["No", "지역장", "매니저", "지역", "매장명", "이름", "사번", "발생일", "근무계획", "실제근태", "구분", "상세사유"],
+  ];
+  rows.forEach((row, index) => {
+    const member = findMember(ctx, row.employeeId, row.store) || {};
+    matrix.push([
+      index + 1, member.regionalManager || "", member.manager || "", member.region2 || member.region1 || "",
+      member.storeName || row.store || "", row.name || member.employeeName || "", normalizeId(row.employeeId), row.date || "",
+      row.planStatus || "공백", row.actualStatus || (row.clockStatus === "출근" ? "출근" : "미입력"), row.result || "검토", row.reason || "",
+    ]);
+  });
+  if (!rows.length) matrix.push([1, "", "", "", "", "", "", "", "", "", "정상", "불일치 항목 없음"]);
+  const sheet = XLSX.utils.aoa_to_sheet(matrix);
+  sheet["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 11 } }, { s: { r: 1, c: 0 }, e: { r: 1, c: 11 } }];
+  sheet["!cols"] = [{wch:6},{wch:11},{wch:11},{wch:10},{wch:18},{wch:11},{wch:13},{wch:12},{wch:16},{wch:16},{wch:22},{wch:48}];
+  sheet["!rows"] = [{hpt:30},{hpt:24},{hpt:8},{hpt:30}];
+  styleSimpleReportSheet(sheet, matrix.length, 12, [11]);
+  workbook.Sheets["계획&근태 매칭"] = sheet;
+  if (!workbook.SheetNames.includes("계획&근태 매칭")) workbook.SheetNames.push("계획&근태 매칭");
+}
+
+function buildDayoffSubstituteSheet(workbook, result, ctx, year, monthNo) {
+  const rows = [...(result.employeeSummaries || [])]
+    .filter((row) => Number(row.baseExcess || 0) > 0 || Number(row.substituteNeeded || 0) > 0 || Number(row.compensationNeeded || 0) > 0 || Number(row.shortage || 0) > 0 || Number(row.compensationShortage || 0) > 0)
+    .sort((a, b) => String(a.store).localeCompare(String(b.store), "ko") || String(a.name).localeCompare(String(b.name), "ko"));
+  const matrix = [
+    [`${year}년 ${monthNo}월 휴무 · 대체휴무 · 보상휴가 점검`],
+    ["기본 휴무 초과분과 대체휴일·보상휴가 사용량, 잔여 및 초과 사용을 직원별로 정리했습니다."],
+    [],
+    ["지역장", "매니저", "지역", "매장명", "이름", "사번", "휴무수", "기본휴무", "휴무초과", "대체휴무 필요", "대체휴무 잔여", "대체휴무 초과", "보상휴가 필요", "보상휴가 잔여", "보상휴가 초과", "판정"],
+  ];
+  for (const row of rows) {
+    const member = findMember(ctx, row.employeeId, row.store) || {};
+    matrix.push([
+      member.regionalManager || "", member.manager || "", member.region2 || member.region1 || "", member.storeName || row.store || "",
+      row.name || member.employeeName || "", normalizeId(row.employeeId), roundHalf(Number(row.basicDayoffUsed || 0)), roundHalf(Number(row.baseAllowance || 0)),
+      roundHalf(Number(row.baseExcess || 0)), roundHalf(Number(row.substituteNeeded || 0)), roundHalf(Number(row.remainingSubstitute || 0)), roundHalf(Number(row.shortage || 0)),
+      roundHalf(Number(row.compensationNeeded || 0)), roundHalf(Number(row.remainingCompensation || 0)), roundHalf(Number(row.compensationShortage || 0)),
+      `${row.judgment || ""}${row.compensationJudgment ? ` / ${row.compensationJudgment}` : ""}`,
+    ]);
+  }
+  if (!rows.length) matrix.push(["", "", "", "", "", "", 0, 0, 0, 0, 0, 0, 0, 0, 0, "확인 대상 없음"]);
+  const sheet = XLSX.utils.aoa_to_sheet(matrix);
+  sheet["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 15 } }, { s: { r: 1, c: 0 }, e: { r: 1, c: 15 } }];
+  sheet["!cols"] = [{wch:11},{wch:11},{wch:10},{wch:18},{wch:11},{wch:13},{wch:10},{wch:10},{wch:10},{wch:13},{wch:13},{wch:13},{wch:13},{wch:13},{wch:13},{wch:55}];
+  sheet["!rows"] = [{hpt:30},{hpt:24},{hpt:8},{hpt:30}];
+  styleSimpleReportSheet(sheet, matrix.length, 16, [15]);
+  workbook.Sheets["휴무&대체휴무 초과"] = sheet;
+  if (!workbook.SheetNames.includes("휴무&대체휴무 초과")) workbook.SheetNames.push("휴무&대체휴무 초과");
 }
 
 function buildReferenceComparisonSheet(workbook, result, year, monthNo) {
@@ -524,8 +594,8 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
   addMerge(sheet, 2, 1, 2, 63);
   addMerge(sheet, 3, 1, 3, 63);
   setValue(sheet, "B2", `■ ${year}년 ${monthNo}월 ${result.routeLabel} 출퇴근현황  |  대상 ${ctx.people.length}명  |  ${daysInMonth}일  |  평일 ${countWeekdays(year, monthNo)}일  |  주말 ${countWeekendDays(year, monthNo)}일`);
-  setValue(sheet, "B3", "※ 증빙(필수기입) 시트의 ‘증빙여부’에 O를 입력하면 해당 직원·날짜의 ‘미입력’이 ‘출근’으로 자동 반영됩니다.");
-  setValue(sheet, "B4", "※ 휴무·연차·대체휴일·보상휴가 중 출근기록이 있거나 계획과 실제가 다른 항목은 매니저 수정요청 시트에서 확인합니다.");
+  setValue(sheet, "B3", "※ 증빙 시트의 ‘증빙여부’에 O를 입력하면 해당 직원·날짜의 ‘미입력’이 ‘출근’으로 자동 반영됩니다.");
+  setValue(sheet, "B4", "※ 휴무·연차·대체휴일·보상휴가 중 출근기록이 있거나 계획과 실제가 다른 항목은 매니저 공유용 시트에서 확인합니다.");
   setValue(sheet, "N5", `${monthNo}월1일 \n근무계획\n일치확인`);
   setValue(sheet, "AV5", `${monthNo}월 사용가능\n휴무일수`);
   setValue(sheet, "BL6", "");
@@ -575,7 +645,7 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
       applyNeutralDayStyle(sheet, address);
       if (item?.display === "미입력") {
         const colLetter = XLSX.utils.encode_col(col0);
-        setFormula(sheet, address, `IF(COUNTIFS('증빙(필수기입)'!$G$5:$G$300,$I${row},'증빙(필수기입)'!$I$5:$I$300,${colLetter}$5,'증빙(필수기입)'!$K$5:$K$300,"O")>0,"출근","미입력")`, "미입력");
+        setFormula(sheet, address, `IF(COUNTIFS('증빙'!$G$5:$G$300,$I${row},'증빙'!$I$5:$I$300,${colLetter}$5,'증빙'!$K$5:$K$300,"O")>0,"출근","미입력")`, "미입력");
       } else {
         setValue(sheet, address, item?.display || "");
       }
@@ -769,6 +839,18 @@ function fillAttendanceRawSheet(sheet, result) {
 
 function fillAnnualRawSheet(sheet, result, ctx) {
   if (!sheet) return;
+  const sourceSheet = (result.annualSourceSheets || []).find((item) => Array.isArray(item.matrix) && item.matrix.length);
+  if (sourceSheet) {
+    const sourceRows = sourceSheet.matrix;
+    const maxCol = Math.max(13, ...sourceRows.map((row) => row.length));
+    clearValues(sheet, 1, 1, Math.max(1000, sourceRows.length + 10), maxCol);
+    sourceRows.forEach((source, rowIndex) => {
+      copyRowStyle(sheet, rowIndex === 0 ? 1 : 2, rowIndex + 1, maxCol);
+      for (let col = 0; col < maxCol; col += 1) setValue(sheet, XLSX.utils.encode_cell({ r: rowIndex, c: col }), source[col] ?? "");
+    });
+    setRef(sheet, Math.max(1, sourceRows.length), maxCol);
+    return;
+  }
   clearValues(sheet, 1, 1, Math.max(800, ctx.people.length * 10), 22);
   const headers = ["사번", "이름", "일자", "구분", "환산일수", "상태", "비고"];
   headers.forEach((value, index) => setValue(sheet, XLSX.utils.encode_cell({ r: 0, c: index }), value));
