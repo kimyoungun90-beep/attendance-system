@@ -5,14 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#123B72" />
   <title>전자랜드 · 홈플러스 근태 관리</title>
-  <link rel="stylesheet" href="./assets/styles.css?v=7" />
+  <link rel="stylesheet" href="./assets/styles.css?v=8" />
 </head>
 <body>
   <div class="app-shell">
     <header class="topbar">
       <div>
         <p class="eyebrow">ATTENDANCE MANAGEMENT</p>
-        <h1>전자랜드 · 홈플러스 근태 관리 <span class="version-tag">v7</span></h1>
+        <h1>전자랜드 · 홈플러스 근태 관리 <span class="version-tag">v8</span></h1>
       </div>
       <div class="topbar-actions">
         <span id="storageBadge" class="badge neutral">저장 방식 확인 중</span>
@@ -90,6 +90,26 @@
               </label>
             </div>
 
+            <div class="field-group optional-upload">
+              <label class="field-label">연차신청현황 엑셀 <span class="optional-label">선택</span></label>
+              <label class="dropzone compact-dropzone" id="annualDropzone">
+                <input id="annualFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
+                <span class="drop-icon">L</span>
+                <strong id="annualFileName">연차신청현황 파일 선택</strong>
+                <small>사번+휴가일자를 근무계획의 연차·반차와 대조합니다.</small>
+              </label>
+            </div>
+
+            <div class="field-group optional-upload">
+              <label class="field-label">다른 작성자의 최종본 <span class="optional-label">선택</span></label>
+              <label class="dropzone compact-dropzone" id="referenceDropzone">
+                <input id="referenceFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
+                <span class="drop-icon">C</span>
+                <strong id="referenceFileName">비교할 최종본 파일 선택</strong>
+                <small>같은 월은 사번+날짜별 값, 다른 월은 시트 구조를 비교합니다.</small>
+              </label>
+            </div>
+
             <button id="analyzeButton" class="btn primary full" type="button">근태 종합 분석</button>
           </aside>
 
@@ -106,7 +126,7 @@
             <div id="resultArea" class="hidden">
               <div id="diagnosticBanner" class="alert hidden"></div>
 
-              <div class="metric-grid eight">
+              <div class="metric-grid ten">
                 <article class="metric-card danger-card"><span>근무인데 출근기록 없음</span><strong id="missingCount">0</strong><small>사람 × 날짜</small></article>
                 <article class="metric-card warning-card"><span>휴무·휴가인데 출근</span><strong id="unexpectedCount">0</strong><small>사람 × 날짜</small></article>
                 <article class="metric-card"><span>계획·실제 불일치</span><strong id="mismatchCount">0</strong><small>검토 대상</small></article>
@@ -115,6 +135,8 @@
                 <article class="metric-card danger-card"><span>보상휴가 초과 사용</span><strong id="compensationShortagePeople">0</strong><small>직원 수</small></article>
                 <article class="metric-card"><span>연차 등록자</span><strong id="annualLeavePeople">0</strong><small>반차 포함</small></article>
                 <article class="metric-card"><span>사번 매칭률</span><strong id="matchRate">0%</strong><small>계획표 ↔ 근태표</small></article>
+                <article class="metric-card warning-card"><span>연차 신청 불일치</span><strong id="annualCompareMismatch">0</strong><small>신청·계획 대조</small></article>
+                <article class="metric-card warning-card"><span>최종본 비교 불일치</span><strong id="referenceCompareMismatch">0</strong><small>동일 월 기준</small></article>
               </div>
 
               <div class="panel result-panel">
@@ -140,6 +162,9 @@
                   <button class="inner-tab" data-result-tab="balance" type="button">대체·보상 잔여 <b id="balanceTabCount">0</b></button>
                   <button class="inner-tab" data-result-tab="shortage" type="button">대체·보상 초과 <b id="shortageTabCount">0</b></button>
                   <button class="inner-tab" data-result-tab="annual" type="button">연차 등록·누적 <b id="annualTabCount">0</b></button>
+                  <button class="inner-tab" data-result-tab="annualCompare" type="button">연차 신청 대조 <b id="annualCompareTabCount">0</b></button>
+                  <button class="inner-tab" data-result-tab="managerRequests" type="button">매니저 수정요청 <b id="managerRequestTabCount">0</b></button>
+                  <button class="inner-tab" data-result-tab="referenceCompare" type="button">최종본 비교 <b id="referenceCompareTabCount">0</b></button>
                 </div>
 
                 <div class="result-pane active">
@@ -343,6 +368,6 @@
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
-  <script type="module" src="./assets/app.js?v=7"></script>
+  <script type="module" src="./assets/app.js?v=8"></script>
 </body>
 </html>

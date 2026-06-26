@@ -23,6 +23,9 @@ export async function buildFinalTemplateWorkbook(result) {
 
   const context = buildContext(result, daysInMonth);
   buildIssueSummarySheet(workbook, result, context, year, monthNo);
+  buildManagerRequestSheet(workbook, result, year, monthNo);
+  buildAnnualComparisonSheet(workbook, result, year, monthNo);
+  buildReferenceComparisonSheet(workbook, result, year, monthNo);
   fillMainSheet(workbook.Sheets[mainName], result, context, year, monthNo, daysInMonth);
   fillPlanSheet(workbook.Sheets[planName], result, context, daysInMonth);
   fillAnnualSheet(workbook.Sheets[annualName], result, context);
@@ -31,6 +34,13 @@ export async function buildFinalTemplateWorkbook(result) {
   fillAttendanceRawSheet(workbook.Sheets["근태RAW"], result);
   fillAnnualRawSheet(workbook.Sheets["연차RAW"], result, context);
   fillEducationRawSheet(workbook.Sheets["교육RAW"], result, context);
+
+  workbook.SheetNames = [
+    "오류 요약", "매니저 수정요청", "연차 신청 대조", "최종본 비교",
+    ...workbook.SheetNames.filter((name) => !["오류 요약", "매니저 수정요청", "연차 신청 대조", "최종본 비교"].includes(name)),
+  ];
+  workbook.Workbook = workbook.Workbook || {};
+  workbook.Workbook.CalcPr = { calcMode: "auto", fullCalcOnLoad: true, forceFullCalc: true };
 
   workbook.Props = {
     ...(workbook.Props || {}),
@@ -348,17 +358,177 @@ function styleSummarySheet(sheet, lastRow) {
   }
 }
 
+
+function buildManagerRequestSheet(workbook, result, year, monthNo) {
+  const rows = result.managerRequests || [];
+  const matrix = [
+    [`${year}년 ${monthNo}월 매니저별 근태 수정요청`],
+    ["복사용 수정요청 멘트를 그대로 전달할 수 있으며, 근태·계획·연차 신청 불일치가 함께 반영됩니다."],
+    [],
+    ["지역장", "매니저", "지역", "매장명", "이름", "사번", "문제 건수", "문제 요약", "복사용 수정요청 멘트", "전달상태"],
+  ];
+  for (const row of rows) matrix.push([
+    row.regionalManager || "", row.manager || "", row.region || "", row.store || "", row.name || "",
+    row.employeeId || "", row.issueCount || 0, row.issueText || "", row.message || "", "미전달",
+  ]);
+  if (!rows.length) matrix.push(["", "", "", "", "", "", 0, "수정 요청 대상이 없습니다.", "", "완료"]);
+  const sheet = XLSX.utils.aoa_to_sheet(matrix);
+  sheet["!merges"] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: 9 } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: 9 } },
+  ];
+  sheet["!cols"] = [
+    { wch: 11 }, { wch: 11 }, { wch: 10 }, { wch: 17 }, { wch: 11 },
+    { wch: 13 }, { wch: 9 }, { wch: 52 }, { wch: 90 }, { wch: 12 },
+  ];
+  sheet["!rows"] = [{ hpt: 30 }, { hpt: 24 }, { hpt: 8 }, { hpt: 30 }];
+  styleSimpleReportSheet(sheet, matrix.length, 10, [7, 8]);
+  for (let r = 4; r < matrix.length; r += 1) sheet["!rows"][r] = { hpt: 48 };
+  workbook.Sheets["매니저 수정요청"] = sheet;
+  if (!workbook.SheetNames.includes("매니저 수정요청")) workbook.SheetNames.push("매니저 수정요청");
+}
+
+function buildAnnualComparisonSheet(workbook, result, year, monthNo) {
+  const comparison = result.annualComparison || { rows: [], matchCount: 0, mismatchCount: 0, missingApplicationCount: 0, supplied: false };
+  const matrix = [
+    [`${year}년 ${monthNo}월 연차 신청내역 ↔ 근무계획 대조`],
+    [comparison.supplied ? "사번과 날짜 기준으로 신청 1일은 연차, 신청 0.5일은 오전·오후반차와 비교했습니다." : "연차신청현황 파일을 선택하지 않아 대조하지 않았습니다."],
+    [],
+    ["일치", "", "신청 있음·계획 불일치", "", "계획 있음·신청 없음", ""],
+    [comparison.matchCount || 0, "", comparison.mismatchCount || 0, "", comparison.missingApplicationCount || 0, ""],
+    [],
+    ["휴가일자", "지역장", "매니저", "지역", "매장명", "이름", "사번", "신청구분", "신청일수", "근무계획", "대조결과", "신청상태", "비고"],
+  ];
+  for (const row of comparison.rows || []) matrix.push([
+    row.date || "", row.regionalManager || "", row.manager || "", row.region || "", row.store || "",
+    row.name || "", row.employeeId || "", row.requestedKind || "-", row.requestedDays || 0,
+    row.planStatus || "공백", row.result || "", row.applicationStatus || "", row.note || "",
+  ]);
+  if (!(comparison.rows || []).length) matrix.push(["", "", "", "", "", "", "", "", 0, "", "대조 자료 없음", "", ""]);
+  const sheet = XLSX.utils.aoa_to_sheet(matrix);
+  sheet["!merges"] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: 12 } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: 12 } },
+    { s: { r: 3, c: 0 }, e: { r: 3, c: 1 } },
+    { s: { r: 4, c: 0 }, e: { r: 4, c: 1 } },
+    { s: { r: 3, c: 2 }, e: { r: 3, c: 3 } },
+    { s: { r: 4, c: 2 }, e: { r: 4, c: 3 } },
+    { s: { r: 3, c: 4 }, e: { r: 3, c: 5 } },
+    { s: { r: 4, c: 4 }, e: { r: 4, c: 5 } },
+  ];
+  sheet["!cols"] = [
+    { wch: 12 }, { wch: 11 }, { wch: 11 }, { wch: 10 }, { wch: 18 }, { wch: 11 }, { wch: 13 },
+    { wch: 11 }, { wch: 10 }, { wch: 16 }, { wch: 30 }, { wch: 11 }, { wch: 25 },
+  ];
+  sheet["!rows"] = [{ hpt: 30 }, { hpt: 24 }, { hpt: 8 }, { hpt: 22 }, { hpt: 28 }, { hpt: 8 }, { hpt: 30 }];
+  styleSimpleReportSheet(sheet, matrix.length, 13, [10, 12]);
+  for (const [start, color] of [[0, "FFE2F0D9"], [2, "FFFCE4D6"], [4, "FFFFF2CC"]]) {
+    styleCellRange(sheet, 3, start, 3, start + 1, {
+      fill: { patternType: "solid", fgColor: { rgb: color } },
+      font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FF1F2937" } },
+      alignment: { horizontal: "center", vertical: "center" }, border: thinBorder("FFCBD5E1"),
+    });
+    styleCellRange(sheet, 4, start, 4, start + 1, {
+      fill: { patternType: "solid", fgColor: { rgb: "FFFFFFFF" } },
+      font: { name: "맑은 고딕", sz: 16, bold: true, color: { rgb: "FF173F73" } },
+      alignment: { horizontal: "center", vertical: "center" }, border: thinBorder("FFCBD5E1"),
+    });
+  }
+  for (let r = 7; r < matrix.length; r += 1) {
+    const resultAddr = XLSX.utils.encode_cell({ r, c: 10 });
+    const value = String(sheet[resultAddr]?.v || "");
+    if (value === "일치") {
+      sheet[resultAddr].s.fill = { patternType: "solid", fgColor: { rgb: "FFE2F0D9" } };
+      sheet[resultAddr].s.font = { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FF375623" } };
+    } else {
+      sheet[resultAddr].s.fill = { patternType: "solid", fgColor: { rgb: value.includes("신청내역 없음") ? "FFFFF2CC" : "FFF4CCCC" } };
+      sheet[resultAddr].s.font = { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: value.includes("신청내역 없음") ? "FF7F6000" : "FF9C0006" } };
+    }
+  }
+  workbook.Sheets["연차 신청 대조"] = sheet;
+  if (!workbook.SheetNames.includes("연차 신청 대조")) workbook.SheetNames.push("연차 신청 대조");
+}
+
+function buildReferenceComparisonSheet(workbook, result, year, monthNo) {
+  const comparison = result.referenceComparison || { rows: [], supplied: false, sameMonth: false, mismatchCount: 0, summary: "비교 파일 미선택" };
+  const matrix = [
+    [`${year}년 ${monthNo}월 자동 생성본 ↔ 비교 최종본`],
+    [comparison.supplied ? `비교 결과: ${comparison.summary || "확인"}` : "다른 작성자의 최종본을 선택하지 않아 비교하지 않았습니다."],
+    [],
+    ["비교 구분", "사번", "이름", "매장명", "일자/항목", "자동 생성값", "비교 파일값", "판정", "차이 사유"],
+  ];
+  for (const row of comparison.rows || []) matrix.push([
+    row.comparisonType || "", row.employeeId || "", row.name || "", row.store || "", row.date || "",
+    row.generatedValue || "", row.referenceValue || "", row.result || "", row.reason || "",
+  ]);
+  if (!(comparison.rows || []).length) matrix.push(["", "", "", "", "", "", "", comparison.supplied ? "전체 일치" : "비교 파일 없음", ""]);
+  const sheet = XLSX.utils.aoa_to_sheet(matrix);
+  sheet["!merges"] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: 8 } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: 8 } },
+  ];
+  sheet["!cols"] = [
+    { wch: 14 }, { wch: 13 }, { wch: 11 }, { wch: 18 }, { wch: 16 },
+    { wch: 18 }, { wch: 18 }, { wch: 14 }, { wch: 46 },
+  ];
+  sheet["!rows"] = [{ hpt: 30 }, { hpt: 24 }, { hpt: 8 }, { hpt: 30 }];
+  styleSimpleReportSheet(sheet, matrix.length, 9, [8]);
+  for (let r = 4; r < matrix.length; r += 1) {
+    const addr = XLSX.utils.encode_cell({ r, c: 7 });
+    const value = String(sheet[addr]?.v || "");
+    const match = value.includes("일치") && !value.includes("불일치");
+    sheet[addr].s.fill = { patternType: "solid", fgColor: { rgb: match ? "FFE2F0D9" : value.includes("월") || value.includes("구조") ? "FFFFF2CC" : "FFF4CCCC" } };
+    sheet[addr].s.font = { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: match ? "FF375623" : value.includes("월") || value.includes("구조") ? "FF7F6000" : "FF9C0006" } };
+  }
+  workbook.Sheets["최종본 비교"] = sheet;
+  if (!workbook.SheetNames.includes("최종본 비교")) workbook.SheetNames.push("최종본 비교");
+}
+
+function styleSimpleReportSheet(sheet, lastRow, colCount, leftColumns = []) {
+  styleCellRange(sheet, 0, 0, 0, colCount - 1, {
+    fill: { patternType: "solid", fgColor: { rgb: "FF173F73" } },
+    font: { name: "맑은 고딕", sz: 16, bold: true, color: { rgb: "FFFFFFFF" } },
+    alignment: { horizontal: "left", vertical: "center" },
+  });
+  styleCellRange(sheet, 1, 0, 1, colCount - 1, {
+    fill: { patternType: "solid", fgColor: { rgb: "FFEAF2F8" } },
+    font: { name: "맑은 고딕", sz: 10, color: { rgb: "FF234E70" } },
+    alignment: { horizontal: "left", vertical: "center", wrapText: true },
+  });
+  const headerRow = sheet["!merges"]?.some((merge) => merge.s.r === 3) && colCount === 13 ? 6 : 3;
+  styleCellRange(sheet, headerRow, 0, headerRow, colCount - 1, {
+    fill: { patternType: "solid", fgColor: { rgb: "FF1F4E78" } },
+    font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FFFFFFFF" } },
+    alignment: { horizontal: "center", vertical: "center", wrapText: true }, border: thinBorder("FFFFFFFF"),
+  });
+  for (let r = headerRow + 1; r < lastRow; r += 1) {
+    styleCellRange(sheet, r, 0, r, colCount - 1, {
+      fill: { patternType: "solid", fgColor: { rgb: r % 2 ? "FFFFFFFF" : "FFF7FAFC" } },
+      font: { name: "맑은 고딕", sz: 10, color: { rgb: "FF1F2937" } },
+      alignment: { horizontal: "center", vertical: "center", wrapText: true }, border: thinBorder("FFD9E1E8"),
+    });
+    for (const c of leftColumns) {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      if (sheet[addr]) sheet[addr].s.alignment.horizontal = "left";
+    }
+    sheet["!rows"][r] = sheet["!rows"][r] || { hpt: 28 };
+  }
+  sheet["!autofilter"] = { ref: `${XLSX.utils.encode_cell({ r: headerRow, c: 0 })}:${XLSX.utils.encode_cell({ r: Math.max(headerRow + 1, lastRow - 1), c: colCount - 1 })}` };
+}
+
 function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
   if (!sheet) throw new Error("상담사근태 최종본 시트를 찾지 못했습니다.");
-  setValue(sheet, "B2", `■ ${year}년 ${monthNo}월 출퇴근현황`);
-  setValue(sheet, "G2", `${monthNo}월 ${ctx.people.length}명`);
-  setValue(sheet, "I2", "");
-  setValue(sheet, "AT3", `${monthNo}월`);
-  setValue(sheet, "AT4", daysInMonth);
-  setValue(sheet, "AU4", countWeekdays(year, monthNo));
-  setValue(sheet, "AV4", countWeekendDays(year, monthNo));
+  removeMergesIntersecting(sheet, 1, 1, 3, 63);
+  clearValues(sheet, 2, 2, 4, 64);
+  addMerge(sheet, 1, 1, 1, 63);
+  addMerge(sheet, 2, 1, 2, 63);
+  addMerge(sheet, 3, 1, 3, 63);
+  setValue(sheet, "B2", `■ ${year}년 ${monthNo}월 ${result.routeLabel} 출퇴근현황  |  대상 ${ctx.people.length}명  |  ${daysInMonth}일  |  평일 ${countWeekdays(year, monthNo)}일  |  주말 ${countWeekendDays(year, monthNo)}일`);
+  setValue(sheet, "B3", "※ 증빙(필수기입) 시트의 ‘증빙여부’에 O를 입력하면 해당 직원·날짜의 ‘미입력’이 ‘출근’으로 자동 반영됩니다.");
+  setValue(sheet, "B4", "※ 휴무·연차·대체휴일·보상휴가 중 출근기록이 있거나 계획과 실제가 다른 항목은 매니저 수정요청 시트에서 확인합니다.");
   setValue(sheet, "N5", `${monthNo}월1일 \n근무계획\n일치확인`);
   setValue(sheet, "AV5", `${monthNo}월 사용가능\n휴무일수`);
+  setValue(sheet, "BL6", "");
 
   for (let day = 1; day <= 31; day += 1) {
     const col = 14 + day; // O=15 (1-based)
@@ -366,7 +536,8 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
     const address6 = XLSX.utils.encode_cell({ r: 5, c: col - 1 });
     if (day <= daysInMonth) {
       const date = new Date(year, monthNo - 1, day);
-      setValue(sheet, address5, Number(`${year}${String(monthNo).padStart(2, "0")}${String(day).padStart(2, "0")}`));
+      setValue(sheet, address5, date);
+      setNumberFormat(sheet, address5, "yyyymmdd");
       setValue(sheet, address6, WEEKDAYS[date.getDay()]);
     } else {
       clearCell(sheet, address5);
@@ -402,7 +573,12 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
       }
       const item = daily[day];
       applyNeutralDayStyle(sheet, address);
-      setValue(sheet, address, item?.display || "");
+      if (item?.display === "미입력") {
+        const colLetter = XLSX.utils.encode_col(col0);
+        setFormula(sheet, address, `IF(COUNTIFS('증빙(필수기입)'!$G$5:$G$300,$I${row},'증빙(필수기입)'!$I$5:$I$300,${colLetter}$5,'증빙(필수기입)'!$K$5:$K$300,"O")>0,"출근","미입력")`, "미입력");
+      } else {
+        setValue(sheet, address, item?.display || "");
+      }
       applyStatusStyle(sheet, address, item?.display || "");
       if (item?.issues?.length) {
         applyIssueStyle(sheet, address, item.issues);
@@ -564,13 +740,15 @@ function fillEvidenceSheet(sheet, result, ctx) {
       member?.storeName || issue.store || "",
       normalizeId(issue.employeeId),
       issue.name || member?.employeeName || "",
-      issue.date || "",
+      issue.date ? new Date(`${issue.date}T00:00:00`) : "",
       issue.reason || issue.result || "",
       "",
     ];
     values.forEach((value, valueIndex) => setValue(sheet, XLSX.utils.encode_cell({ r: row - 1, c: valueIndex + 1 }), value));
     row += 1;
   });
+  setValue(sheet, "K3", "증빙여부(O 입력)");
+  for (let evidenceRow = 5; evidenceRow < row; evidenceRow += 1) setNumberFormat(sheet, `I${evidenceRow}`, "yyyy-mm-dd");
   setRef(sheet, Math.max(25, row - 1), 11);
   styleEvidenceSheet(sheet, Math.max(5, row - 1));
 }
@@ -828,6 +1006,22 @@ function setValue(sheet, address, value) {
   extendRefForAddress(sheet, address);
 }
 
+function setFormula(sheet, address, formula, cachedValue = "") {
+  const old = sheet[address] || {};
+  const style = old.s ? clone(old.s) : undefined;
+  const z = old.z;
+  sheet[address] = { t: "s", v: cachedValue, f: String(formula || "").replace(/^=/, "") };
+  if (style) sheet[address].s = style;
+  if (z) sheet[address].z = z;
+  extendRefForAddress(sheet, address);
+}
+
+function removeMergesIntersecting(sheet, sr, sc, er, ec) {
+  sheet["!merges"] = (sheet["!merges"] || []).filter((merge) => (
+    merge.e.r < sr || merge.s.r > er || merge.e.c < sc || merge.s.c > ec
+  ));
+}
+
 function clearCell(sheet, address) {
   const old = sheet[address] || {};
   const style = old.s ? clone(old.s) : undefined;
@@ -935,7 +1129,7 @@ function styleMainSheet(sheet, lastRow, daysInMonth) {
   cols[9] = { wch: 11 };
   [10, 11, 12].forEach((i) => { cols[i] = { wch: 12 }; });
   cols[13] = { wch: 13 };
-  for (let i = 14; i < 45; i += 1) cols[i] = { wch: i - 13 <= daysInMonth ? 8.5 : 3 };
+  for (let i = 14; i < 45; i += 1) cols[i] = { wch: i - 13 <= daysInMonth ? 10.5 : 3 };
   for (let i = 45; i < 61; i += 1) cols[i] = { wch: 11 };
   cols[61] = { wch: 10 };
   cols[62] = { wch: 46 };
@@ -950,14 +1144,14 @@ function styleMainSheet(sheet, lastRow, daysInMonth) {
   for (let r = 6; r < lastRow; r += 1) sheet["!rows"][r] = { hpt: 23 };
 
   styleCellRange(sheet, 1, 1, 1, 63, {
-    fill: { patternType: "solid", fgColor: { rgb: "FF123B72" } },
-    font: { name: "맑은 고딕", sz: 12, bold: true, color: { rgb: "FFFFFFFF" } },
-    alignment: { vertical: "center" },
+    fill: { patternType: "solid", fgColor: { rgb: "FF173F73" } },
+    font: { name: "맑은 고딕", sz: 15, bold: true, color: { rgb: "FFFFFFFF" } },
+    alignment: { horizontal: "left", vertical: "center" },
   });
   styleCellRange(sheet, 2, 1, 3, 63, {
     fill: { patternType: "solid", fgColor: { rgb: "FFEAF2F8" } },
-    font: { name: "맑은 고딕", sz: 9, color: { rgb: "FF365B7D" } },
-    alignment: { vertical: "center", wrapText: true },
+    font: { name: "맑은 고딕", sz: 10, color: { rgb: "FF234E70" } },
+    alignment: { horizontal: "left", vertical: "center", wrapText: true },
   });
   styleCellRange(sheet, 4, 1, 4, 63, {
     fill: { patternType: "solid", fgColor: { rgb: "FF1F4E78" } },
@@ -1020,11 +1214,11 @@ function stylePlanSheet(sheet, lastRow, maxCol, dayColumns) {
 
 function styleEvidenceSheet(sheet, lastRow) {
   setValue(sheet, "B1", "근태 오류·증빙 제출 대상");
-  setValue(sheet, "B2", "수정이 필요한 직원과 발생일, 사유를 확인한 뒤 증빙 여부를 관리합니다.");
+  setValue(sheet, "B2", "수정이 필요한 직원과 발생일을 확인한 뒤 K열에 O를 입력하세요. 근태 미입력 건은 상담사근태 시트에서 자동으로 ‘출근’으로 반영됩니다.");
   addMerge(sheet, 0, 1, 0, 10);
   addMerge(sheet, 1, 1, 1, 10);
   sheet["!autofilter"] = { ref: `B3:K${lastRow}` };
-  sheet["!cols"] = [{ wch: 2 }, { wch: 7 }, { wch: 11 }, { wch: 11 }, { wch: 10 }, { wch: 16 }, { wch: 13 }, { wch: 11 }, { wch: 13 }, { wch: 30 }, { wch: 11 }];
+  sheet["!cols"] = [{ wch: 2 }, { wch: 7 }, { wch: 11 }, { wch: 11 }, { wch: 10 }, { wch: 16 }, { wch: 13 }, { wch: 11 }, { wch: 13 }, { wch: 44 }, { wch: 15 }];
   styleCellRange(sheet, 0, 1, 0, 10, {
     fill: { patternType: "solid", fgColor: { rgb: "FF123B72" } },
     font: { name: "맑은 고딕", sz: 15, bold: true, color: { rgb: "FFFFFFFF" } },
@@ -1050,6 +1244,11 @@ function styleEvidenceSheet(sheet, lastRow) {
     });
     const reasonAddr = XLSX.utils.encode_cell({ r, c: 9 });
     if (sheet[reasonAddr]) sheet[reasonAddr].s.alignment.horizontal = "left";
+    const evidenceAddr = XLSX.utils.encode_cell({ r, c: 10 });
+    if (sheet[evidenceAddr]) {
+      sheet[evidenceAddr].s.fill = { patternType: "solid", fgColor: { rgb: "FFFFF2CC" } };
+      sheet[evidenceAddr].s.font = { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FF7F6000" } };
+    }
   }
 }
 
