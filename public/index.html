@@ -24,6 +24,7 @@
     <nav class="tabs" aria-label="근태 관리 메뉴">
       <button class="tab active" data-view="checker" type="button">근태 종합 점검</button>
       <button class="tab" data-view="substitute" type="button">경로별 공통 대체휴무</button>
+      <button class="tab" data-view="files" type="button">월 마감 파일 보관함</button>
       <button class="tab" data-view="history" type="button">월 마감 기록</button>
     </nav>
 
@@ -158,7 +159,7 @@
             <div class="panel-heading">
               <div><span class="step-label">COMMON GRANT</span><h2>경로 공통 대체휴무 설정</h2></div>
             </div>
-            <p class="muted">같은 경로·같은 발생 월은 1건만 저장됩니다. 다시 저장하면 기존 설정을 교체하고 관련 월 마감을 다시 계산합니다.</p>
+            <p class="muted">같은 경로·같은 발생 월은 1건만 저장됩니다. 월 마감 전에 먼저 등록할 수 있으며, 아직 마감이 없으면 적용 인원 0명·월 마감 대기로 표시됩니다. 다시 저장하면 기존 설정을 교체하고 관련 월 마감을 다시 계산합니다.</p>
             <form id="grantForm">
               <div class="field-group">
                 <label class="field-label" for="grantRoute">경로</label>
@@ -197,6 +198,50 @@
               <table class="wide-table">
                 <thead><tr><th>경로</th><th>발생 월</th><th>1인당 부여</th><th>적용 인원</th><th>총 부여</th><th>사용</th><th>미사용</th><th>사용기간</th><th>상태</th><th>사유/메모</th><th>관리</th></tr></thead>
                 <tbody id="grantTableBody"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+
+
+      <section id="filesView" class="view">
+        <div class="substitute-layout file-vault-layout">
+          <section class="panel form-panel">
+            <div class="panel-heading">
+              <div><span class="step-label">FILE VAULT</span><h2>월 마감 파일 보관</h2></div>
+            </div>
+            <p class="muted">계획표·근태표·수정본을 경로와 월별로 저장하고 다시 내려받을 수 있습니다. 월 마감 저장 시 사용한 계획표와 근태표도 자동 보관됩니다.</p>
+            <div id="fileStorageNotice" class="alert success file-storage-notice">파일 저장소 상태를 확인 중입니다.</div>
+            <form id="archiveForm">
+              <div class="field-group">
+                <label class="field-label" for="archiveRoute">경로</label>
+                <select id="archiveRoute" class="input"><option value="homeplus">홈플러스</option><option value="electroland">전자랜드</option></select>
+              </div>
+              <div class="two-cols">
+                <div class="field-group"><label class="field-label" for="archiveMonth">대상 월</label><input id="archiveMonth" class="input" type="month" required /></div>
+                <div class="field-group"><label class="field-label" for="archiveKind">파일 구분</label><select id="archiveKind" class="input"><option value="plan">계획표</option><option value="attendance">실제 근태표</option><option value="result">결과·수정본</option><option value="other">기타</option></select></div>
+              </div>
+              <div class="field-group"><label class="field-label" for="archiveFile">보관할 엑셀 파일</label><input id="archiveFile" class="input file-input" type="file" accept=".xlsx,.xls,.xlsb" required /></div>
+              <div class="field-group"><label class="field-label" for="archiveNote">메모</label><textarea id="archiveNote" class="textarea" rows="3" placeholder="예: 담당자 확인 후 수정한 최종본"></textarea></div>
+              <button id="archiveSubmitButton" class="btn primary full" type="submit">파일 보관</button>
+            </form>
+          </section>
+
+          <section class="panel grant-list-panel">
+            <div class="panel-heading">
+              <div><span class="step-label">SAVED FILES</span><h2>저장된 월 마감 파일</h2><p class="muted">다운로드 후 수정하고 다시 업로드할 수 있습니다. 계획표·근태표는 바로 분석 화면으로 불러올 수도 있습니다.</p></div>
+              <div class="toolbar-actions">
+                <select id="archiveRouteFilter" class="input compact"><option value="">전체 경로</option><option value="homeplus">홈플러스</option><option value="electroland">전자랜드</option></select>
+                <input id="archiveMonthFilter" class="input compact" type="month" />
+                <button id="refreshArchiveButton" class="btn secondary" type="button">새로고침</button>
+              </div>
+            </div>
+            <div id="archiveSummary" class="grant-summary"></div>
+            <div class="table-wrap">
+              <table class="wide-table archive-table">
+                <thead><tr><th>경로</th><th>대상 월</th><th>구분</th><th>파일명</th><th>용량</th><th>저장 방식</th><th>메모</th><th>저장일</th><th>관리</th></tr></thead>
+                <tbody id="archiveTableBody"><tr><td colspan="9" class="empty-cell">관리자 로그인 후 조회할 수 있습니다.</td></tr></tbody>
               </table>
             </div>
           </section>

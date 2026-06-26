@@ -1,9 +1,11 @@
 import { json, requireAuth } from "../../_lib/auth.js";
 import { recalculateRoute } from "../../_lib/recalculate.js";
+import { ensureSchema } from "../../_lib/schema.js";
 
 export async function onRequestDelete(context) {
   const denied = await requireAuth(context);
   if (denied) return denied;
+  await ensureSchema(context.env.DB);
 
   const id = context.params.id;
   const grant = await context.env.DB.prepare(

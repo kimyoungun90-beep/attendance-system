@@ -1,20 +1,25 @@
 import { json, requireAuth } from "../_lib/auth.js";
 import { recalculateRoute, runBatch } from "../_lib/recalculate.js";
+import { ensureSchema } from "../_lib/schema.js";
 
 const VALID_ROUTES = new Set(["homeplus", "electroland"]);
 
 export async function onRequestGet(context) {
   const denied = await requireAuth(context);
   if (denied) return denied;
+  await ensureSchema(context.env.DB);
 
   const result = await context.env.DB.prepare(`
-    SELECT id, company AS route, month, cutoff_date, plan_file_name, attendance_file_name,
-           plan_people, attendance_people, matched_people, match_rate,
-           missing_count, missing_people, unexpected_count, unexpected_people,
-           mismatch_count, mismatch_people, dayoff_excess_people,
-           substitute_shortage_people, annual_leave_people, created_at
-    FROM attendance_closures
-    ORDER BY month DESC, company ASC, created_at DESC
+    SELECT c.id, c.company AS route, c.month, c.cutoff_date, c.plan_file_name, c.attendance_file_name,
+           c.plan_people, c.attendance_people, c.matched_people, c.match_rate,
+           c.missing_count, c.missing_people, c.unexpected_count, c.unexpected_people,
+           c.mismatch_count, c.mismatch_people, c.dayoff_excess_people,
+           c.substitute_shortage_people, c.annual_leave_people, c.created_at
+    FROM attendance_closures c
+    WHERE EXISTS (
+      SELECT 1 FROM attendance_monthly_employee_facts f WHERE f.closure_id = c.id
+    )
+    ORDER BY c.month DESC, c.company ASC, c.created_at DESC
     LIMIT 240
   `).all();
 
@@ -24,6 +29,7 @@ export async function onRequestGet(context) {
 export async function onRequestPost(context) {
   const denied = await requireAuth(context);
   if (denied) return denied;
+  await ensureSchema(context.env.DB);
 
   const body = await context.request.json().catch(() => null);
   const route = String(body?.route || "");
@@ -41,33 +47,11 @@ export async function onRequestPost(context) {
     "SELECT id FROM attendance_closures WHERE company = ? AND month = ? LIMIT 1"
   ).bind(route, month).first();
   const replaced = Boolean(existing?.id);
-  const closureId = crypto.randomUUID();
+  const closureId = existing?.id || crypto.randomUUID();
 
-  const initialStatements = [];
-  if (existing?.id) {
-    initialStatements.push(
-      context.env.DB.prepare("DELETE FROM route_substitute_allocations WHERE closure_id = ?").bind(existing.id),
-      context.env.DB.prepare("DELETE FROM attendance_monthly_summaries_v3 WHERE closure_id = ?").bind(existing.id),
-      context.env.DB.prepare("DELETE FROM attendance_monthly_employee_facts WHERE closure_id = ?").bind(existing.id),
-      context.env.DB.prepare("DELETE FROM attendance_mismatch_items WHERE closure_id = ?").bind(existing.id),
-      context.env.DB.prepare("DELETE FROM attendance_issue_items WHERE closure_id = ?").bind(existing.id),
-      context.env.DB.prepare("DELETE FROM attendance_missing_items WHERE closure_id = ?").bind(existing.id),
-      context.env.DB.prepare("DELETE FROM attendance_closures WHERE id = ?").bind(existing.id)
-    );
-  }
-
-  initialStatements.push(context.env.DB.prepare(`
-    INSERT INTO attendance_closures
-    (id, company, month, cutoff_date, check_mode, plan_file_name, attendance_file_name,
-     plan_people, attendance_people, matched_people, match_rate,
-     missing_count, missing_people, unexpected_count, unexpected_people,
-     mismatch_count, mismatch_people, dayoff_excess_people,
-     substitute_shortage_people, annual_leave_people)
-    VALUES (?, ?, ?, ?, 'auto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).bind(
-    closureId,
-    route,
-    month,
+  const missingRows = issueRows.filter((row) => row.issueType === "missing_clock_in");
+  const unexpectedRows = issueRows.filter((row) => row.issueType === "unexpected_clock_in");
+  const values = [
     body.cutoffDate || endOfMonth(month),
     body.planFileName || "",
     body.attendanceFileName || "",
@@ -75,16 +59,48 @@ export async function onRequestPost(context) {
     toNumber(body.attendancePeople),
     toNumber(body.matchedPeople),
     toNumber(body.matchRate),
-    issueRows.filter((row) => row.issueType === "missing_clock_in").length,
-    uniquePeople(issueRows.filter((row) => row.issueType === "missing_clock_in")),
-    issueRows.filter((row) => row.issueType === "unexpected_clock_in").length,
-    uniquePeople(issueRows.filter((row) => row.issueType === "unexpected_clock_in")),
+    missingRows.length,
+    uniquePeople(missingRows),
+    unexpectedRows.length,
+    uniquePeople(unexpectedRows),
     mismatchRows.length,
     uniquePeople(mismatchRows),
     employeeFacts.filter((row) => Number(row.baseExcess || 0) > 0).length,
     0,
-    employeeFacts.filter((row) => Number(row.annualLeaveUsed || 0) > 0).length
-  ));
+    employeeFacts.filter((row) => Number(row.annualLeaveUsed || 0) > 0).length,
+  ];
+
+  const initialStatements = [];
+  if (replaced) {
+    initialStatements.push(
+      context.env.DB.prepare("DELETE FROM route_substitute_allocations WHERE closure_id = ?").bind(closureId),
+      context.env.DB.prepare("DELETE FROM attendance_monthly_summaries_v3 WHERE closure_id = ?").bind(closureId),
+      context.env.DB.prepare("DELETE FROM attendance_monthly_employee_facts WHERE closure_id = ?").bind(closureId),
+      context.env.DB.prepare("DELETE FROM attendance_mismatch_items WHERE closure_id = ?").bind(closureId),
+      context.env.DB.prepare("DELETE FROM attendance_issue_items WHERE closure_id = ?").bind(closureId),
+      context.env.DB.prepare("DELETE FROM attendance_missing_items WHERE closure_id = ?").bind(closureId),
+      context.env.DB.prepare(`
+        UPDATE attendance_closures
+        SET cutoff_date = ?, check_mode = 'auto', plan_file_name = ?, attendance_file_name = ?,
+            plan_people = ?, attendance_people = ?, matched_people = ?, match_rate = ?,
+            missing_count = ?, missing_people = ?, unexpected_count = ?, unexpected_people = ?,
+            mismatch_count = ?, mismatch_people = ?, dayoff_excess_people = ?,
+            substitute_shortage_people = ?, annual_leave_people = ?, created_at = datetime('now')
+        WHERE id = ?
+      `).bind(...values, closureId)
+    );
+  } else {
+    initialStatements.push(context.env.DB.prepare(`
+      INSERT INTO attendance_closures
+      (id, company, month, cutoff_date, check_mode, plan_file_name, attendance_file_name,
+       plan_people, attendance_people, matched_people, match_rate,
+       missing_count, missing_people, unexpected_count, unexpected_people,
+       mismatch_count, mismatch_people, dayoff_excess_people,
+       substitute_shortage_people, annual_leave_people)
+      VALUES (?, ?, ?, ?, 'auto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(closureId, route, month, ...values));
+  }
+
 
   try {
     await context.env.DB.batch(initialStatements);

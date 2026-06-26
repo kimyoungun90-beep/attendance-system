@@ -3,7 +3,7 @@ import { clearSessionCookie, createSessionCookie, isAuthenticated, json } from "
 export async function onRequestGet(context) {
   const configured = Boolean(context.env.ADMIN_PASSWORD && context.env.SESSION_SECRET);
   const loggedIn = configured ? await isAuthenticated(context.request, context.env.SESSION_SECRET) : false;
-  return json({ configured, loggedIn });
+  return json({ configured, loggedIn, fileStorageConfigured: Boolean(context.env.FILES), fileStorageMode: context.env.FILES ? "r2" : "d1" });
 }
 
 export async function onRequestPost(context) {

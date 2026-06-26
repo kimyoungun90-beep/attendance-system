@@ -19,11 +19,12 @@ const state = {
   attendanceFile: null,
   result: null,
   priorLedger: emptyLedger(),
-  backend: { available: false, configured: false, loggedIn: false },
+  backend: { available: false, configured: false, loggedIn: false, fileStorageConfigured: false, fileStorageMode: "d1" },
   activeResultTab: "missing",
   currentPage: 1,
   pageSize: 50,
   grants: [],
+  archiveFiles: [],
 };
 
 init();
@@ -35,7 +36,7 @@ async function init() {
   setupDropzone("attendanceDropzone", "attendanceFile", setAttendanceFile);
   await checkBackend();
   syncRouteRuleHelp();
-  if (state.backend.loggedIn) await Promise.all([loadHistory(), loadGrants()]);
+  if (state.backend.loggedIn) await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles()]);
 }
 
 function bindEvents() {
@@ -51,6 +52,10 @@ function bindEvents() {
   $("#grantForm").addEventListener("submit", saveGrant);
   $("#grantMonth").addEventListener("change", syncGrantDates);
   $("#grantCancelEdit").addEventListener("click", resetGrantForm);
+  $("#archiveForm").addEventListener("submit", saveArchiveFile);
+  $("#refreshArchiveButton").addEventListener("click", loadArchiveFiles);
+  $("#archiveRouteFilter").addEventListener("change", loadArchiveFiles);
+  $("#archiveMonthFilter").addEventListener("change", loadArchiveFiles);
   $("#loginButton").addEventListener("click", openLogin);
   $("#logoutButton").addEventListener("click", logout);
   $("#loginCancel").addEventListener("click", () => $("#loginDialog").close());
@@ -67,6 +72,7 @@ function setDefaultDates() {
   $("#targetMonth").value = month;
   $("#cutoffDate").value = toISODate(now);
   $("#grantMonth").value = month;
+  $("#archiveMonth").value = month;
   syncGrantDates();
 }
 
@@ -138,12 +144,12 @@ async function analyzeFiles() {
     button.disabled = true;
     button.textContent = "파일 분석 중...";
 
-    const [planMatrix, attendanceMatrix] = await Promise.all([
-      fileToMatrix(state.planFile),
-      fileToMatrix(state.attendanceFile),
+    const [planWorkbook, attendanceWorkbook] = await Promise.all([
+      fileToWorkbookSheets(state.planFile),
+      fileToWorkbookSheets(state.attendanceFile),
     ]);
-    const plan = parsePlan(planMatrix);
-    const attendance = parseAttendance(attendanceMatrix, targetMonth);
+    const plan = parsePlan(planWorkbook, targetMonth);
+    const attendance = parseAttendance(attendanceWorkbook, targetMonth);
     state.priorLedger = await loadPriorLedger(route, targetMonth);
 
     const result = compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, ledger: state.priorLedger });
@@ -194,65 +200,137 @@ function emptyLedger() {
   return { lotsByEmployee: {}, annualLeaveBefore: {}, currentGrant: null };
 }
 
-async function fileToMatrix(file) {
+async function fileToWorkbookSheets(file) {
   const buffer = await file.arrayBuffer();
   const workbook = XLSX.read(buffer, { type: "array", cellDates: true, raw: false });
-  const sheet = workbook.Sheets[workbook.SheetNames[0]];
-  return XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false, blankrows: false });
+  return workbook.SheetNames.map((sheetName) => ({
+    sheetName,
+    matrix: XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
+      header: 1,
+      defval: "",
+      raw: false,
+      blankrows: false,
+    }),
+  })).filter((sheet) => sheet.matrix.some((row) => row.some((cell) => text(cell))));
 }
 
-function parsePlan(matrix) {
-  const headerIndex = findHeaderRow(matrix, ["사번", "매장명", "이름"]);
-  if (headerIndex < 0) throw new Error("계획표에서 ‘매장명·사번·이름’ 머리글을 찾지 못했습니다.");
+function parsePlan(sheets, targetMonth) {
+  const candidates = [];
+  const errors = [];
+  for (const sheet of normalizeWorkbookInput(sheets)) {
+    try {
+      candidates.push(tryParsePlanSheet(sheet, targetMonth));
+    } catch (error) {
+      errors.push(`${sheet.sheetName}: ${error.message}`);
+    }
+  }
+  if (!candidates.length) {
+    throw new Error(`계획표에서 사번·이름·날짜 열을 찾지 못했습니다. 확인한 시트: ${normalizeWorkbookInput(sheets).map((sheet) => sheet.sheetName).join(", ") || "없음"}`);
+  }
+  candidates.sort((a, b) => b.rows.length - a.rows.length || b.dayColumns.size - a.dayColumns.size);
+  return candidates[0];
+}
 
-  const headers = matrix[headerIndex].map(normalizeHeader);
+function tryParsePlanSheet(sheet, targetMonth) {
+  const matrix = sheet.matrix;
+  const headerIndex = findPlanHeaderRow(matrix, targetMonth);
+  if (headerIndex < 0) throw new Error("사번·이름·날짜 머리글 없음");
+
+  const rawHeaders = matrix[headerIndex] || [];
+  const headers = rawHeaders.map(normalizeHeader);
   const columns = {
-    store: findHeaderIndex(headers, ["매장명", "매장", "지점명"]),
-    employeeId: findHeaderIndex(headers, ["사번", "사원번호"]),
-    name: findHeaderIndex(headers, ["이름", "성명"]),
-    employment: findHeaderIndex(headers, ["재직상태", "근무상태"]),
+    store: findHeaderIndex(headers, ["매장명", "매장", "점포", "점포명", "지점명", "근무지", "근무매장"]),
+    employeeId: findHeaderIndex(headers, ["사번", "사원번호", "직원번호", "사원ID", "사번ID", "EMPLOYEEID", "EMPLOYEENO"]),
+    name: findHeaderIndex(headers, ["이름", "성명", "사원명", "직원명", "매니저명"]),
+    employment: findHeaderIndex(headers, ["재직상태", "근무상태", "재직여부"]),
   };
+
+  // 사용 중인 계획표의 고정 구조(A 매장명, B 사번, D 이름)도 보조 인식합니다.
+  if (columns.store < 0 && headers.length > 0) columns.store = 0;
+  if (columns.employeeId < 0 && headers.length > 1) columns.employeeId = 1;
+  if (columns.name < 0 && headers.length > 3) columns.name = 3;
+
   const dayColumns = new Map();
-  headers.forEach((header, index) => {
-    const match = header.match(/^(\d{1,2})일$/);
-    if (match) dayColumns.set(Number(match[1]), index);
+  rawHeaders.forEach((header, index) => {
+    const day = parsePlanHeaderDay(header, targetMonth);
+    if (day && !dayColumns.has(day)) dayColumns.set(day, index);
   });
-  if (!dayColumns.size) throw new Error("계획표에서 ‘01일~31일’ 날짜 열을 찾지 못했습니다.");
+
+  // 날짜가 두 줄 머리글인 파일은 바로 위·아래 행도 함께 확인합니다.
+  for (const nearbyIndex of [headerIndex - 1, headerIndex + 1]) {
+    if (nearbyIndex < 0 || nearbyIndex >= matrix.length) continue;
+    (matrix[nearbyIndex] || []).forEach((header, index) => {
+      if (index < 6) return;
+      const day = parsePlanHeaderDay(header, targetMonth);
+      if (day && !dayColumns.has(day)) dayColumns.set(day, index);
+    });
+  }
+
+  if (!dayColumns.size) throw new Error("01일~31일 날짜 열 없음");
 
   const rows = matrix.slice(headerIndex + 1).map((row, sourceIndex) => ({
-    store: text(row[columns.store]),
+    store: columns.store >= 0 ? text(row[columns.store]) : "",
     employeeId: normalizeEmployeeId(row[columns.employeeId]),
-    name: text(row[columns.name]),
+    name: columns.name >= 0 ? text(row[columns.name]) : "",
     employment: columns.employment >= 0 ? text(row[columns.employment]) : "",
     plans: Object.fromEntries([...dayColumns.entries()].map(([day, col]) => [day, text(row[col])])),
     sourceIndex: sourceIndex + headerIndex + 2,
-  })).filter((row) => row.employeeId && row.name && (!row.employment || !row.employment.includes("퇴사")));
+  })).filter((row) => looksLikeEmployeeId(row.employeeId) && row.name && (!row.employment || !row.employment.includes("퇴사")));
 
-  if (!rows.length) throw new Error("계획표에서 유효한 사번 데이터를 찾지 못했습니다.");
-  return { rows, headerIndex, dayColumns, detectedRoute: detectRouteFromPlan(rows) };
+  if (!rows.length) throw new Error("유효한 사번 데이터 없음");
+  return {
+    rows,
+    headerIndex,
+    dayColumns,
+    detectedRoute: detectRouteFromPlan(rows),
+    sheetName: sheet.sheetName,
+  };
 }
 
-function parseAttendance(matrix, targetMonth) {
-  const headerIndex = findHeaderRow(matrix, ["사번", "근무일자"]);
-  if (headerIndex < 0) throw new Error("근태표에서 ‘사번·근무일자’ 머리글을 찾지 못했습니다.");
+function parseAttendance(sheets, targetMonth) {
+  const candidates = [];
+  for (const sheet of normalizeWorkbookInput(sheets)) {
+    try {
+      const parsed = tryParseAttendanceSheet(sheet, targetMonth);
+      if (parsed.rows.length) candidates.push(parsed);
+    } catch {
+      // 다른 시트 후보를 계속 확인합니다.
+    }
+  }
+  if (!candidates.length) {
+    throw new Error(`${targetMonth} 근태 기록 또는 사번·근무일자 머리글을 찾지 못했습니다. 통합문서의 모든 시트를 확인했습니다.`);
+  }
+  candidates.sort((a, b) => b.rows.length - a.rows.length);
+  return candidates[0];
+}
 
-  const headers = matrix[headerIndex].map(normalizeHeader);
+function tryParseAttendanceSheet(sheet, targetMonth) {
+  const matrix = sheet.matrix;
+  const headerIndex = findAttendanceHeaderRow(matrix, targetMonth);
+  if (headerIndex < 0) throw new Error("사번·근무일자 머리글 없음");
+
+  const headers = (matrix[headerIndex] || []).map(normalizeHeader);
   const columns = {
-    employeeId: findHeaderIndex(headers, ["사번", "사원번호"]),
-    name: findHeaderIndex(headers, ["이름", "성명"]),
-    date: findHeaderIndex(headers, ["근무일자", "근무일", "일자"]),
-    actualIn: findHeaderIndex(headers, ["(실제)출근시간", "실제출근시간", "출근시간"]),
-    changedIn: findHeaderIndex(headers, ["(변경)출근시간", "변경출근시간", "수정출근시간"]),
-    location: findHeaderIndex(headers, ["출근지점", "출근매장", "근무지점", "매장명"]),
+    employeeId: findHeaderIndex(headers, ["사번", "사원번호", "직원번호", "사원ID", "사번ID", "EMPLOYEEID", "EMPLOYEENO"]),
+    name: findHeaderIndex(headers, ["이름", "성명", "사원명", "직원명", "매니저명"]),
+    date: findHeaderIndex(headers, ["근무일자", "근무일", "근태일자", "일자", "날짜"]),
+    actualIn: findHeaderIndex(headers, ["(실제)출근시간", "실제출근시간", "출근시간", "출근시각", "출근"]),
+    changedIn: findHeaderIndex(headers, ["(변경)출근시간", "변경출근시간", "수정출근시간", "인정출근시간"]),
+    location: findHeaderIndex(headers, ["출근지점", "출근매장", "근무지점", "매장명", "점포명", "근무지"]),
     actualStatus: findHeaderIndex(headers, [
       "실제근태", "근태", "근태구분", "근태항목", "근태명", "근태코드",
       "근무구분", "실제근무구분", "(실제)근태", "처리근태",
     ]),
   };
-  if (columns.date < 0 || columns.employeeId < 0) throw new Error("근태표의 날짜 또는 사번 열을 확인해 주세요.");
-  if (columns.actualIn < 0 && columns.changedIn < 0 && columns.actualStatus < 0) {
-    throw new Error("근태표에서 실제/변경 출근시간 또는 실제 근태 열을 찾지 못했습니다.");
-  }
+
+  // 사용 중인 근태표의 고정 구조(A 이름, B 근무일자, C 출근시간, D 사번, E 퇴근시간) 보조 인식.
+  if (columns.name < 0 && headers.length > 0) columns.name = 0;
+  if (columns.date < 0 && headers.length > 1) columns.date = 1;
+  if (columns.actualIn < 0 && headers.length > 2) columns.actualIn = 2;
+  if (columns.employeeId < 0 && headers.length > 3) columns.employeeId = 3;
+
+  if (columns.date < 0 || columns.employeeId < 0) throw new Error("날짜 또는 사번 열 없음");
+  if (columns.actualIn < 0 && columns.changedIn < 0 && columns.actualStatus < 0) throw new Error("출근시간 또는 실제 근태 열 없음");
 
   const rows = matrix.slice(headerIndex + 1).map((row, sourceIndex) => {
     const date = parseDateCell(row[columns.date]);
@@ -266,15 +344,93 @@ function parseAttendance(matrix, targetMonth) {
       actualStatus: columns.actualStatus >= 0 ? text(row[columns.actualStatus]) : "",
       sourceIndex: sourceIndex + headerIndex + 2,
     };
-  }).filter((row) => row.employeeId && row.date && row.date.startsWith(targetMonth));
+  }).filter((row) => looksLikeEmployeeId(row.employeeId) && row.date && row.date.startsWith(targetMonth));
 
-  if (!rows.length) throw new Error(`${targetMonth} 근태 기록을 찾지 못했습니다. 대상 월을 확인해 주세요.`);
+  if (!rows.length) throw new Error(`${targetMonth} 유효 행 없음`);
   return {
     rows,
     headerIndex,
     detectedRoute: detectRouteFromAttendance(rows),
     hasActualStatusColumn: columns.actualStatus >= 0,
+    sheetName: sheet.sheetName,
   };
+}
+
+function normalizeWorkbookInput(value) {
+  if (!Array.isArray(value)) return [];
+  if (value.length && Array.isArray(value[0])) return [{ sheetName: "첫 번째 시트", matrix: value }];
+  return value;
+}
+
+function findFlexibleHeaderRow(matrix, predicate) {
+  const limit = Math.min(matrix.length, 60);
+  for (let index = 0; index < limit; index += 1) {
+    const headers = (matrix[index] || []).map(normalizeHeader);
+    if (predicate(headers)) return index;
+  }
+  return -1;
+}
+
+function findPlanHeaderRow(matrix, targetMonth) {
+  const limit = Math.min(matrix.length, 100);
+  let best = { index: -1, score: -1 };
+  for (let index = 0; index < limit; index += 1) {
+    const row = matrix[index] || [];
+    const headers = row.map(normalizeHeader);
+    const employeeId = findHeaderIndex(headers, ["사번", "사원번호", "직원번호", "사원ID", "사번ID", "EMPLOYEEID", "EMPLOYEENO"]);
+    const name = findHeaderIndex(headers, ["이름", "성명", "사원명", "직원명", "매니저명"]);
+    const store = findHeaderIndex(headers, ["매장명", "매장", "점포", "점포명", "지점명", "근무지", "근무매장"]);
+    let dayCount = row.filter((cell) => parsePlanHeaderDay(cell, targetMonth)).length;
+    if (index > 0) dayCount = Math.max(dayCount, (matrix[index - 1] || []).filter((cell) => parsePlanHeaderDay(cell, targetMonth)).length);
+    if (index + 1 < matrix.length) dayCount = Math.max(dayCount, (matrix[index + 1] || []).filter((cell) => parsePlanHeaderDay(cell, targetMonth)).length);
+
+    const knownLayoutMatches = matrix.slice(index + 1, index + 12).filter((dataRow) => (
+      looksLikeEmployeeId(dataRow?.[1]) && text(dataRow?.[3])
+    )).length;
+    const score = (employeeId >= 0 ? 20 : 0) + (name >= 0 ? 15 : 0) + (store >= 0 ? 5 : 0) + Math.min(dayCount, 31) + knownLayoutMatches * 2;
+    const valid = (employeeId >= 0 && name >= 0 && dayCount >= 1) || (dayCount >= 5 && knownLayoutMatches >= 2);
+    if (valid && score > best.score) best = { index, score };
+  }
+  return best.index;
+}
+
+function findAttendanceHeaderRow(matrix, targetMonth) {
+  const limit = Math.min(matrix.length, 100);
+  let best = { index: -1, score: -1 };
+  for (let index = 0; index < limit; index += 1) {
+    const headers = (matrix[index] || []).map(normalizeHeader);
+    const employeeId = findHeaderIndex(headers, ["사번", "사원번호", "직원번호", "사원ID", "사번ID", "EMPLOYEEID", "EMPLOYEENO"]);
+    const date = findHeaderIndex(headers, ["근무일자", "근무일", "근태일자", "일자", "날짜"]);
+    const clock = findHeaderIndex(headers, ["(실제)출근시간", "실제출근시간", "출근시간", "출근시각", "출근"]);
+    const knownLayoutMatches = matrix.slice(index + 1, index + 15).filter((dataRow) => {
+      const parsedDate = parseDateCell(dataRow?.[1]);
+      return looksLikeEmployeeId(dataRow?.[3]) && parsedDate && (!targetMonth || parsedDate.startsWith(targetMonth));
+    }).length;
+    const score = (employeeId >= 0 ? 20 : 0) + (date >= 0 ? 20 : 0) + (clock >= 0 ? 5 : 0) + knownLayoutMatches * 3;
+    const valid = (employeeId >= 0 && date >= 0) || knownLayoutMatches >= 2;
+    if (valid && score > best.score) best = { index, score };
+  }
+  return best.index;
+}
+
+function parsePlanHeaderDay(value, targetMonth) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    if (!targetMonth || `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}` === targetMonth) return value.getDate();
+    return null;
+  }
+  const raw = text(value);
+  if (!raw) return null;
+  let match = raw.match(/^(?:0?)([1-9]|[12]\d|3[01])\s*일$/);
+  if (match) return Number(match[1]);
+  match = raw.match(/^(?:\d{2,4}[.\-/년]\s*)?(\d{1,2})[.\-/월]\s*(\d{1,2})(?:일)?$/);
+  if (match) return Number(match[2]);
+  match = raw.match(/^\d{4}-\d{1,2}-(\d{1,2})/);
+  if (match) return Number(match[1]);
+  if (/^\d{1,2}$/.test(raw)) {
+    const numberValue = Number(raw);
+    return numberValue >= 1 && numberValue <= 31 ? numberValue : null;
+  }
+  return null;
 }
 
 function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, ledger }) {
@@ -960,19 +1116,241 @@ async function saveClosure() {
       openLogin();
       return;
     }
-    const data = await response.json();
+    const data = await readJsonResponse(response);
     if (!response.ok) throw new Error(data.error || "월 마감 저장 실패");
 
     applyServerSummaries(data.summaries || []);
-    await Promise.all([loadHistory(), loadGrants()]);
+
+    const fileResults = await Promise.allSettled([
+      uploadArchiveFile({
+        file: state.planFile,
+        route: result.route,
+        month: result.targetMonth,
+        fileKind: "plan",
+        note: "월 마감 저장 시 자동 보관",
+        sourceType: "closure",
+        closureId: data.id,
+        replace: true,
+      }),
+      uploadArchiveFile({
+        file: state.attendanceFile,
+        route: result.route,
+        month: result.targetMonth,
+        fileKind: "attendance",
+        note: "월 마감 저장 시 자동 보관",
+        sourceType: "closure",
+        closureId: data.id,
+        replace: true,
+      }),
+    ]);
+    await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles()]);
     const action = data.replaced ? "기존 월 마감을 완전히 교체했습니다." : "새 월 마감을 저장했습니다.";
-    showToast(`${action} ${data.affectedMonths || 0}개 월의 연차·대체휴무 누적을 다시 계산했습니다.`);
+    const failedFiles = fileResults.filter((item) => item.status === "rejected");
+    const fileMessage = failedFiles.length
+      ? ` 월 마감은 정상 저장됐지만 원본 파일 ${failedFiles.length}개는 보관하지 못했습니다: ${failedFiles.map((item) => item.reason?.message || "파일 보관 오류").join(" / ")}`
+      : " 사용한 계획표와 근태표도 파일 보관함에 저장했습니다.";
+    showToast(`${action} ${data.affectedMonths || 0}개 월의 연차·대체휴무 누적을 다시 계산했습니다.${fileMessage}`);
   } catch (error) {
     showToast(error.message || "월 마감 저장 중 오류가 발생했습니다.");
   } finally {
     button.disabled = false;
     button.textContent = "월 마감 교체 저장";
   }
+}
+
+async function saveArchiveFile(event) {
+  event.preventDefault();
+  if (!(state.backend.available && state.backend.configured && state.backend.loggedIn)) {
+    openLogin();
+    return;
+  }
+  const file = $("#archiveFile").files?.[0];
+  if (!file) {
+    showToast("보관할 엑셀 파일을 선택해 주세요.");
+    return;
+  }
+
+  const button = $("#archiveSubmitButton");
+  try {
+    button.disabled = true;
+    button.textContent = "파일 저장 중...";
+    await uploadArchiveFile({
+      file,
+      route: $("#archiveRoute").value,
+      month: $("#archiveMonth").value,
+      fileKind: $("#archiveKind").value,
+      note: text($("#archiveNote").value),
+      sourceType: "manual",
+      replace: false,
+    });
+    $("#archiveFile").value = "";
+    $("#archiveNote").value = "";
+    await loadArchiveFiles();
+    showToast("월 마감 파일을 보관했습니다.");
+  } catch (error) {
+    showToast(error.message || "파일 보관 중 오류가 발생했습니다.");
+  } finally {
+    button.disabled = false;
+    button.textContent = "파일 보관";
+  }
+}
+
+async function uploadArchiveFile({ file, route, month, fileKind, note = "", sourceType = "manual", closureId = "", replace = false }) {
+  if (!(file instanceof File)) throw new Error("보관할 파일이 없습니다.");
+  const form = new FormData();
+  form.append("file", file, file.name);
+  form.append("route", route);
+  form.append("month", month);
+  form.append("fileKind", fileKind);
+  form.append("note", note);
+  form.append("sourceType", sourceType);
+  form.append("closureId", closureId || "");
+  form.append("replace", replace ? "true" : "false");
+
+  const response = await fetch("/api/archive-files", { method: "POST", body: form });
+  if (response.status === 401) {
+    await checkBackend();
+    throw new Error("관리자 로그인이 만료되었습니다. 다시 로그인해 주세요.");
+  }
+  const data = await readJsonResponse(response);
+  if (!response.ok) throw new Error(data.error || "파일 보관 실패");
+  return data;
+}
+
+async function loadArchiveFiles() {
+  if (!(state.backend.available && state.backend.configured && state.backend.loggedIn)) {
+    state.archiveFiles = [];
+    renderArchiveFiles([]);
+    return;
+  }
+  try {
+    const params = new URLSearchParams();
+    const route = $("#archiveRouteFilter")?.value || "";
+    const month = $("#archiveMonthFilter")?.value || "";
+    if (route) params.set("route", route);
+    if (month) params.set("month", month);
+    const response = await fetch(`/api/archive-files${params.toString() ? `?${params}` : ""}`, { cache: "no-store" });
+    if (response.status === 401) {
+      await checkBackend();
+      renderArchiveFiles([]);
+      return;
+    }
+    const data = await readJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "월 마감 파일 조회 실패");
+    state.archiveFiles = data.items || [];
+    state.backend.fileStorageConfigured = Boolean(data.r2Configured);
+    state.backend.fileStorageMode = data.r2Configured ? "r2" : "d1";
+    renderArchiveFiles(state.archiveFiles);
+    updateStorageUI();
+  } catch (error) {
+    state.archiveFiles = [];
+    renderArchiveFiles([]);
+    showToast(error.message || "월 마감 파일 조회 실패");
+  }
+}
+
+function renderArchiveFiles(items) {
+  const body = $("#archiveTableBody");
+  if (!body) return;
+  renderArchiveSummary(items);
+  body.innerHTML = items.length ? items.map((item) => {
+    const canLoad = item.file_kind === "plan" || item.file_kind === "attendance";
+    return `<tr>
+      <td>${escapeHtml(ROUTE_LABELS[item.route] || item.route)}</td>
+      <td><strong>${escapeHtml(item.month)}</strong></td>
+      <td>${escapeHtml(archiveKindLabel(item.file_kind))}${item.source_type === "closure" ? '<br><span class="neutral-pill">마감 자동보관</span>' : ""}</td>
+      <td class="message-cell"><strong>${escapeHtml(item.file_name)}</strong></td>
+      <td>${escapeHtml(formatFileSize(item.size_bytes))}</td>
+      <td>${item.storage_type === "r2" ? "R2" : "D1"}</td>
+      <td class="message-cell">${escapeHtml(item.note || "-")}</td>
+      <td>${escapeHtml(formatStoredDate(item.created_at))}</td>
+      <td class="action-cell archive-actions">
+        <a class="btn secondary small" href="/api/archive-files/${encodeURIComponent(item.id)}">다운로드</a>
+        ${canLoad ? `<button class="btn secondary small archive-use" data-id="${escapeHtml(item.id)}" type="button">분석에 불러오기</button>` : ""}
+        <button class="btn danger small archive-delete" data-id="${escapeHtml(item.id)}" type="button">삭제</button>
+      </td>
+    </tr>`;
+  }).join("") : `<tr><td colspan="9" class="empty-cell">저장된 월 마감 파일이 없습니다.</td></tr>`;
+
+  $$(".archive-use").forEach((button) => button.addEventListener("click", () => useArchiveFile(button.dataset.id)));
+  $$(".archive-delete").forEach((button) => button.addEventListener("click", () => deleteArchiveFile(button.dataset.id)));
+}
+
+function renderArchiveSummary(items) {
+  const target = $("#archiveSummary");
+  if (!target) return;
+  const totalBytes = items.reduce((sum, item) => sum + Number(item.size_bytes || 0), 0);
+  const routes = new Set(items.map((item) => `${item.route}|${item.month}`)).size;
+  const closureFiles = items.filter((item) => item.source_type === "closure").length;
+  target.innerHTML = [
+    ["보관 파일", `${items.length}개`],
+    ["경로·월", `${routes}건`],
+    ["마감 자동보관", `${closureFiles}개`],
+    ["전체 용량", formatFileSize(totalBytes)],
+  ].map(([label, value]) => `<div class="summary-chip"><span>${label}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+}
+
+async function useArchiveFile(id) {
+  const item = state.archiveFiles.find((row) => row.id === id);
+  if (!item) return;
+  try {
+    const response = await fetch(`/api/archive-files/${encodeURIComponent(id)}`, { cache: "no-store" });
+    if (!response.ok) {
+      const data = await readJsonResponse(response);
+      throw new Error(data.error || "보관 파일 불러오기 실패");
+    }
+    const blob = await response.blob();
+    const file = new File([blob], item.file_name, { type: item.content_type || blob.type || "application/octet-stream" });
+    const routeInput = document.querySelector(`input[name="route"][value="${item.route}"]`);
+    if (routeInput) routeInput.checked = true;
+    $("#targetMonth").value = item.month;
+    syncCutoffWithMonth();
+    syncRouteRuleHelp();
+    if (item.file_kind === "plan") setPlanFile(file);
+    else setAttendanceFile(file);
+    switchView("checker");
+    showToast(`${archiveKindLabel(item.file_kind)}를 분석 화면에 불러왔습니다.`);
+  } catch (error) {
+    showToast(error.message || "보관 파일 불러오기 실패");
+  }
+}
+
+async function deleteArchiveFile(id) {
+  const item = state.archiveFiles.find((row) => row.id === id);
+  if (!item || !confirm(`보관된 파일 “${item.file_name}”을 삭제하시겠습니까?`)) return;
+  try {
+    const response = await fetch(`/api/archive-files/${encodeURIComponent(id)}`, { method: "DELETE" });
+    const data = await readJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "파일 삭제 실패");
+    await loadArchiveFiles();
+    showToast("보관 파일을 삭제했습니다.");
+  } catch (error) {
+    showToast(error.message || "파일 삭제 실패");
+  }
+}
+
+function archiveKindLabel(kind) {
+  return ({ plan: "계획표", attendance: "실제 근태표", result: "결과·수정본", other: "기타" })[kind] || kind;
+}
+
+function formatFileSize(value) {
+  const bytes = Number(value || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes >= 10240 ? 0 : 1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatStoredDate(value) {
+  if (!value) return "-";
+  const normalized = /Z$|[+-]\d{2}:?\d{2}$/.test(value) ? value : `${value}Z`;
+  const parsed = new Date(normalized);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString("ko-KR");
+}
+
+async function readJsonResponse(response) {
+  const textValue = await response.text();
+  if (!textValue) return {};
+  try { return JSON.parse(textValue); } catch { return { error: textValue }; }
 }
 
 function applyServerSummaries(serverRows) {
@@ -1022,10 +1400,17 @@ async function loadHistory() {
   }
   try {
     const response = await fetch("/api/closures", { cache: "no-store" });
-    if (!response.ok) throw new Error("월 마감 기록 조회 실패");
-    renderHistory((await response.json()).items || []);
+    if (response.status === 401) {
+      await checkBackend();
+      renderHistory([]);
+      return;
+    }
+    const data = await readJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "월 마감 기록 조회 실패");
+    renderHistory(data.items || []);
   } catch (error) {
-    showToast(error.message);
+    renderHistory([]);
+    showToast(error.message || "월 마감 기록 조회 실패");
   }
 }
 
@@ -1035,7 +1420,7 @@ function renderHistory(items) {
     const routeLabel = ROUTE_LABELS[item.route] || item.route;
     return `<article class="history-card">
       <div><div class="month">${escapeHtml(item.month)}</div><div class="history-meta">${escapeHtml(routeLabel)} 경로 · 기준 ${escapeHtml(item.cutoff_date || "-")}</div></div>
-      <div><strong>${escapeHtml(item.plan_file_name || "계획표")}</strong><div class="history-meta">${escapeHtml(item.attendance_file_name || "근태표")} · ${item.created_at ? new Date(`${item.created_at}Z`).toLocaleString("ko-KR") : ""}</div></div>
+      <div><strong>${escapeHtml(item.plan_file_name || "계획표")}</strong><div class="history-meta">${escapeHtml(item.attendance_file_name || "근태표")} · ${escapeHtml(formatStoredDate(item.created_at))}</div></div>
       <div class="history-kpis">
         <div><span>출근기록 없음</span><strong>${number(item.missing_count || 0)}</strong></div>
         <div><span>휴무·휴가 출근</span><strong>${number(item.unexpected_count || 0)}</strong></div>
@@ -1043,8 +1428,33 @@ function renderHistory(items) {
         <div><span>대체휴무 초과</span><strong>${number(item.substitute_shortage_people || 0)}</strong></div>
         <div><span>연차 등록자</span><strong>${number(item.annual_leave_people || 0)}</strong></div>
       </div>
+      <div class="history-actions">
+        <button class="btn secondary small history-files" data-route="${escapeHtml(item.route)}" data-month="${escapeHtml(item.month)}" type="button">보관 파일 보기</button>
+        <button class="btn danger small history-delete" data-id="${escapeHtml(item.id)}" data-route="${escapeHtml(routeLabel)}" data-month="${escapeHtml(item.month)}" type="button">마감 삭제</button>
+      </div>
     </article>`;
   }).join("");
+  $$(".history-files").forEach((button) => button.addEventListener("click", () => openHistoryFiles(button.dataset.route, button.dataset.month)));
+  $$(".history-delete").forEach((button) => button.addEventListener("click", () => deleteClosure(button.dataset.id, button.dataset.route, button.dataset.month)));
+}
+
+function openHistoryFiles(route, month) {
+  $("#archiveRouteFilter").value = route || "";
+  $("#archiveMonthFilter").value = month || "";
+  switchView("files");
+}
+
+async function deleteClosure(id, routeLabel, month) {
+  if (!confirm(`${routeLabel} 경로 ${month} 월 마감을 삭제하시겠습니까? 이후 월의 연차·대체휴무 누적도 다시 계산됩니다.`)) return;
+  try {
+    const response = await fetch(`/api/closures/${encodeURIComponent(id)}`, { method: "DELETE" });
+    const data = await readJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "월 마감 삭제 실패");
+    await Promise.all([loadHistory(), loadGrants()]);
+    showToast(`월 마감을 삭제하고 ${data.affectedMonths || 0}개 이후 월을 다시 계산했습니다.`);
+  } catch (error) {
+    showToast(error.message || "월 마감 삭제 실패");
+  }
 }
 
 async function saveGrant(event) {
@@ -1081,7 +1491,12 @@ async function saveGrant(event) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
     });
-    const data = await response.json();
+    if (response.status === 401) {
+      await checkBackend();
+      openLogin();
+      return;
+    }
+    const data = await readJsonResponse(response);
     if (!response.ok) throw new Error(data.error || "공통 대체휴무 저장 실패");
     resetGrantForm();
     await Promise.all([loadGrants(), loadHistory()]);
@@ -1105,11 +1520,20 @@ async function loadGrants() {
     const route = $("#grantRouteFilter").value;
     const query = route ? `?route=${encodeURIComponent(route)}` : "";
     const response = await fetch(`/api/substitute-grants${query}`, { cache: "no-store" });
-    if (!response.ok) throw new Error("공통 대체휴무 조회 실패");
-    state.grants = (await response.json()).items || [];
+    if (response.status === 401) {
+      await checkBackend();
+      state.grants = [];
+      renderGrants([]);
+      return;
+    }
+    const data = await readJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "공통 대체휴무 조회 실패");
+    state.grants = data.items || [];
     renderGrants(state.grants);
   } catch (error) {
-    showToast(error.message);
+    state.grants = [];
+    renderGrants([]);
+    showToast(error.message || "공통 대체휴무 조회 실패");
   }
 }
 
@@ -1180,7 +1604,7 @@ async function deleteGrant(id) {
   if (!confirm("이 경로 공통 대체휴무 설정을 삭제하시겠습니까? 관련 월의 잔여·초과·이월이 모두 다시 계산됩니다.")) return;
   try {
     const response = await fetch(`/api/substitute-grants/${encodeURIComponent(id)}`, { method: "DELETE" });
-    const data = await response.json();
+    const data = await readJsonResponse(response);
     if (!response.ok) throw new Error(data.error || "삭제 실패");
     resetGrantForm();
     await Promise.all([loadGrants(), loadHistory()]);
@@ -1204,9 +1628,15 @@ async function checkBackend() {
     const response = await fetch("/api/auth", { cache: "no-store" });
     if (!response.ok) throw new Error();
     const data = await response.json();
-    state.backend = { available: true, configured: Boolean(data.configured), loggedIn: Boolean(data.loggedIn) };
+    state.backend = {
+      available: true,
+      configured: Boolean(data.configured),
+      loggedIn: Boolean(data.loggedIn),
+      fileStorageConfigured: Boolean(data.fileStorageConfigured),
+      fileStorageMode: data.fileStorageMode === "r2" ? "r2" : "d1",
+    };
   } catch {
-    state.backend = { available: false, configured: false, loggedIn: false };
+    state.backend = { available: false, configured: false, loggedIn: false, fileStorageConfigured: false, fileStorageMode: "d1" };
   }
   updateStorageUI();
 }
@@ -1215,16 +1645,27 @@ function updateStorageUI() {
   const badge = $("#storageBadge");
   const loginButton = $("#loginButton");
   const logoutButton = $("#logoutButton");
+  const fileNotice = $("#fileStorageNotice");
   if (state.backend.available && state.backend.configured) {
     badge.className = "badge cloud";
     badge.textContent = state.backend.loggedIn ? "D1 영구 저장 연결" : "D1 로그인 필요";
     loginButton.classList.toggle("hidden", state.backend.loggedIn);
     logoutButton.classList.toggle("hidden", !state.backend.loggedIn);
+    if (fileNotice) {
+      fileNotice.className = "alert success file-storage-notice";
+      fileNotice.textContent = state.backend.fileStorageConfigured
+        ? "대용량 파일 보관용 R2가 연결되어 있습니다. 월 마감 원본과 수정본을 용량 제한 없이 보관할 수 있습니다."
+        : "현재는 기존 D1에 파일을 여러 조각으로 나누어 보관합니다. 파일당 최대 20MB까지 별도 설정 없이 저장할 수 있습니다.";
+    }
   } else {
     badge.className = "badge local";
     badge.textContent = "서버 설정 확인 필요";
     loginButton.classList.add("hidden");
     logoutButton.classList.add("hidden");
+    if (fileNotice) {
+      fileNotice.className = "alert warning file-storage-notice";
+      fileNotice.textContent = "D1 연결과 관리자 환경 변수를 확인해야 파일을 저장할 수 있습니다.";
+    }
   }
 }
 
@@ -1246,7 +1687,7 @@ async function login(event) {
     if (!response.ok) throw new Error(data.error || "로그인 실패");
     $("#loginDialog").close();
     await checkBackend();
-    await Promise.all([loadHistory(), loadGrants()]);
+    await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles()]);
     showToast("관리자 로그인되었습니다.");
   } catch (error) {
     $("#loginError").textContent = error.message;
@@ -1258,6 +1699,8 @@ async function logout() {
   await checkBackend();
   renderHistory([]);
   renderGrants([]);
+  state.archiveFiles = [];
+  renderArchiveFiles([]);
   showToast("로그아웃되었습니다.");
 }
 
@@ -1267,6 +1710,7 @@ function switchView(view) {
   $(`#${view}View`).classList.add("active");
   if (view === "history") loadHistory();
   if (view === "substitute") loadGrants();
+  if (view === "files") loadArchiveFiles();
 }
 
 function resetAll() {
@@ -1309,7 +1753,12 @@ function findHeaderRow(matrix, requiredHeaders) {
 
 function findHeaderIndex(headers, candidates) {
   for (const candidate of candidates) {
-    const index = headers.indexOf(normalizeHeader(candidate));
+    const normalizedCandidate = normalizeHeader(candidate);
+    let index = headers.indexOf(normalizedCandidate);
+    if (index >= 0) return index;
+    index = headers.findIndex((header) => header && normalizedCandidate.length >= 2 && (
+      header.startsWith(normalizedCandidate) || header.endsWith(normalizedCandidate)
+    ));
     if (index >= 0) return index;
   }
   return -1;
@@ -1324,7 +1773,20 @@ function normalizeStatus(value) {
 }
 
 function normalizeEmployeeId(value) {
-  return text(value).toUpperCase().replace(/\s+/g, "");
+  return text(value)
+    .toUpperCase()
+    .replace(/\.0+$/, "")
+    .replace(/[\s\u00A0-]+/g, "")
+    .replace(/[^0-9A-Z가-힣]/g, "");
+}
+
+function looksLikeEmployeeId(value) {
+  const normalized = normalizeEmployeeId(value);
+  if (!normalized || normalized.length < 3 || normalized.length > 30) return false;
+  if (["사번", "사원번호", "사원ID", "사번ID", "EMPLOYEEID", "ID"].includes(normalized)) return false;
+  // 실제 운영 사번은 E248024처럼 영문+숫자 또는 숫자로 구성됩니다.
+  // 이전 버전처럼 비어 있지 않은 사번은 폭넓게 인정하되 숫자가 하나 이상 있어야 합니다.
+  return /\d/.test(normalized);
 }
 
 function normalizeStore(value) {
@@ -1343,9 +1805,30 @@ function text(value) {
 
 function parseDateCell(value) {
   if (value instanceof Date && !Number.isNaN(value.getTime())) return toISODate(value);
-  const digits = text(value).replace(/\D/g, "");
-  if (digits.length >= 8) return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}`;
-  const parsed = new Date(value);
+  if (typeof value === "number" && Number.isFinite(value) && window.XLSX?.SSF?.parse_date_code) {
+    const parsedSerial = XLSX.SSF.parse_date_code(value);
+    if (parsedSerial?.y && parsedSerial?.m && parsedSerial?.d) {
+      return `${String(parsedSerial.y).padStart(4, "0")}-${String(parsedSerial.m).padStart(2, "0")}-${String(parsedSerial.d).padStart(2, "0")}`;
+    }
+  }
+
+  const raw = text(value);
+  if (!raw) return "";
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length === 8) return validISODate(`${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}`);
+  if (digits.length === 6) {
+    const year = Number(digits.slice(0, 2)) >= 70 ? `19${digits.slice(0, 2)}` : `20${digits.slice(0, 2)}`;
+    return validISODate(`${year}-${digits.slice(2, 4)}-${digits.slice(4, 6)}`);
+  }
+
+  const match = raw.match(/(20\d{2})\s*[.\-/년]\s*(\d{1,2})\s*[.\-/월]\s*(\d{1,2})/);
+  if (match) return validISODate(`${match[1]}-${String(Number(match[2])).padStart(2, "0")}-${String(Number(match[3])).padStart(2, "0")}`);
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? "" : toISODate(parsed);
+}
+
+function validISODate(value) {
+  const parsed = new Date(`${value}T00:00:00`);
   return Number.isNaN(parsed.getTime()) ? "" : toISODate(parsed);
 }
 

@@ -1,11 +1,13 @@
 import { json, requireAuth } from "../_lib/auth.js";
 import { recalculateRoute } from "../_lib/recalculate.js";
+import { ensureSchema } from "../_lib/schema.js";
 
 const VALID_ROUTES = new Set(["homeplus", "electroland"]);
 
 export async function onRequestGet(context) {
   const denied = await requireAuth(context);
   if (denied) return denied;
+  await ensureSchema(context.env.DB);
 
   const url = new URL(context.request.url);
   const route = url.searchParams.get("route") || "";
@@ -45,6 +47,7 @@ export async function onRequestGet(context) {
 export async function onRequestPost(context) {
   const denied = await requireAuth(context);
   if (denied) return denied;
+  await ensureSchema(context.env.DB);
 
   const body = await context.request.json().catch(() => null);
   const route = String(body?.route || "");
