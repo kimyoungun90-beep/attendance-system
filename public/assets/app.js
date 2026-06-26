@@ -31,6 +31,9 @@ const state = {
   archiveFiles: [],
   workforceUploads: [],
   workforce: null,
+  annualLeaveDashboard: null,
+  annualBaselinePreview: null,
+  annualMonthlyPreview: null,
 };
 
 init();
@@ -44,7 +47,7 @@ async function init() {
   setupDropzone("referenceDropzone", "referenceFile", setReferenceFile);
   await checkBackend();
   syncRouteRuleHelp();
-  if (state.backend.loggedIn) await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads()]);
+  if (state.backend.loggedIn) await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard()]);
 }
 
 function bindEvents() {
@@ -68,6 +71,17 @@ function bindEvents() {
   $("#archiveMonthFilter").addEventListener("change", loadArchiveFiles);
   $("#workforceForm").addEventListener("submit", saveWorkforceFile);
   $("#refreshWorkforceButton").addEventListener("click", loadWorkforceUploads);
+  $("#annualBaselineForm").addEventListener("submit", saveAnnualBaseline);
+  $("#annualMonthlyForm").addEventListener("submit", saveAnnualMonthly);
+  $("#annualBaselineFile").addEventListener("change", previewAnnualBaseline);
+  $("#annualBaselineRoute").addEventListener("change", previewAnnualBaseline);
+  $("#annualBaselineDate").addEventListener("change", previewAnnualBaseline);
+  $("#annualMonthlyFile").addEventListener("change", previewAnnualMonthly);
+  $("#annualMonthlyRoute").addEventListener("change", previewAnnualMonthly);
+  $("#annualMonthlyMonth").addEventListener("change", previewAnnualMonthly);
+  $("#annualLedgerRoute").addEventListener("change", loadAnnualLeaveDashboard);
+  $("#annualLedgerMonth").addEventListener("change", loadAnnualLeaveDashboard);
+  $("#refreshAnnualLedger").addEventListener("click", loadAnnualLeaveDashboard);
   $("#workforceMonth").addEventListener("change", previewWorkforceFile);
   $("#workforceFile").addEventListener("change", previewWorkforceFile);
   $("#portalReferenceFile").addEventListener("change", previewWorkforceFile);
@@ -89,6 +103,8 @@ function setDefaultDates() {
   $("#grantMonth").value = month;
   $("#archiveMonth").value = month;
   $("#workforceMonth").value = month;
+  $("#annualMonthlyMonth").value = month;
+  $("#annualLedgerMonth").value = month;
   syncGrantDates();
   syncGrantFormVisibility();
 }
@@ -192,12 +208,13 @@ async function analyzeFiles() {
       openLogin();
       throw new Error("월별 인력·매장매칭 자료를 불러오려면 관리자 로그인이 필요합니다.");
     }
-    const [planWorkbook, attendanceWorkbook, workforce, annualWorkbook, referenceWorkbook] = await Promise.all([
+    const [planWorkbook, attendanceWorkbook, workforce, annualWorkbook, referenceWorkbook, annualLedger] = await Promise.all([
       fileToWorkbookSheets(state.planFile),
       fileToWorkbookSheets(state.attendanceFile),
       loadWorkforceMonth(targetMonth, route),
       state.annualFile ? fileToWorkbookSheets(state.annualFile) : Promise.resolve(null),
       state.referenceFile ? fileToWorkbookSheets(state.referenceFile) : Promise.resolve(null),
+      fetchAnnualLeaveDashboard(route, targetMonth, cutoffDate),
     ]);
     if (!workforce?.members?.length) throw new Error(`${targetMonth} ${ROUTE_LABELS[route]} 경로의 인력·매장매칭 파일이 없습니다. 시스템 수정에서 먼저 등록해 주세요.`);
     const plan = parsePlan(planWorkbook, targetMonth);
@@ -206,9 +223,13 @@ async function analyzeFiles() {
 
     const result = compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, ledger: state.priorLedger });
     appendWorkforceMatchingIssues(result, workforce, plan, route, targetMonth);
-    const annualComparison = annualWorkbook
-      ? compareAnnualApplications(parseAnnualApplications(annualWorkbook, targetMonth), plan, targetMonth, cutoffDate, workforce)
+    const parsedAnnual = annualWorkbook
+      ? parseAnnualApplications(annualWorkbook, targetMonth)
+      : annualApplicationsToParsed(annualLedger?.applications || [], targetMonth);
+    const annualComparison = parsedAnnual?.rows?.length
+      ? compareAnnualApplications(parsedAnnual, plan, targetMonth, cutoffDate, workforce)
       : emptyAnnualComparison();
+    mergeAnnualLeaveLedger(result, annualLedger, annualComparison);
     const referenceComparison = referenceWorkbook
       ? compareReferenceFinal(parseReferenceFinalWorkbook(referenceWorkbook), result, targetMonth, cutoffDate, workforce)
       : emptyReferenceComparison();
@@ -225,6 +246,8 @@ async function analyzeFiles() {
       referenceFileName: state.referenceFile?.name || "",
       annualComparison,
       annualSourceSheets: annualWorkbook || [],
+      annualLedger: annualLedger || null,
+      annualApplications: parsedAnnual?.rows || [],
       referenceComparison,
       managerRequests,
       analyzedAt: new Date().toISOString(),
@@ -270,15 +293,34 @@ function emptyLedger() {
 async function fileToWorkbookSheets(file) {
   const buffer = await file.arrayBuffer();
   const workbook = XLSX.read(buffer, { type: "array", cellDates: true, raw: false });
-  return workbook.SheetNames.map((sheetName) => ({
-    sheetName,
-    matrix: XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
-      header: 1,
-      defval: "",
-      raw: false,
-      blankrows: false,
-    }),
-  })).filter((sheet) => sheet.matrix.some((row) => row.some((cell) => text(cell))));
+  return workbook.SheetNames.map((sheetName) => {
+    const sheet = workbook.Sheets[sheetName];
+    repairWorksheetRange(sheet);
+    return {
+      sheetName,
+      matrix: XLSX.utils.sheet_to_json(sheet, {
+        header: 1,
+        defval: "",
+        raw: false,
+        blankrows: false,
+      }),
+    };
+  }).filter((sheet) => sheet.matrix.some((row) => row.some((cell) => text(cell))));
+}
+
+function repairWorksheetRange(sheet) {
+  if (!sheet || !window.XLSX?.utils) return;
+  const cells = Object.keys(sheet).filter((key) => !key.startsWith("!") && /^[A-Z]+\d+$/.test(key));
+  if (!cells.length) return;
+  let minRow = Infinity, minCol = Infinity, maxRow = 0, maxCol = 0;
+  for (const address of cells) {
+    const cell = XLSX.utils.decode_cell(address);
+    minRow = Math.min(minRow, cell.r); minCol = Math.min(minCol, cell.c);
+    maxRow = Math.max(maxRow, cell.r); maxCol = Math.max(maxCol, cell.c);
+  }
+  const actualRef = XLSX.utils.encode_range({ s: { r: minRow, c: minCol }, e: { r: maxRow, c: maxCol } });
+  const current = sheet["!ref"] ? XLSX.utils.decode_range(sheet["!ref"]) : null;
+  if (!current || current.e.r < maxRow || current.e.c < maxCol) sheet["!ref"] = actualRef;
 }
 
 function parsePlan(sheets, targetMonth) {
@@ -450,6 +492,7 @@ function parseAnnualApplications(sheets, targetMonth) {
       name: findHeaderIndex(headers, ["이름", "성명", "사원명"]),
       employeeId: findHeaderIndex(headers, ["사번", "사원번호", "직원번호", "사원ID"]),
       status: findHeaderIndex(headers, ["상태", "신청상태"]),
+      applicationDate: findHeaderIndex(headers, ["신청일", "신청일자", "등록일"]),
       start: findHeaderIndex(headers, ["휴가기간(시작)", "휴가시작일", "시작일", "휴가기간시작"]),
       end: findHeaderIndex(headers, ["휴가기간(종료)", "휴가종료일", "종료일", "휴가기간종료"]),
       amount: findHeaderIndex(headers, ["사용갯수", "사용개수", "사용일수", "휴가일수", "일수"]),
@@ -457,38 +500,115 @@ function parseAnnualApplications(sheets, targetMonth) {
       note: findHeaderIndex(headers, ["비고", "사유", "메모"]),
     };
     const rows = [];
+    let sourceIndex = 0;
     for (const source of matrix.slice(headerIndex + 1)) {
+      sourceIndex += 1;
       const employeeId = normalizeEmployeeId(source[columns.employeeId]);
-      const start = parseDateCell(source[columns.start]);
-      const end = parseDateCell(source[columns.end]);
-      if (!looksLikeEmployeeId(employeeId) || !start || !end) continue;
-      const startDate = new Date(`${start}T00:00:00`);
-      const endDate = new Date(`${end}T00:00:00`);
+      const startDateText = parseDateCell(source[columns.start]);
+      const endDateText = parseDateCell(source[columns.end]);
+      if (!looksLikeEmployeeId(employeeId) || !startDateText || !endDateText) continue;
+      const startDate = new Date(`${startDateText}T00:00:00`);
+      const endDate = new Date(`${endDateText}T00:00:00`);
       if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime()) || startDate > endDate) continue;
+      const leaveType = columns.leaveType >= 0 ? text(source[columns.leaveType]) : "연차";
+      const status = columns.status >= 0 ? text(source[columns.status]) : "";
+      const rawAmountText = columns.amount >= 0 ? String(source[columns.amount] ?? "").trim() : "";
+      const amountRaw = rawAmountText === "" ? null : Number(rawAmountText.replace(/[^0-9.\-]/g, ""));
+      if (amountRaw !== null && (!Number.isFinite(amountRaw) || amountRaw <= 0)) continue;
       const dates = [];
       for (let cursor = new Date(startDate); cursor <= endDate; cursor.setDate(cursor.getDate() + 1)) dates.push(toISODate(cursor));
-      const amountRaw = columns.amount >= 0 ? Number(String(source[columns.amount] ?? "").replace(/[^0-9.\-]/g, "")) : dates.length;
-      const totalDays = Number.isFinite(amountRaw) && amountRaw > 0 ? amountRaw : dates.length;
+      const totalDays = amountRaw === null ? dates.length : amountRaw;
+      if (!(totalDays > 0)) continue;
       const perDay = roundHalf(totalDays / Math.max(1, dates.length));
       for (const date of dates) {
-        if (!date.startsWith(targetMonth)) continue;
+        if (targetMonth && !date.startsWith(targetMonth)) continue;
+        const normalizedType = normalizeHeader(leaveType);
+        const requestedKind = normalizedType.includes("반차") || perDay === 0.5 ? "반차"
+          : normalizedType.includes("연차") ? "연차" : leaveType || "기타휴가";
         rows.push({
           employeeId,
           name: columns.name >= 0 ? text(source[columns.name]) : "",
           date,
+          leaveDate: date,
           requestedDays: perDay,
-          requestedKind: perDay === 0.5 ? "반차" : "연차",
-          applicationStatus: columns.status >= 0 ? text(source[columns.status]) : "",
-          leaveType: columns.leaveType >= 0 ? text(source[columns.leaveType]) : "",
+          days: perDay,
+          requestedKind,
+          applicationStatus: status,
+          status,
+          leaveType,
+          applicationDate: columns.applicationDate >= 0 ? parseDateCell(source[columns.applicationDate]) : "",
           note: columns.note >= 0 ? text(source[columns.note]) : "",
+          sourceIndex,
         });
       }
     }
-    if (rows.length) candidates.push({ rows, sheetName: sheet.sheetName });
+    if (rows.length) candidates.push({ rows, sheetName: sheet.sheetName, supplied: true });
   }
   if (!candidates.length) throw new Error("연차신청현황에서 사번·휴가기간 시작/종료 열을 찾지 못했습니다.");
   candidates.sort((a, b) => b.rows.length - a.rows.length);
   return candidates[0];
+}
+
+function annualApplicationsToParsed(applications, targetMonth) {
+  const rows = (applications || []).filter((item) => !targetMonth || String(item.leaveDate || item.date || "").startsWith(targetMonth)).map((item) => ({
+    employeeId: normalizeEmployeeId(item.employeeId),
+    name: text(item.employeeName || item.name),
+    date: item.leaveDate || item.date || "",
+    leaveDate: item.leaveDate || item.date || "",
+    requestedDays: roundHalf(item.days || item.requestedDays),
+    days: roundHalf(item.days || item.requestedDays),
+    requestedKind: normalizeHeader(item.leaveType).includes("반차") || Number(item.days) === 0.5 ? "반차" : normalizeHeader(item.leaveType).includes("연차") ? "연차" : item.leaveType || "기타휴가",
+    applicationStatus: item.status || item.applicationStatus || "",
+    status: item.status || item.applicationStatus || "",
+    leaveType: item.leaveType || "연차",
+    applicationDate: item.applicationDate || "",
+    note: item.note || "",
+    sourceIndex: Number(item.sourceIndex || 0),
+  }));
+  return { rows, sheetName: "저장된 월별 승인·반려", supplied: rows.length > 0 };
+}
+
+function isApprovedAnnualApplication(row) {
+  const status = normalizeHeader(row.applicationStatus || row.status);
+  const type = normalizeHeader(row.leaveType || row.requestedKind);
+  return (type.includes("연차") || type.includes("반차")) && (status.startsWith("승인") || status === "완료");
+}
+
+function mergeAnnualLeaveLedger(result, dashboard, annualComparison) {
+  const ledgerById = new Map((dashboard?.employees || []).map((row) => [normalizeEmployeeId(row.employeeId), row]));
+  const compareById = new Map();
+  for (const row of annualComparison?.rows || []) {
+    const id = normalizeEmployeeId(row.employeeId);
+    if (!id) continue;
+    if (!compareById.has(id)) compareById.set(id, []);
+    compareById.get(id).push(row);
+  }
+  for (const summary of result.employeeSummaries || []) {
+    const id = normalizeEmployeeId(summary.employeeId);
+    const ledger = ledgerById.get(id);
+    const rows = compareById.get(id) || [];
+    const planned = roundHalf((summary.annualLeaveEvents || []).reduce((sum, item) => sum + Number(item.days || 0), 0));
+    const approved = roundHalf(rows.filter(isApprovedAnnualApplication).reduce((sum, item) => sum + Number(item.requestedDays || 0), 0));
+    const missing = roundHalf(rows.filter((item) => String(item.result || "").includes("신청내역 없음")).reduce((sum, item) => sum + annualLeaveValue(item.planStatus), 0));
+    summary.currentAnnualLeave = approved;
+    summary.annualLeaveUsed = approved;
+    const savedCurrentApproved = ledger ? roundHalf(ledger.approvedCurrentMonth || 0) : 0;
+    summary.cumulativeAnnualLeave = ledger ? roundHalf(Number(ledger.approvedUsed || 0) - savedCurrentApproved + approved) : summary.cumulativeAnnualLeave;
+    summary.annualPlanned = planned;
+    summary.annualApproved = approved;
+    summary.annualMissingApplication = missing;
+    summary.annualOpeningRemaining = ledger ? roundHalf(ledger.openingRemaining || 0) : "";
+    summary.annualRemaining = ledger ? roundHalf(Number(ledger.remaining || 0) + savedCurrentApproved - approved) : "";
+    summary.annualGranted = ledger ? roundHalf(ledger.granted || 0) : "";
+    summary.annualCycleStart = ledger?.cycleStart || "";
+    summary.annualCycleEnd = ledger?.cycleEnd || "";
+    summary.annualGrantType = ledger?.grantType || "";
+    summary.annualUnderOneYear = Boolean(ledger?.underOneYear);
+    summary.annualFirstPromotionDate = ledger?.firstPromotionDate || "";
+    summary.annualSecondPromotionDate = ledger?.secondPromotionDate || "";
+  }
+  result.annualRows = (result.employeeSummaries || []).filter((row) => Number(row.annualPlanned || 0) > 0 || Number(row.annualApproved || 0) > 0 || row.annualRemaining !== "");
+  result.annualLeavePeople = (result.employeeSummaries || []).filter((row) => Number(row.annualApproved || 0) > 0).length;
 }
 
 function workforceMetaMap(workforce) {
@@ -514,6 +634,7 @@ function compareAnnualApplications(parsed, plan, targetMonth, cutoffDate, workfo
   const requestKeys = new Set();
   const rows = [];
   for (const application of parsed.rows || []) {
+    if (!["연차", "반차"].includes(application.requestedKind)) continue;
     const employeeId = application.employeeId;
     const day = Number(application.date.slice(-2));
     requestKeys.add(`${employeeId}|${day}`);
@@ -521,8 +642,11 @@ function compareAnnualApplications(parsed, plan, targetMonth, cutoffDate, workfo
     const planStatus = planRow ? normalizePlanCode(planRow.plans?.[day]) : "공백";
     const actualKind = annualLeaveValue(planStatus) === 0.5 ? "반차" : planStatus === "연차" ? "연차" : "";
     let result = "일치";
+    const normalizedStatus = normalizeHeader(application.applicationStatus);
     if (!planRow) result = "계획표 사번 없음";
     else if (application.requestedKind !== actualKind) result = `불일치 · 신청 ${application.requestedKind} / 계획 ${planStatus}`;
+    else if (/반려|미사용|취소/.test(normalizedStatus)) result = "신청 반려·미사용";
+    else if (!(normalizedStatus.startsWith("승인") || normalizedStatus === "완료")) result = "신청 상태 확인";
     const meta = metaMap.get(employeeId) || {};
     rows.push({
       date: application.date,
@@ -537,6 +661,9 @@ function compareAnnualApplications(parsed, plan, targetMonth, cutoffDate, workfo
       planStatus,
       result,
       applicationStatus: application.applicationStatus,
+      leaveType: application.leaveType || application.requestedKind,
+      applicationDate: application.applicationDate || "",
+      sourceIndex: application.sourceIndex || 0,
       note: application.note,
     });
   }
@@ -570,7 +697,7 @@ function compareAnnualApplications(parsed, plan, targetMonth, cutoffDate, workfo
     supplied: true,
     rows,
     matchCount: rows.filter((row) => row.result === "일치").length,
-    mismatchCount: rows.filter((row) => row.result !== "일치" && row.result !== "계획 있음 · 연차 신청내역 없음").length,
+    mismatchCount: rows.filter((row) => String(row.result || "").startsWith("불일치") || row.result === "계획표 사번 없음").length,
     missingApplicationCount: rows.filter((row) => row.result === "계획 있음 · 연차 신청내역 없음").length,
   };
 }
@@ -651,7 +778,7 @@ function normalizeFinalCompareValue(value) {
 function compareReferenceFinal(reference, result, targetMonth, cutoffDate, workforce) {
   const rows = [];
   if (reference.month && reference.month !== targetMonth) {
-    const currentNames = ["상담사 근태", "증빙", "계획&근태 매칭", "휴무&대체휴무 초과", "연차 계획&신청 매칭", "전체 요약", "매니저 공유용", "근무계획", "근태RAW", "연차RAW"];
+    const currentNames = ["상담사근태", "계획&근태 상이 인원", "출근 미등록", "휴무 초과자", "전체 요약본", "해당 월 연차 등록 현황 및 일자", "연차 누적 현황", "근무 계획", "근태 RAW"];
     const normalizeName = (name) => String(name).replace(/^\d+월/, "O월");
     const currentSet = new Set(currentNames.map(normalizeName));
     const referenceSet = new Set(reference.sheetNames.map(normalizeName));
@@ -1549,9 +1676,15 @@ function tableConfig(tab) {
       rows: state.result.annualRows,
       columns: [
         ...commonSummary,
-        { label: "당월 연차", render: (row) => formatDays(row.currentAnnualLeave) },
-        { label: "누적 연차", render: (row) => `<strong>${formatDays(row.cumulativeAnnualLeave)}</strong>` },
-        { label: "당월 등록 내역", className: "message-cell", render: (row) => escapeHtml(formatAnnualEvents(row.annualLeaveEvents)) },
+        { label: "구분", render: (row) => escapeHtml(row.annualUnderOneYear ? "1년 미만·월차" : row.annualGrantType || "연차") },
+        { label: "사용기간", render: (row) => escapeHtml([row.annualCycleStart, row.annualCycleEnd].filter(Boolean).join(" ~ ") || "-") },
+        { label: "발생", render: (row) => row.annualGranted === "" ? "-" : formatDays(row.annualGranted) },
+        { label: "당월 계획", render: (row) => formatDays(row.annualPlanned || 0) },
+        { label: "당월 승인", render: (row) => `<strong>${formatDays(row.annualApproved || 0)}</strong>` },
+        { label: "연차 미신청", render: (row) => `<span class="${Number(row.annualMissingApplication || 0) > 0 ? "warning-pill" : "neutral-pill"}">${formatDays(row.annualMissingApplication || 0)}</span>` },
+        { label: "월초 잔여", render: (row) => row.annualOpeningRemaining === "" ? "-" : formatDays(row.annualOpeningRemaining) },
+        { label: "현재 잔여", render: (row) => row.annualRemaining === "" ? "-" : `<strong>${formatDays(row.annualRemaining)}</strong>` },
+        { label: "당월 계획 내역", className: "message-cell", render: (row) => escapeHtml(formatAnnualEvents(row.annualLeaveEvents)) },
       ],
     },
     annualCompare: {
@@ -1565,7 +1698,8 @@ function tableConfig(tab) {
         { label: "신청 구분", key: "requestedKind" },
         { label: "신청 일수", render: (row) => row.requestedDays ? formatDays(row.requestedDays) : "-" },
         { label: "근무계획", render: (row) => `<span class="plan-pill">${escapeHtml(row.planStatus || "공백")}</span>` },
-        { label: "대조 결과", className: "message-cell", render: (row) => `<span class="${row.result === "일치" ? "success-pill" : "warning-pill"}">${escapeHtml(row.result)}</span>` },
+        { label: "신청 상태", key: "applicationStatus" },
+        { label: "대조 결과", className: "message-cell", render: (row) => `<span class="${row.result === "일치" ? "success-pill" : String(row.result || "").includes("반려") ? "neutral-pill" : "warning-pill"}">${escapeHtml(row.result)}</span>` },
         { label: "비고", className: "message-cell", key: "note" },
       ],
     },
@@ -1865,6 +1999,22 @@ function appendSheet(workbook, sheetName, rows, columns) {
   XLSX.utils.book_append_sheet(workbook, sheet, sheetName);
 }
 
+async function persistAnnualMonthlyFromAnalysis(result) {
+  const applications = (result.annualApplications || []).filter((row) => ["연차", "반차"].includes(row.requestedKind)).map((row) => ({
+    employeeId: row.employeeId, employeeName: row.name, leaveDate: row.date, days: row.requestedDays,
+    status: row.applicationStatus, leaveType: row.leaveType || row.requestedKind,
+    applicationDate: row.applicationDate, note: row.note, sourceIndex: row.sourceIndex,
+  }));
+  if (!applications.length) return null;
+  const response = await fetch("/api/annual-leave", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "monthly", route: result.route, month: result.targetMonth, fileName: result.annualFileName || "연차신청현황.xlsx", applications }),
+  });
+  const data = await readJsonResponse(response);
+  if (!response.ok) throw new Error(data.error || "월별 연차 승인·반려 저장 실패");
+  return data;
+}
+
 async function saveClosure() {
   if (!state.result) return;
   if (!(state.backend.available && state.backend.configured)) {
@@ -1910,6 +2060,10 @@ async function saveClosure() {
     if (!response.ok) throw new Error(data.error || "월 마감 저장 실패");
 
     applyServerSummaries(data.summaries || []);
+    mergeAnnualLeaveLedger(state.result, state.result.annualLedger, state.result.annualComparison);
+    if (state.annualFile && (state.result.annualApplications || []).length) {
+      await persistAnnualMonthlyFromAnalysis(state.result);
+    }
 
     const correctedResultFile = await buildResultFile(state.result);
     const fileResults = await Promise.allSettled([
@@ -1952,7 +2106,7 @@ async function saveClosure() {
         note: "다른 작성자 최종본 비교 원본", sourceType: "closure", closureId: data.id, replace: false,
       })] : []),
     ]);
-    await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads()]);
+    await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard()]);
     const action = data.replaced ? "기존 월 마감을 완전히 교체했습니다." : "새 월 마감을 저장했습니다.";
     const failedFiles = fileResults.filter((item) => item.status === "rejected");
     const fileMessage = failedFiles.length
@@ -2837,6 +2991,375 @@ function updateStorageUI() {
   }
 }
 
+
+async function previewAnnualBaseline() {
+  const file = $("#annualBaselineFile")?.files?.[0];
+  if (!file) {
+    state.annualBaselinePreview = null;
+    $("#annualBaselinePreview").textContent = "최초 기준 파일을 선택해 주세요.";
+    return;
+  }
+  try {
+    $("#annualBaselinePreview").textContent = "연차 기준대장 확인 중...";
+    const sheets = await fileToWorkbookSheets(file);
+    const route = $("#annualBaselineRoute").value;
+    const baselineDate = $("#annualBaselineDate").value;
+    const employees = parseInitialAnnualLedger(sheets, route, baselineDate);
+    state.annualBaselinePreview = { employees, file, route, baselineDate };
+    const under = employees.filter((item) => item.underOneYear).length;
+    const remaining = roundHalf(employees.reduce((sum, item) => sum + Number(item.baselineRemaining || 0), 0));
+    $("#annualBaselinePreview").innerHTML = `<strong>${escapeHtml(file.name)}</strong><p>총 ${number(employees.length)}명 · 1년 이상 ${number(employees.length - under)}명 · 1년 미만 ${number(under)}명 · 기준 잔여 ${number(remaining)}일</p>`;
+  } catch (error) {
+    state.annualBaselinePreview = null;
+    $("#annualBaselinePreview").textContent = error.message || "연차 기준대장을 읽지 못했습니다.";
+  }
+}
+
+async function previewAnnualMonthly() {
+  const file = $("#annualMonthlyFile")?.files?.[0];
+  const month = $("#annualMonthlyMonth")?.value || "";
+  if (!file || !month) {
+    state.annualMonthlyPreview = null;
+    $("#annualMonthlyPreview").textContent = "대상 월과 월별 승인·반려 파일을 선택해 주세요.";
+    return;
+  }
+  try {
+    $("#annualMonthlyPreview").textContent = "승인·반려 현황 확인 중...";
+    const sheets = await fileToWorkbookSheets(file);
+    const parsed = parseAnnualApplications(sheets, "");
+    const annualRows = parsed.rows.filter((row) => ["연차", "반차"].includes(row.requestedKind));
+    const monthCounts = new Map();
+    for (const row of annualRows) {
+      const key = String(row.date || "").slice(0, 7);
+      if (/^\d{4}-\d{2}$/.test(key)) monthCounts.set(key, (monthCounts.get(key) || 0) + 1);
+    }
+    let resolvedMonth = month;
+    let applications = annualRows.filter((row) => String(row.date || "").startsWith(resolvedMonth));
+    if (!applications.length && monthCounts.size) {
+      resolvedMonth = [...monthCounts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+      applications = annualRows.filter((row) => String(row.date || "").startsWith(resolvedMonth));
+      $("#annualMonthlyMonth").value = resolvedMonth;
+    }
+    if (!applications.length) throw new Error(`${month} 연차·반차 신청내역을 찾지 못했습니다.`);
+    state.annualMonthlyPreview = { applications, file, route: $("#annualMonthlyRoute").value, month: resolvedMonth };
+    const approved = roundHalf(applications.filter(isApprovedAnnualApplication).reduce((sum, row) => sum + row.requestedDays, 0));
+    const rejected = roundHalf(applications.filter((row) => /반려|미사용|취소/.test(normalizeHeader(row.applicationStatus))).reduce((sum, row) => sum + row.requestedDays, 0));
+    const requestCount = new Set(applications.map((row) => row.sourceIndex)).size;
+    $("#annualMonthlyPreview").innerHTML = `<strong>${escapeHtml(file.name)}</strong><p>대상 월 ${escapeHtml(resolvedMonth)} · 신청 ${number(requestCount)}건 · 사용일 ${number(applications.length)}건 · 승인 ${number(approved)}일 · 반려·미사용 ${number(rejected)}일 · 승인 건만 누적 차감</p>`;
+  } catch (error) {
+    state.annualMonthlyPreview = null;
+    $("#annualMonthlyPreview").textContent = error.message || "월별 연차 파일을 읽지 못했습니다.";
+  }
+}
+
+async function saveAnnualBaseline(event) {
+  event.preventDefault();
+  if (!(state.backend.available && state.backend.configured && state.backend.loggedIn)) return openLogin();
+  await previewAnnualBaseline();
+  const preview = state.annualBaselinePreview;
+  if (!preview?.employees?.length) return showToast("저장할 연차 기준자료를 확인해 주세요.");
+  const button = $("#annualBaselineSubmit");
+  try {
+    button.disabled = true;
+    button.textContent = "기준값 저장 중...";
+    const response = await fetch("/api/annual-leave", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "baseline", route: preview.route, baselineDate: preview.baselineDate, fileName: preview.file.name, employees: preview.employees }),
+    });
+    const data = await readJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "연차 기준값 저장 실패");
+    await uploadArchiveFile({ file: preview.file, route: preview.route, month: preview.baselineDate.slice(0, 7), fileKind: "other", note: "연차 누적현황 최초 기준대장 · 재등록 시 마지막 파일 기준", sourceType: "manual", replace: false }).catch(() => null);
+    $("#annualLedgerRoute").value = preview.route;
+    $("#annualLedgerMonth").value = preview.baselineDate.slice(0, 7);
+    await loadAnnualLeaveDashboard();
+    showToast(data.replaced ? "기존 연차 초본을 마지막 파일 기준으로 완전히 교체했습니다." : "연차 누적현황 최초 기준값을 저장했습니다.");
+  } catch (error) {
+    showToast(error.message || "연차 기준값 저장 중 오류가 발생했습니다.");
+  } finally {
+    button.disabled = false;
+    button.textContent = "최초 기준값 저장·교체";
+  }
+}
+
+async function saveAnnualMonthly(event) {
+  event.preventDefault();
+  if (!(state.backend.available && state.backend.configured && state.backend.loggedIn)) return openLogin();
+  await previewAnnualMonthly();
+  const preview = state.annualMonthlyPreview;
+  if (!preview?.applications?.length) return showToast("저장할 월별 승인·반려 자료를 확인해 주세요.");
+  const button = $("#annualMonthlySubmit");
+  try {
+    button.disabled = true;
+    button.textContent = "월별 현황 저장 중...";
+    const applications = preview.applications.map((row) => ({
+      employeeId: row.employeeId, employeeName: row.name, leaveDate: row.date, days: row.requestedDays,
+      status: row.applicationStatus, leaveType: row.leaveType || row.requestedKind,
+      applicationDate: row.applicationDate, note: row.note, sourceIndex: row.sourceIndex,
+    }));
+    const response = await fetch("/api/annual-leave", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "monthly", route: preview.route, month: preview.month, fileName: preview.file.name, applications }),
+    });
+    const data = await readJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "월별 연차 현황 저장 실패");
+    await uploadArchiveFile({ file: preview.file, route: preview.route, month: preview.month, fileKind: "other", note: "월별 연차 승인·반려 원본 · 같은 월 재등록 시 마지막 파일 기준", sourceType: "manual", replace: false }).catch(() => null);
+    $("#annualLedgerRoute").value = preview.route;
+    $("#annualLedgerMonth").value = preview.month;
+    await loadAnnualLeaveDashboard();
+    showToast(data.replaced ? `${preview.month} 승인·반려 자료를 마지막 파일 기준으로 교체했습니다.` : `${preview.month} 승인·반려 자료를 누적 원장에 반영했습니다.`);
+  } catch (error) {
+    showToast(error.message || "월별 연차 현황 저장 중 오류가 발생했습니다.");
+  } finally {
+    button.disabled = false;
+    button.textContent = "월별 연차 현황 저장·교체";
+  }
+}
+
+async function fetchAnnualLeaveDashboard(route, month, asOf = "") {
+  if (!(state.backend.available && state.backend.configured && state.backend.loggedIn)) return null;
+  const params = new URLSearchParams({ route });
+  if (month) params.set("month", month);
+  if (asOf) params.set("asOf", asOf);
+  const response = await fetch(`/api/annual-leave?${params}`, { cache: "no-store" });
+  if (response.status === 401) return null;
+  const data = await readJsonResponse(response);
+  if (!response.ok) throw new Error(data.error || "연차 누적현황 조회 실패");
+  return data;
+}
+
+async function loadAnnualLeaveDashboard() {
+  if (!(state.backend.available && state.backend.configured && state.backend.loggedIn)) {
+    state.annualLeaveDashboard = null;
+    renderAnnualLeaveDashboard(null);
+    return;
+  }
+  try {
+    const route = $("#annualLedgerRoute")?.value || "electroland";
+    const month = $("#annualLedgerMonth")?.value || $("#targetMonth")?.value || "";
+    const data = await fetchAnnualLeaveDashboard(route, month);
+    state.annualLeaveDashboard = data;
+    renderAnnualLeaveDashboard(data);
+  } catch (error) {
+    state.annualLeaveDashboard = null;
+    renderAnnualLeaveDashboard(null);
+    showToast(error.message || "연차 누적현황 조회 실패");
+  }
+}
+
+function renderAnnualLeaveDashboard(data) {
+  const status = $("#annualLedgerStatus");
+  const summary = $("#annualLedgerSummary");
+  const employeeBody = $("#annualLedgerTableBody");
+  const reminderBody = $("#annualReminderTableBody");
+  const historyBody = $("#annualUploadHistoryBody");
+  if (!status || !summary || !employeeBody || !reminderBody || !historyBody) return;
+  if (!data) {
+    status.className = "alert warning";
+    status.textContent = "관리자 로그인 후 연차 누적현황을 조회할 수 있습니다.";
+    summary.innerHTML = "";
+    employeeBody.innerHTML = '<tr><td colspan="15" class="empty-cell">조회할 연차 자료가 없습니다.</td></tr>';
+    reminderBody.innerHTML = '<tr><td colspan="10" class="empty-cell">표시할 촉진 대상이 없습니다.</td></tr>';
+    historyBody.innerHTML = '<tr><td colspan="8" class="empty-cell">등록 이력이 없습니다.</td></tr>';
+    return;
+  }
+  if (data.baseline) {
+    status.className = "alert success";
+    status.textContent = `${ROUTE_LABELS[data.route]} 최초 기준: ${data.baseline.baseline_date} · ${data.baseline.file_name || "파일명 없음"} · ${number(data.baseline.employee_count)}명`;
+  } else {
+    status.className = "alert warning";
+    status.textContent = `${ROUTE_LABELS[data.route]} 연차 누적현황 초본이 아직 등록되지 않았습니다.`;
+  }
+  const s = data.summary || {};
+  summary.innerHTML = `
+    <div><span>관리 인원</span><strong>${number(s.employeeCount || 0)}</strong></div>
+    <div><span>1년 미만</span><strong>${number(s.underOneYearCount || 0)}</strong></div>
+    <div><span>총 잔여 연차</span><strong>${number(s.totalRemaining || 0)}</strong></div>
+    <div><span>당월 승인 사용</span><strong>${number(s.approvedCurrentMonth || 0)}</strong></div>
+    <div><span>촉진 대상</span><strong>${number(s.reminderCount || 0)}</strong></div>`;
+  const employees = data.employees || [];
+  employeeBody.innerHTML = employees.length ? employees.map((row) => `<tr>
+    <td>${row.underOneYear ? "1년 미만·월차" : "1년 이상·연차"}</td><td>${escapeHtml(row.regionalManager || "")}</td><td>${escapeHtml(row.manager || "")}</td>
+    <td>${escapeHtml(row.storeName || "")}</td><td>${escapeHtml(row.employeeId || "")}</td><td>${escapeHtml(row.employeeName || "")}</td>
+    <td>${escapeHtml(row.basisHireDate || row.hireDate || "")}</td><td>${escapeHtml([row.cycleStart, row.cycleEnd].filter(Boolean).join(" ~ "))}</td>
+    <td>${number(row.granted || 0)}</td><td>${number(row.approvedUsed || 0)}</td><td>${number(row.approvedCurrentMonth || 0)}</td><td><strong>${number(row.remaining || 0)}</strong></td>
+    <td>${escapeHtml(row.firstPromotionDate || "-")}</td><td>${escapeHtml(row.secondPromotionDate || "-")}</td><td>${escapeHtml(row.note || "")}</td>
+  </tr>`).join("") : '<tr><td colspan="15" class="empty-cell">등록된 직원이 없습니다.</td></tr>';
+  const reminders = data.reminders || [];
+  reminderBody.innerHTML = reminders.length ? reminders.map((row) => `<tr>
+    <td><span class="${row.status === "예정" ? "warning-pill" : "status-pill"}">${escapeHtml(row.status)}</span></td><td>${escapeHtml(row.promotionType)}</td><td>${escapeHtml(row.dueDate)}</td>
+    <td>${escapeHtml(row.regionalManager || "")}</td><td>${escapeHtml(row.manager || "")}</td><td>${escapeHtml(row.storeName || "")}</td><td>${escapeHtml(row.employeeId)}</td><td>${escapeHtml(row.employeeName)}</td>
+    <td>${number(row.remaining || 0)}</td><td>${escapeHtml([row.cycleStart, row.cycleEnd].filter(Boolean).join(" ~ "))}</td>
+  </tr>`).join("") : '<tr><td colspan="10" class="empty-cell">표시할 촉진 대상이 없습니다.</td></tr>';
+  const uploads = data.monthlyUploads || [];
+  historyBody.innerHTML = uploads.length ? uploads.map((row) => `<tr>
+    <td>${escapeHtml(row.month)}</td><td>${escapeHtml(row.file_name || "")}</td><td>${number(row.row_count || 0)}</td><td>${number(row.approved_days || 0)}</td>
+    <td>${number(row.rejected_days || 0)}</td><td>${number(row.pending_days || 0)}</td><td>${escapeHtml(row.updated_at || row.created_at || "")}</td>
+    <td><button class="text-button annual-month-delete" data-route="${escapeHtml(row.route)}" data-month="${escapeHtml(row.month)}" type="button">삭제</button></td>
+  </tr>`).join("") : '<tr><td colspan="8" class="empty-cell">등록 이력이 없습니다.</td></tr>';
+  $$(".annual-month-delete").forEach((button) => button.addEventListener("click", () => deleteAnnualMonthly(button.dataset.route, button.dataset.month)));
+}
+
+async function deleteAnnualMonthly(route, month) {
+  if (!confirm(`${month} 연차 승인·반려 자료를 삭제하시겠습니까?`)) return;
+  try {
+    const response = await fetch(`/api/annual-leave?kind=monthly&route=${encodeURIComponent(route)}&month=${encodeURIComponent(month)}`, { method: "DELETE" });
+    const data = await readJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "삭제 실패");
+    await loadAnnualLeaveDashboard();
+    showToast(`${month} 연차 승인·반려 자료를 삭제했습니다.`);
+  } catch (error) {
+    showToast(error.message || "연차 자료 삭제 실패");
+  }
+}
+
+function parseInitialAnnualLedger(sheets, route, baselineDate) {
+  if (!baselineDate) throw new Error("최초 기준일을 입력해 주세요.");
+  const normalized = normalizeWorkbookInput(sheets);
+  const employees = [];
+  const aboveSheet = normalized.find((sheet) => /1년\s*이상|재직\s*1년이상/.test(normalizeHeader(sheet.sheetName)));
+  const underSheet = normalized.find((sheet) => /1년\s*미만|재직\s*1년미만/.test(normalizeHeader(sheet.sheetName)));
+  if (!aboveSheet && !underSheet) throw new Error("연차대장에서 1년 이상자·1년 미만자 시트를 찾지 못했습니다.");
+  if (aboveSheet) employees.push(...parseAnnualBaselineSheet(aboveSheet.matrix, route, baselineDate, false));
+  if (underSheet) employees.push(...parseAnnualBaselineSheet(underSheet.matrix, route, baselineDate, true));
+  const unique = new Map();
+  for (const employee of employees) {
+    if (!employee.employeeId || !employee.employeeName || /필터|합계/.test(employee.employeeName)) continue;
+    if (employee.terminationDate && employee.terminationDate <= baselineDate) continue;
+    unique.set(employee.employeeId, employee);
+  }
+  if (!unique.size) throw new Error("연차대장에서 저장할 상담사 정보를 찾지 못했습니다.");
+  return [...unique.values()];
+}
+
+function parseAnnualBaselineSheet(matrix, route, baselineDate, underOneYear) {
+  const headerIndex = findFlexibleHeaderRow(matrix, (headers) => findHeaderIndex(headers, ["제니엘사번", "사번", "사원번호"]) >= 0 && findHeaderIndex(headers, ["이름", "성명", "사원명", "직원명"]) >= 0);
+  if (headerIndex < 0) return [];
+  const headerRows = matrix.slice(Math.max(0, headerIndex - 5), headerIndex + 1);
+  const headers = (matrix[headerIndex] || []).map(normalizeHeader);
+  const find = (names, fallback = -1) => {
+    const direct = findHeaderIndex(headers, names);
+    if (direct >= 0) return direct;
+    for (let r = headerRows.length - 1; r >= 0; r -= 1) {
+      const idx = findHeaderIndex((headerRows[r] || []).map(normalizeHeader), names);
+      if (idx >= 0) return idx;
+    }
+    return fallback;
+  };
+  const cols = underOneYear ? {
+    regionalManager: find(["지역장"], 3), manager: find(["매니저"], 4), region1: find(["지역1"], 5), region2: find(["지역2"], 6),
+    storeCode: find(["근무처코드", "점포코드"], 7), storeName: find(["근무처명", "점포", "매장명"], 8), portalId: find(["스핀사번", "포탈사번"], 10),
+    employeeId: find(["제니엘사번", "사번"], 11), name: find(["이름", "성명", "사원명", "직원명"], 12), hireDate: find(["입사일", "제니엘입사일"], 15), basisHireDate: find(["고용승계입사일"], -1),
+    granted: find(["발생", "월차발생"], 16), used: find([`${baselineDate.slice(0,4)}사용`, `${baselineDate.slice(0,4)}년사용`, "사용"], 18), remaining: find(["잔여"], 19), period: find(["사용기간"], 20),
+    termination: find(["퇴사일"], 21), firstPromotion: find(["1차촉진", "1차촉진일"], 23), secondPromotion: find(["2차촉진", "2차촉진일"], 25), expiry: find(["연차소진일", "소진일"], 27), note: find(["비고"], 28),
+  } : findAnnualAboveColumns(matrix, headerIndex, baselineDate);
+  const rows = [];
+  for (const source of matrix.slice(headerIndex + 1)) {
+    const employeeId = normalizeEmployeeId(source[cols.employeeId]);
+    const employeeName = text(source[cols.name]);
+    if (!looksLikeEmployeeId(employeeId) || !employeeName) continue;
+    const activeCycle = underOneYear ? null : selectActiveAnnualCycle(source, cols.cycles || [], baselineDate);
+    const period = activeCycle?.period || parseDateRange(source[cols.period]);
+    const grantDate = activeCycle?.grantDate || parseDateCell(source[cols.grantDate]);
+    const hireDate = parseDateCell(source[cols.hireDate]);
+    const basisHireDate = parseDateCell(source[cols.basisHireDate]) || hireDate;
+    let baselineRemaining = activeCycle ? activeCycle.remaining : numericCell(source[cols.remaining]);
+    let baselineGranted = activeCycle ? activeCycle.granted : numericCell(source[cols.granted]);
+    let baselineUsed = activeCycle ? activeCycle.used : numericCell(source[cols.used]);
+    if (!baselineGranted && baselineUsed + baselineRemaining > 0) baselineGranted = roundHalf(baselineUsed + baselineRemaining);
+    if (baselineGranted || baselineRemaining) baselineUsed = roundHalf(baselineGranted - baselineRemaining);
+    const cycleStart = period.start || grantDate || (underOneYear ? hireDate : "");
+    const cycleEnd = period.end || parseDateCell(source[cols.expiry]) || "";
+    rows.push({
+      employeeId, employeeName, regionalManager: text(source[cols.regionalManager]), manager: text(source[cols.manager]),
+      region1: text(source[cols.region1]), region2: text(source[cols.region2]), storeCode: text(source[cols.storeCode]), storeName: text(source[cols.storeName]),
+      portalId: text(source[cols.portalId]), hireDate, basisHireDate, policyType: route === "homeplus" ? "jan1" : "anniversary", underOneYear,
+      baselineDate, baselineGranted, baselineUsed, baselineRemaining, cycleStart, cycleEnd,
+      firstPromotionDate: parseDateCell(source[cols.firstPromotion]), secondPromotionDate: parseDateCell(source[cols.secondPromotion]),
+      expiryDate: parseDateCell(source[cols.expiry]) || cycleEnd, terminationDate: parseDateCell(source[cols.termination]), note: text(source[cols.note]),
+    });
+  }
+  return rows;
+}
+
+function findAnnualAboveColumns(matrix, headerIndex, baselineDate) {
+  const yearText = baselineDate.slice(0, 4);
+  const searchRows = matrix.slice(0, headerIndex + 1);
+  const header = (matrix[headerIndex] || []).map(normalizeHeader);
+  const maxCol = Math.max(...searchRows.map((row) => row.length), 0);
+  const flattened = [];
+  for (let col = 0; col < maxCol; col += 1) flattened[col] = normalizeHeader(searchRows.map((row) => row[col]).filter(Boolean).join(" "));
+  const findAll = (patterns) => flattened.map((value, index) => patterns.some((p) => value.includes(normalizeHeader(p))) ? index : -1).filter((index) => index >= 0);
+  const direct = (patterns, fallback) => {
+    const normalizedPatterns = patterns.map(normalizeHeader);
+    for (const pattern of normalizedPatterns) {
+      const exact = header.findIndex((value) => value === pattern);
+      if (exact >= 0) return exact;
+    }
+    for (const pattern of normalizedPatterns) {
+      const close = header.findIndex((value) => value && pattern.length >= 2 && (value.startsWith(pattern) || value.endsWith(pattern)));
+      if (close >= 0) return close;
+    }
+    const candidates = findAll(patterns);
+    return candidates.length ? candidates[0] : fallback;
+  };
+  const termination = direct(["퇴사일"], 53);
+  const grantColumns = [];
+  for (let col = 0; col < Math.min(header.length, termination); col += 1) {
+    const value = header[col];
+    const match = value.match(/(20\d{2})년?.*발생/);
+    if (match) grantColumns.push({ year: Number(match[1]), grantCol: col });
+  }
+  const cycles = grantColumns.map((item, index) => {
+    const endCol = index + 1 < grantColumns.length ? grantColumns[index + 1].grantCol : termination;
+    const columns = [];
+    for (let col = item.grantCol; col < endCol; col += 1) columns.push(col);
+    const grantDateCol = columns.find((col) => header[col].includes("연차발생일")) ?? -1;
+    const remainingCol = [...columns].reverse().find((col) => header[col].includes("잔여")) ?? -1;
+    const periodCol = [...columns].reverse().find((col) => header[col].includes("사용기간")) ?? -1;
+    const usedCols = columns.filter((col) => header[col].includes("사용") && !header[col].includes("사용기간"));
+    return { ...item, grantDateCol, remainingCol, periodCol, usedCols };
+  }).filter((cycle) => cycle.periodCol >= 0 || cycle.grantDateCol >= 0);
+  const preferred = cycles.find((cycle) => cycle.year === Number(yearText)) || cycles[cycles.length - 1] || {};
+  return {
+    regionalManager: direct(["지역장"], 3), manager: direct(["매니저"], 4), region1: direct(["지역1"], 5), region2: direct(["지역2"], 6),
+    storeCode: direct(["근무처코드", "점포코드"], 7), storeName: direct(["근무처명", "매장명"], 8), portalId: direct(["스핀사번", "포탈사번"], 10),
+    employeeId: direct(["제니엘사번", "사번"], 11), name: direct(["이름", "성명"], 12), hireDate: direct(["제니엘입사일", "입사일"], 15), basisHireDate: direct(["고용승계입사일"], 16),
+    granted: preferred.grantCol ?? 45, grantDate: preferred.grantDateCol ?? 46,
+    used: preferred.usedCols?.[0] ?? 47, remaining: preferred.remainingCol ?? 48, period: preferred.periodCol ?? 49,
+    termination, firstPromotion: -1, secondPromotion: -1, expiry: -1, note: direct(["비고"], 75), cycles,
+  };
+}
+
+function selectActiveAnnualCycle(source, cycles, baselineDate) {
+  const candidates = (cycles || []).map((cycle) => {
+    const period = parseDateRange(source[cycle.periodCol]);
+    const grantDate = parseDateCell(source[cycle.grantDateCol]);
+    const granted = numericCell(source[cycle.grantCol]);
+    const used = roundHalf((cycle.usedCols || []).reduce((sum, col) => sum + numericCell(source[col]), 0));
+    const remaining = numericCell(source[cycle.remainingCol]);
+    return { ...cycle, period, grantDate, granted, used, remaining };
+  }).filter((cycle) => cycle.period.start || cycle.grantDate || cycle.granted || cycle.used || cycle.remaining);
+  const containing = candidates.filter((cycle) => cycle.period.start && cycle.period.end && cycle.period.start <= baselineDate && baselineDate <= cycle.period.end);
+  if (containing.length) return containing.sort((a, b) => b.period.start.localeCompare(a.period.start))[0];
+  const started = candidates.filter((cycle) => (cycle.period.start || cycle.grantDate || "") <= baselineDate)
+    .sort((a, b) => String(b.period.start || b.grantDate || "").localeCompare(String(a.period.start || a.grantDate || "")));
+  return started[0] || candidates[candidates.length - 1] || null;
+}
+
+function parseDateRange(value) {
+  const raw = text(value);
+  const parts = raw.split(/\s*(?:~|～|부터|에서)\s*/).map((item) => parseDateCell(item)).filter(Boolean);
+  if (parts.length >= 2) return { start: parts[0], end: parts[1] };
+  const matches = raw.match(/20\d{2}[.\/-]\d{1,2}[.\/-]\d{1,2}/g) || [];
+  return { start: parseDateCell(matches[0]) || "", end: parseDateCell(matches[1]) || "" };
+}
+
+function numericCell(value) {
+  const parsed = Number(String(value ?? "").replace(/,/g, "").replace(/[^0-9.\-]/g, ""));
+  return Number.isFinite(parsed) ? roundHalf(parsed) : 0;
+}
+
 function openLogin() {
   $("#loginError").textContent = "";
   $("#passwordInput").value = "";
@@ -2855,7 +3378,7 @@ async function login(event) {
     if (!response.ok) throw new Error(data.error || "로그인 실패");
     $("#loginDialog").close();
     await checkBackend();
-    await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads()]);
+    await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard()]);
     showToast("관리자 로그인되었습니다.");
   } catch (error) {
     $("#loginError").textContent = error.message;
@@ -2870,8 +3393,10 @@ async function logout() {
   state.archiveFiles = [];
   state.workforceUploads = [];
   state.workforce = null;
+  state.annualLeaveDashboard = null;
   renderArchiveFiles([]);
   renderWorkforceUploads([]);
+  renderAnnualLeaveDashboard(null);
   showToast("로그아웃되었습니다.");
 }
 
@@ -2883,6 +3408,7 @@ function switchView(view) {
   if (view === "substitute") loadGrants();
   if (view === "files") loadArchiveFiles();
   if (view === "system") loadWorkforceUploads();
+  if (view === "annualLeave") loadAnnualLeaveDashboard();
 }
 
 function resetAll() {
