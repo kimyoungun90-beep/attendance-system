@@ -1,6 +1,7 @@
 import { json, requireAuth } from "../_lib/auth.js";
 import { recalculateRoute } from "../_lib/recalculate.js";
 import { ensureSchema } from "../_lib/schema.js";
+import { loadGrantRecipientContext, normalizeEmployeeId, parseEmployeeIds, resolveGrantRecipients } from "../_lib/grant-recipients.js";
 
 const VALID_ROUTES = new Set(["homeplus", "electroland"]);
 const VALID_TYPES = new Set(["substitute", "compensation"]);
@@ -22,36 +23,49 @@ export async function onRequestGet(context) {
   const grants = grantsResult.results || [];
   if (!grants.length) return json({ items: [] });
 
-  const factsResult = route
-    ? await context.env.DB.prepare(`SELECT f.* FROM attendance_monthly_employee_facts f WHERE f.route = ?`).bind(route).all()
-    : await context.env.DB.prepare(`SELECT f.* FROM attendance_monthly_employee_facts f`).all();
-  const facts = factsResult.results || [];
-  const factsByRouteMonth = new Map();
-  for (const fact of facts) {
-    const key = `${fact.route}|${fact.month}`;
-    if (!factsByRouteMonth.has(key)) factsByRouteMonth.set(key, []);
-    factsByRouteMonth.get(key).push(fact);
-  }
-
   const allocationsResult = route
     ? await context.env.DB.prepare(`SELECT grant_id, ROUND(SUM(used_days), 1) AS used_days FROM attendance_leave_allocations_v5 WHERE route = ? GROUP BY grant_id`).bind(route).all()
     : await context.env.DB.prepare(`SELECT grant_id, ROUND(SUM(used_days), 1) AS used_days FROM attendance_leave_allocations_v5 GROUP BY grant_id`).all();
   const usedByGrant = new Map((allocationsResult.results || []).map((row) => [row.grant_id, roundHalf(row.used_days)]));
 
-  const items = grants.map((grant) => {
-    const monthFacts = factsByRouteMonth.get(`${grant.route}|${grant.grant_month}`) || [];
-    const eligible = monthFacts.filter((fact) => isEligibleForGrant(grant, fact));
+  const contexts = new Map();
+  const getContext = async (grantRoute) => {
+    if (!contexts.has(grantRoute)) contexts.set(grantRoute, await loadGrantRecipientContext(context.env.DB, grantRoute));
+    return contexts.get(grantRoute);
+  };
+
+  const items = [];
+  for (const grant of grants) {
+    const recipientContext = await getContext(grant.route);
+    const eligible = resolveGrantRecipients(grant, recipientContext);
     const usedDays = usedByGrant.get(grant.id) || 0;
     const assignedDays = roundHalf(roundHalf(grant.granted_days) * eligible.length);
-    return {
+    const excludedIds = parseEmployeeIds(grant.excluded_employee_ids_json);
+    const excludedPeople = excludedIds.map((employeeId) => {
+      const person = recipientContext.candidatesById.get(employeeId);
+      return {
+        employeeId,
+        employeeName: person?.employeeName || "",
+        storeName: person?.storeName || "",
+      };
+    });
+    const target = normalizeEmployeeId(grant.employee_id);
+    const targetPerson = target ? recipientContext.candidatesById.get(target) : null;
+    const recipientSourceMonth = eligible.find((person) => person.recipientSourceMonth)?.recipientSourceMonth || "";
+    items.push({
       ...grant,
       eligible_people: eligible.length,
       assigned_days: assignedDays,
       used_days: usedDays,
       unused_days: roundHalf(Math.max(0, assignedDays - usedDays)),
-      excluded_count: parseEmployeeIds(grant.excluded_employee_ids_json).length,
-    };
-  });
+      excluded_count: excludedIds.length,
+      excluded_people: excludedPeople,
+      employee_name: targetPerson?.employeeName || "",
+      employee_store: targetPerson?.storeName || "",
+      cohort_rule: `${grant.grant_month} 말까지 입사자${recipientSourceMonth ? ` · ${recipientSourceMonth} 인력 기준` : ""}`,
+      recipient_source_month: recipientSourceMonth,
+    });
+  }
 
   return json({ items });
 }
@@ -143,42 +157,9 @@ export async function onRequestPost(context) {
   return json({ ok: true, id, replaced: Boolean(existing), affectedMonths }, 201);
 }
 
-function isEligibleForGrant(grant, fact) {
-  const employeeId = normalizeEmployeeId(fact.employee_id);
-  if (!employeeId) return false;
-  if (grant.grant_scope === "employee") {
-    if (employeeId !== normalizeEmployeeId(grant.employee_id)) return false;
-  } else if (new Set(parseEmployeeIds(grant.excluded_employee_ids_json)).has(employeeId)) {
-    return false;
-  }
-
-  if (grant.eligibility_mode === "worked_on_date") {
-    const workedDates = new Set(parseJsonArray(fact.worked_dates_json).map((value) => typeof value === "string" ? value : value?.date).filter(Boolean));
-    return workedDates.has(grant.criterion_date);
-  }
-  return true;
-}
-
-function parseEmployeeIds(value) {
-  return parseJsonArray(value).map(normalizeEmployeeId).filter(Boolean);
-}
-
-function parseJsonArray(value) {
-  try {
-    const parsed = JSON.parse(value || "[]");
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
 function normalizeEmployeeIdList(value) {
   const values = Array.isArray(value) ? value : String(value || "").split(/[\s,;]+/);
   return [...new Set(values.map(normalizeEmployeeId).filter(Boolean))];
-}
-
-function normalizeEmployeeId(value) {
-  return String(value || "").trim().toUpperCase().replace(/\.0+$/, "").replace(/[\s\u00A0-]+/g, "").replace(/[^0-9A-Z가-힣]/g, "");
 }
 
 function roundHalf(value) {

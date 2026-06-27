@@ -1,5 +1,6 @@
 import { json, requireAuth } from "../_lib/auth.js";
 import { ensureSchema } from "../_lib/schema.js";
+import { loadGrantRecipientContext, normalizeEmployeeId, resolveGrantRecipients } from "../_lib/grant-recipients.js";
 
 const VALID_ROUTES = new Set(["homeplus", "electroland"]);
 
@@ -17,16 +18,12 @@ export async function onRequestGet(context) {
 
   const monthStart = `${month}-01`;
   const monthEnd = endOfMonth(month);
-  const [grantsResult, factsResult, allocationsResult, annualResult] = await Promise.all([
+  const [grantsResult, allocationsResult, annualResult, recipientContext] = await Promise.all([
     context.env.DB.prepare(`
       SELECT * FROM attendance_leave_grants_v5
-      WHERE route = ? AND grant_month <= ? AND valid_from <= ? AND valid_to >= ?
-      ORDER BY grant_month, valid_to, valid_from, created_at
-    `).bind(route, month, monthEnd, monthStart).all(),
-    context.env.DB.prepare(`
-      SELECT * FROM attendance_monthly_employee_facts
-      WHERE route = ? AND month <= ?
-    `).bind(route, month).all(),
+      WHERE route = ? AND valid_from <= ? AND valid_to >= ?
+      ORDER BY valid_to, valid_from, grant_month, created_at
+    `).bind(route, monthEnd, monthStart).all(),
     context.env.DB.prepare(`
       SELECT grant_id, employee_id, ROUND(SUM(used_days), 1) AS used_days
       FROM attendance_leave_allocations_v5
@@ -39,29 +36,19 @@ export async function onRequestGet(context) {
       WHERE route = ? AND month < ?
       GROUP BY employee_id
     `).bind(route, month).all(),
+    loadGrantRecipientContext(context.env.DB, route),
   ]);
 
-  const factsByMonth = new Map();
-  for (const fact of factsResult.results || []) {
-    if (!factsByMonth.has(fact.month)) factsByMonth.set(fact.month, []);
-    factsByMonth.get(fact.month).push(fact);
-  }
   const usedMap = new Map((allocationsResult.results || []).map((row) => [
     `${row.grant_id}|${normalizeEmployeeId(row.employee_id)}`,
     roundHalf(row.used_days),
   ]));
 
   const lotsByEmployee = {};
-  const currentGrants = [];
   for (const grant of grantsResult.results || []) {
-    if (grant.grant_month === month) {
-      currentGrants.push(normalizeGrant(grant));
-      continue;
-    }
-    const grantFacts = factsByMonth.get(grant.grant_month) || [];
-    for (const fact of grantFacts) {
-      if (!isEligibleForGrant(grant, fact)) continue;
-      const employeeId = normalizeEmployeeId(fact.employee_id);
+    const recipients = resolveGrantRecipients(grant, recipientContext);
+    for (const recipient of recipients) {
+      const employeeId = normalizeEmployeeId(recipient.employeeId);
       const remaining = roundHalf(Number(grant.granted_days || 0) - (usedMap.get(`${grant.id}|${employeeId}`) || 0));
       if (!(remaining > 0)) continue;
       if (!lotsByEmployee[employeeId]) lotsByEmployee[employeeId] = [];
@@ -90,56 +77,7 @@ export async function onRequestGet(context) {
     };
   }
 
-  return json({ lotsByEmployee, balances, annualLeaveBefore, currentGrants });
-}
-
-function normalizeGrant(grant) {
-  return {
-    id: grant.id,
-    route: grant.route,
-    grantType: grant.grant_type || "substitute",
-    grantScope: grant.grant_scope || "route",
-    grantMonth: grant.grant_month,
-    grantedDays: roundHalf(grant.granted_days),
-    validFrom: grant.valid_from,
-    validTo: grant.valid_to,
-    eligibilityMode: grant.eligibility_mode || "all",
-    criterionDate: grant.criterion_date || "",
-    employeeId: normalizeEmployeeId(grant.employee_id),
-    excludedEmployeeIds: parseEmployeeIds(grant.excluded_employee_ids_json),
-  };
-}
-
-function isEligibleForGrant(grant, fact) {
-  const employeeId = normalizeEmployeeId(fact.employee_id);
-  if (!employeeId) return false;
-  if (grant.grant_scope === "employee") {
-    if (employeeId !== normalizeEmployeeId(grant.employee_id)) return false;
-  } else if (new Set(parseEmployeeIds(grant.excluded_employee_ids_json)).has(employeeId)) {
-    return false;
-  }
-  if (grant.eligibility_mode === "worked_on_date") {
-    const workedDates = new Set(parseJsonArray(fact.worked_dates_json).map((value) => typeof value === "string" ? value : value?.date).filter(Boolean));
-    return workedDates.has(grant.criterion_date);
-  }
-  return true;
-}
-
-function parseEmployeeIds(value) {
-  return parseJsonArray(value).map(normalizeEmployeeId).filter(Boolean);
-}
-
-function parseJsonArray(value) {
-  try {
-    const parsed = JSON.parse(value || "[]");
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function normalizeEmployeeId(value) {
-  return String(value || "").trim().toUpperCase().replace(/\.0+$/, "").replace(/[\s\u00A0-]+/g, "").replace(/[^0-9A-Z가-힣]/g, "");
+  return json({ lotsByEmployee, balances, annualLeaveBefore, currentGrants: [] });
 }
 
 function endOfMonth(monthText) {

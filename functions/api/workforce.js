@@ -1,5 +1,6 @@
 import { json, requireAuth } from "../_lib/auth.js";
 import { ensureSchema } from "../_lib/schema.js";
+import { recalculateRoute } from "../_lib/recalculate.js";
 
 const VALID_ROUTES = new Set(["homeplus", "electroland"]);
 const D1_FILE_LIMIT = 20 * 1024 * 1024;
@@ -13,28 +14,84 @@ export async function onRequestGet(context) {
   const url = new URL(context.request.url);
   const month = String(url.searchParams.get("month") || "");
   const route = String(url.searchParams.get("route") || "");
+  const fallback = url.searchParams.get("fallback") === "1";
+  const directory = url.searchParams.get("directory") === "1";
   if (route && !VALID_ROUTES.has(route)) return json({ error: "경로 구분이 올바르지 않습니다." }, 400);
+
+  if (directory) {
+    if (!VALID_ROUTES.has(route)) return json({ error: "직원 검색 경로를 선택해 주세요." }, 400);
+    const result = await context.env.DB.prepare(`
+      SELECT month, route, regional_manager, manager, region1, region2, store_code, store_name,
+             portal_id, employee_id, employee_name, hire_date, group_hire_date, note
+      FROM attendance_workforce_members
+      WHERE route = ?
+      ORDER BY month DESC, employee_id ASC, store_code ASC
+    `).bind(route).all();
+    const latestByEmployee = new Map();
+    for (const row of result.results || []) {
+      const employeeId = normalizeId(row.employee_id);
+      if (!employeeId || latestByEmployee.has(employeeId)) continue;
+      latestByEmployee.set(employeeId, row);
+    }
+    const members = [...latestByEmployee.values()]
+      .map(toClientMember)
+      .sort((a, b) => String(a.regionalManager || "").localeCompare(String(b.regionalManager || ""), "ko")
+        || String(a.manager || "").localeCompare(String(b.manager || ""), "ko")
+        || String(a.storeName || "").localeCompare(String(b.storeName || ""), "ko")
+        || String(a.employeeName || "").localeCompare(String(b.employeeName || ""), "ko"));
+    const resolvedMonth = members.reduce((latest, member) => member.sourceMonth > latest ? member.sourceMonth : latest, "");
+    return json({ members, route, directory: true, resolvedMonth });
+  }
 
   if (month) {
     if (!/^\d{4}-\d{2}$/.test(month)) return json({ error: "적용 월이 올바르지 않습니다." }, 400);
-    const upload = await context.env.DB.prepare(`
+    let upload = await context.env.DB.prepare(`
       SELECT id, month, file_name, content_type, size_bytes, storage_type,
              employee_count, electroland_count, homeplus_count, portal_count,
              created_at, updated_at
       FROM attendance_workforce_uploads WHERE month = ? LIMIT 1
     `).bind(month).first();
-    if (!upload) return json({ upload: null, members: [] });
+    if (!upload && fallback) {
+      upload = await context.env.DB.prepare(`
+        SELECT id, month, file_name, content_type, size_bytes, storage_type,
+               employee_count, electroland_count, homeplus_count, portal_count,
+               created_at, updated_at
+        FROM attendance_workforce_uploads
+        WHERE month <= ?
+        ORDER BY month DESC, updated_at DESC
+        LIMIT 1
+      `).bind(month).first();
+      if (!upload) {
+        upload = await context.env.DB.prepare(`
+          SELECT id, month, file_name, content_type, size_bytes, storage_type,
+                 employee_count, electroland_count, homeplus_count, portal_count,
+                 created_at, updated_at
+          FROM attendance_workforce_uploads
+          WHERE month > ?
+          ORDER BY month ASC, updated_at DESC
+          LIMIT 1
+        `).bind(month).first();
+      }
+    }
+    if (!upload) return json({ upload: null, members: [], requestedMonth: month, resolvedMonth: "", fallbackUsed: false });
 
+    const resolvedMonth = upload.month;
     let statement = context.env.DB.prepare(`
-      SELECT route, regional_manager, manager, region1, region2, store_code, store_name,
+      SELECT month, route, regional_manager, manager, region1, region2, store_code, store_name,
              portal_id, employee_id, employee_name, hire_date, group_hire_date, note
       FROM attendance_workforce_members
       WHERE month = ? ${route ? "AND route = ?" : ""}
       ORDER BY route, regional_manager, manager, region2, store_code, employee_name
     `);
-    statement = route ? statement.bind(month, route) : statement.bind(month);
+    statement = route ? statement.bind(resolvedMonth, route) : statement.bind(resolvedMonth);
     const members = await statement.all();
-    return json({ upload, members: (members.results || []).map(toClientMember) });
+    return json({
+      upload,
+      members: (members.results || []).map(toClientMember),
+      requestedMonth: month,
+      resolvedMonth,
+      fallbackUsed: resolvedMonth !== month,
+    });
   }
 
   const result = await context.env.DB.prepare(`
@@ -153,6 +210,12 @@ export async function onRequestPost(context) {
       await context.env.FILES.delete(old.object_key).catch(() => {});
     }
 
+    let affectedMonths = 0;
+    for (const affectedRoute of [...new Set(finalMembers.map((member) => member.route))]) {
+      const recalculated = await recalculateRoute(context.env.DB, affectedRoute);
+      affectedMonths += Number(recalculated.affectedMonths || 0);
+    }
+
     return json({
       ok: true,
       id,
@@ -162,6 +225,7 @@ export async function onRequestPost(context) {
       homeplusCount,
       portalCount,
       storageType,
+      affectedMonths,
     }, replaced ? 200 : 201);
   } catch (error) {
     if (storageType === "r2" && objectKey && context.env.FILES) await context.env.FILES.delete(objectKey).catch(() => {});
@@ -227,6 +291,7 @@ function toClientMember(row) {
     hireDate: row.hire_date || "",
     groupHireDate: row.group_hire_date || "",
     note: row.note || "",
+    sourceMonth: row.month || "",
   };
 }
 

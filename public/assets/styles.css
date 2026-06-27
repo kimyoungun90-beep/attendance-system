@@ -35,3 +35,13 @@
 .secondary-heading{margin-top:28px;padding-top:22px;border-top:1px solid #e5eaf0}
 .compact-box{min-height:64px}
 @media(max-width:1100px){.annual-leave-layout{grid-template-columns:1fr}}
+
+/* v12 직원 검색 선택기 */
+.employee-selected{margin-top:8px;padding:10px 12px;border:1px solid #bdd1ef;border-radius:10px;background:#f4f8ff;color:#173f73;font-size:12px;font-weight:800;line-height:1.45}
+.employee-selected.empty{border-style:dashed;border-color:var(--line);background:#fafbfd;color:var(--muted);font-weight:600}
+.employee-search-results{margin-top:7px;max-height:230px;overflow:auto;border:1px solid var(--line);border-radius:11px;background:#fff;box-shadow:0 12px 30px rgba(20,42,78,.13);position:relative;z-index:8}
+.employee-search-item{width:100%;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;padding:10px 12px;border:0;border-bottom:1px solid #edf1f6;background:#fff;text-align:left;color:var(--ink)}
+.employee-search-item:last-child{border-bottom:0}.employee-search-item:hover{background:#f3f7fd}.employee-search-item strong{display:block;font-size:12px}.employee-search-item small{display:block;margin-top:3px;color:var(--muted);font-size:10px}.employee-search-item .employee-id{color:var(--navy);font-size:11px;font-weight:850}
+.selected-employee-list{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px;min-height:32px;align-items:center}
+.employee-chip{display:inline-flex;align-items:center;gap:7px;padding:6px 8px 6px 10px;border-radius:99px;background:#eaf2ff;color:#173f73;font-size:11px;font-weight:750}
+.employee-chip button{width:20px;height:20px;padding:0;border:0;border-radius:50%;background:rgba(18,59,114,.12);color:#173f73;font-size:13px;font-weight:900}

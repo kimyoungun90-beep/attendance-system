@@ -1,3 +1,5 @@
+import { loadGrantRecipientContext, resolveGrantRecipients } from "./grant-recipients.js";
+
 const VALID_ROUTES = new Set(["homeplus", "electroland"]);
 const VALID_GRANT_TYPES = new Set(["substitute", "compensation"]);
 
@@ -43,13 +45,24 @@ export async function recalculateRoute(db, route) {
     factsByClosure.get(fact.closure_id).push(fact);
   }
 
-  const grantsByMonth = new Map();
-  for (const grant of grants) {
-    if (!grantsByMonth.has(grant.grant_month)) grantsByMonth.set(grant.grant_month, []);
-    grantsByMonth.get(grant.grant_month).push(grant);
-  }
-
+  const recipientContext = await loadGrantRecipientContext(db, route);
   const lotsByEmployee = new Map();
+  for (const grant of grants) {
+    const recipients = resolveGrantRecipients(grant, recipientContext);
+    for (const recipient of recipients) {
+      const employeeId = normalizeEmployeeId(recipient.employeeId);
+      if (!employeeId) continue;
+      if (!lotsByEmployee.has(employeeId)) lotsByEmployee.set(employeeId, []);
+      lotsByEmployee.get(employeeId).push({
+        grantId: grant.id,
+        grantType: VALID_GRANT_TYPES.has(grant.grant_type) ? grant.grant_type : "substitute",
+        grantMonth: grant.grant_month,
+        validFrom: grant.valid_from,
+        validTo: grant.valid_to,
+        remaining: roundHalf(grant.granted_days),
+      });
+    }
+  }
   const cumulativeAnnualByEmployee = new Map();
   const allocationTotals = new Map();
   const summaryStatements = [];
@@ -58,24 +71,6 @@ export async function recalculateRoute(db, route) {
 
   for (const closure of closures) {
     const monthFacts = factsByClosure.get(closure.id) || [];
-    const monthGrants = grantsByMonth.get(closure.month) || [];
-
-    for (const grant of monthGrants) {
-      for (const fact of monthFacts) {
-        if (!isEligibleForGrant(grant, fact)) continue;
-        const employeeId = normalizeEmployeeId(fact.employee_id);
-        if (!employeeId) continue;
-        if (!lotsByEmployee.has(employeeId)) lotsByEmployee.set(employeeId, []);
-        lotsByEmployee.get(employeeId).push({
-          grantId: grant.id,
-          grantType: VALID_GRANT_TYPES.has(grant.grant_type) ? grant.grant_type : "substitute",
-          grantMonth: grant.grant_month,
-          validFrom: grant.valid_from,
-          validTo: grant.valid_to,
-          remaining: roundHalf(grant.granted_days),
-        });
-      }
-    }
 
     let dayoffExcessPeople = 0;
     let substituteShortagePeople = 0;
@@ -242,39 +237,6 @@ function consumePool({ lots, grantType, events, monthStart, monthEnd, nextMonthS
     .reduce((sum, lot) => sum + lot.remaining, 0));
 
   return { available, applied, remaining, expired, shortage };
-}
-
-function isEligibleForGrant(grant, fact) {
-  const employeeId = normalizeEmployeeId(fact.employee_id);
-  if (!employeeId) return false;
-
-  if (grant.grant_scope === "employee") {
-    if (employeeId !== normalizeEmployeeId(grant.employee_id)) return false;
-  } else {
-    const exclusions = new Set(parseEmployeeIds(grant.excluded_employee_ids_json));
-    if (exclusions.has(employeeId)) return false;
-  }
-
-  if (grant.eligibility_mode === "worked_on_date") {
-    if (!grant.criterion_date) return false;
-    const workedDates = new Set(parseEvents(fact.worked_dates_json).map((value) => typeof value === "string" ? value : value?.date).filter(Boolean));
-    if (!workedDates.has(grant.criterion_date)) return false;
-  }
-
-  return true;
-}
-
-function parseEmployeeIds(value) {
-  try {
-    const parsed = JSON.parse(value || "[]");
-    return Array.isArray(parsed) ? parsed.map(normalizeEmployeeId).filter(Boolean) : [];
-  } catch {
-    return [];
-  }
-}
-
-function normalizeEmployeeId(value) {
-  return String(value || "").trim().toUpperCase().replace(/\.0+$/, "").replace(/[\s\u00A0-]+/g, "").replace(/[^0-9A-Z가-힣]/g, "");
 }
 
 function mergeEvents(...groups) {
