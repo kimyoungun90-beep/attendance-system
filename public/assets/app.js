@@ -82,6 +82,7 @@ function bindEvents() {
   $("#annualLedgerRoute").addEventListener("change", loadAnnualLeaveDashboard);
   $("#annualLedgerMonth").addEventListener("change", loadAnnualLeaveDashboard);
   $("#refreshAnnualLedger").addEventListener("click", loadAnnualLeaveDashboard);
+  $("#exportAnnualLedger").addEventListener("click", exportAnnualLeaveDashboard);
   $("#workforceMonth").addEventListener("change", previewWorkforceFile);
   $("#workforceFile").addEventListener("change", previewWorkforceFile);
   $("#portalReferenceFile").addEventListener("change", previewWorkforceFile);
@@ -318,9 +319,11 @@ function repairWorksheetRange(sheet) {
     minRow = Math.min(minRow, cell.r); minCol = Math.min(minCol, cell.c);
     maxRow = Math.max(maxRow, cell.r); maxCol = Math.max(maxCol, cell.c);
   }
-  const actualRef = XLSX.utils.encode_range({ s: { r: minRow, c: minCol }, e: { r: maxRow, c: maxCol } });
+  // 시트가 B열부터 시작해도 실제 엑셀 열 위치를 유지하도록 A1부터 읽습니다.
+  // 이전 방식은 열이 한 칸 밀리면서 사원명 대신 연락처가 이름으로 저장될 수 있었습니다.
+  const actualRef = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: maxRow, c: maxCol } });
   const current = sheet["!ref"] ? XLSX.utils.decode_range(sheet["!ref"]) : null;
-  if (!current || current.e.r < maxRow || current.e.c < maxCol) sheet["!ref"] = actualRef;
+  if (!current || current.s.r > 0 || current.s.c > 0 || current.e.r < maxRow || current.e.c < maxCol) sheet["!ref"] = actualRef;
 }
 
 function parsePlan(sheets, targetMonth) {
@@ -3200,6 +3203,64 @@ function renderAnnualLeaveDashboard(data) {
   $$(".annual-month-delete").forEach((button) => button.addEventListener("click", () => deleteAnnualMonthly(button.dataset.route, button.dataset.month)));
 }
 
+
+function exportAnnualLeaveDashboard() {
+  const data = state.annualLeaveDashboard;
+  const employees = data?.employees || [];
+  if (!employees.length) return showToast("엑셀로 저장할 연차 누적현황이 없습니다.");
+  if (employees.some((row) => isPhoneNumberText(row.employeeName))) {
+    return showToast("기존 자료에 연락처가 이름으로 저장되어 있습니다. 수정 버전 배포 후 최초 연차대장을 다시 등록해 주세요.");
+  }
+  const routeLabel = ROUTE_LABELS[data.route] || "경로";
+  const asOf = data.asOf || data.baseline?.baseline_date || toISODate(new Date());
+  const wb = XLSX.utils.book_new();
+  const border = { top:{style:"thin",color:{rgb:"D7DEE8"}}, bottom:{style:"thin",color:{rgb:"D7DEE8"}}, left:{style:"thin",color:{rgb:"D7DEE8"}}, right:{style:"thin",color:{rgb:"D7DEE8"}} };
+  const headerStyle = { fill:{fgColor:{rgb:"1F4E78"}}, font:{name:"맑은 고딕",bold:true,color:{rgb:"FFFFFF"}}, alignment:{horizontal:"center",vertical:"center",wrapText:true}, border };
+  const bodyStyle = { font:{name:"맑은 고딕",sz:10}, alignment:{vertical:"center"}, border };
+  const centerStyle = { ...bodyStyle, alignment:{horizontal:"center",vertical:"center"} };
+  const numberStyle = { ...bodyStyle, alignment:{horizontal:"right",vertical:"center"}, numFmt:"0.0" };
+  const styleRange = (ws, range, style) => { const r=XLSX.utils.decode_range(range); for(let y=r.s.r;y<=r.e.r;y+=1) for(let x=r.s.c;x<=r.e.c;x+=1){ const a=XLSX.utils.encode_cell({r:y,c:x}); if(ws[a]) ws[a].s=style; } };
+
+  const region = new Map();
+  for (const row of employees) {
+    const key=row.regionalManager||"미지정";
+    if(!region.has(key)) region.set(key,{count:0,under:0,granted:0,used:0,remaining:0});
+    const item=region.get(key); item.count+=1; item.under+=row.underOneYear?1:0; item.granted+=Number(row.granted||0); item.used+=Number(row.approvedUsed||0); item.remaining+=Number(row.remaining||0);
+  }
+  const summaryRows=[
+    [`${routeLabel} 연차 누적 현황 보고`,"","","","",""],
+    [`기준일: ${asOf}`,"","","","",""],
+    ["관리 인원",employees.length,"1년 이상",employees.filter(r=>!r.underOneYear).length,"1년 미만",employees.filter(r=>r.underOneYear).length],
+    ["총 발생",employees.reduce((s,r)=>s+Number(r.granted||0),0),"누적 사용",employees.reduce((s,r)=>s+Number(r.approvedUsed||0),0),"총 잔여",employees.reduce((s,r)=>s+Number(r.remaining||0),0)],
+    [],["지역장","관리 인원","1년 미만","발생","누적 사용","잔여"],
+    ...[...region.entries()].sort((a,b)=>a[0].localeCompare(b[0],"ko")).map(([name,v])=>[name,v.count,v.under,v.granted,v.used,v.remaining]),
+  ];
+  const wsSummary=XLSX.utils.aoa_to_sheet(summaryRows);
+  wsSummary["!merges"]=[XLSX.utils.decode_range("A1:F1"),XLSX.utils.decode_range("A2:F2")];
+  wsSummary["!cols"]=[{wch:18},{wch:13},{wch:13},{wch:13},{wch:13},{wch:13}];
+  wsSummary.A1.s={fill:{fgColor:{rgb:"17365D"}},font:{name:"맑은 고딕",sz:18,bold:true,color:{rgb:"FFFFFF"}},alignment:{vertical:"center"}};
+  styleRange(wsSummary,"A3:F4",{fill:{fgColor:{rgb:"D9EAF7"}},font:{name:"맑은 고딕",bold:true,color:{rgb:"17365D"}},alignment:{horizontal:"center",vertical:"center"},border});
+  styleRange(wsSummary,`A6:F${summaryRows.length}`,bodyStyle); styleRange(wsSummary,"A6:F6",headerStyle); styleRange(wsSummary,`B7:F${summaryRows.length}`,numberStyle);
+  XLSX.utils.book_append_sheet(wb,wsSummary,"전체 요약");
+
+  const headers=["구분","지역장","매니저","지역","점포","사번","이름","연차 기준 입사일","사용기간 시작","사용기간 종료","발생","누적 사용","당월 승인","잔여","1차 촉진","2차 촉진","비고"];
+  const rows=employees.map(row=>[row.underOneYear?"1년 미만·월차":"1년 이상·연차",row.regionalManager||"",row.manager||"",row.region2||row.region1||"",row.storeName||"",row.employeeId||"",row.employeeName||"",row.basisHireDate||row.hireDate||"",row.cycleStart||"",row.cycleEnd||"",Number(row.granted||0),Number(row.approvedUsed||0),Number(row.approvedCurrentMonth||0),Number(row.remaining||0),row.firstPromotionDate||"",row.secondPromotionDate||"",row.note||""]);
+  const ws=XLSX.utils.aoa_to_sheet([headers,...rows]);
+  ws["!cols"]=[{wch:15},{wch:11},{wch:11},{wch:9},{wch:22},{wch:13},{wch:10},{wch:15},{wch:13},{wch:13},{wch:9},{wch:10},{wch:10},{wch:9},{wch:13},{wch:13},{wch:30}];
+  ws["!autofilter"]={ref:`A1:Q${rows.length+1}`};
+  styleRange(ws,`A1:Q${rows.length+1}`,bodyStyle); styleRange(ws,"A1:Q1",headerStyle); styleRange(ws,`A2:J${rows.length+1}`,centerStyle); styleRange(ws,`K2:N${rows.length+1}`,numberStyle);
+  for(let r=2;r<=rows.length+1;r+=1){ if(ws[`N${r}`]&&Number(ws[`N${r}`].v)<=3) ws[`N${r}`].s={...numberStyle,fill:{fgColor:{rgb:"FCE4D6"}},font:{name:"맑은 고딕",bold:true,color:{rgb:"C00000"}}}; }
+  XLSX.utils.book_append_sheet(wb,ws,"연차 누적 현황");
+
+  const reminders=(data.reminders||[]).map(r=>[r.status||"",r.promotionType||"",r.dueDate||"",r.regionalManager||"",r.manager||"",r.storeName||"",r.employeeId||"",r.employeeName||"",Number(r.remaining||0),[r.cycleStart,r.cycleEnd].filter(Boolean).join(" ~ ")]);
+  const wsR=XLSX.utils.aoa_to_sheet([["상태","촉진 구분","촉진일","지역장","매니저","점포","사번","이름","잔여","사용기간"],...reminders]);
+  wsR["!cols"]=[{wch:12},{wch:13},{wch:13},{wch:11},{wch:11},{wch:22},{wch:13},{wch:10},{wch:9},{wch:27}];
+  styleRange(wsR,`A1:J${Math.max(1,reminders.length+1)}`,bodyStyle); styleRange(wsR,"A1:J1",headerStyle); styleRange(wsR,`A2:J${reminders.length+1}`,centerStyle);
+  XLSX.utils.book_append_sheet(wb,wsR,"촉진 대상");
+  XLSX.writeFile(wb,`${routeLabel}_연차누적현황_${asOf}.xlsx`,{bookType:"xlsx",cellStyles:true,compression:true});
+  showToast("보고용 연차 누적현황 엑셀을 저장했습니다.");
+}
+
 async function deleteAnnualMonthly(route, month) {
   if (!confirm(`${month} 연차 승인·반려 자료를 삭제하시겠습니까?`)) return;
   try {
@@ -3238,10 +3299,15 @@ function parseAnnualBaselineSheet(matrix, route, baselineDate, underOneYear) {
   const headerRows = matrix.slice(Math.max(0, headerIndex - 5), headerIndex + 1);
   const headers = (matrix[headerIndex] || []).map(normalizeHeader);
   const find = (names, fallback = -1) => {
+    const exact = findExactHeaderIndex(headers, names);
+    if (exact >= 0) return exact;
     const direct = findHeaderIndex(headers, names);
     if (direct >= 0) return direct;
     for (let r = headerRows.length - 1; r >= 0; r -= 1) {
-      const idx = findHeaderIndex((headerRows[r] || []).map(normalizeHeader), names);
+      const rowHeaders = (headerRows[r] || []).map(normalizeHeader);
+      const exactInRow = findExactHeaderIndex(rowHeaders, names);
+      if (exactInRow >= 0) return exactInRow;
+      const idx = findHeaderIndex(rowHeaders, names);
       if (idx >= 0) return idx;
     }
     return fallback;
@@ -3249,14 +3315,14 @@ function parseAnnualBaselineSheet(matrix, route, baselineDate, underOneYear) {
   const cols = underOneYear ? {
     regionalManager: find(["지역장"], 3), manager: find(["매니저"], 4), region1: find(["지역1"], 5), region2: find(["지역2"], 6),
     storeCode: find(["근무처코드", "점포코드"], 7), storeName: find(["근무처명", "점포", "매장명"], 8), portalId: find(["스핀사번", "포탈사번"], 10),
-    employeeId: find(["제니엘사번", "사번"], 11), name: find(["이름", "성명", "사원명", "직원명"], 12), hireDate: find(["입사일", "제니엘입사일"], 15), basisHireDate: find(["고용승계입사일"], -1),
+    employeeId: find(["제니엘사번", "사번"], 11), name: find(["사원명", "성명", "이름", "직원명"], 12), hireDate: find(["입사일", "제니엘입사일"], 15), basisHireDate: find(["고용승계입사일"], -1),
     granted: find(["발생", "월차발생"], 16), used: find([`${baselineDate.slice(0,4)}사용`, `${baselineDate.slice(0,4)}년사용`, "사용"], 18), remaining: find(["잔여"], 19), period: find(["사용기간"], 20),
     termination: find(["퇴사일"], 21), firstPromotion: find(["1차촉진", "1차촉진일"], 23), secondPromotion: find(["2차촉진", "2차촉진일"], 25), expiry: find(["연차소진일", "소진일"], 27), note: find(["비고"], 28),
   } : findAnnualAboveColumns(matrix, headerIndex, baselineDate);
   const rows = [];
   for (const source of matrix.slice(headerIndex + 1)) {
     const employeeId = normalizeEmployeeId(source[cols.employeeId]);
-    const employeeName = text(source[cols.name]);
+    const employeeName = resolveAnnualEmployeeName(source, cols);
     if (!looksLikeEmployeeId(employeeId) || !employeeName) continue;
     const activeCycle = underOneYear ? null : selectActiveAnnualCycle(source, cols.cycles || [], baselineDate);
     const period = activeCycle?.period || parseDateRange(source[cols.period]);
@@ -3280,6 +3346,41 @@ function parseAnnualBaselineSheet(matrix, route, baselineDate, underOneYear) {
     });
   }
   return rows;
+}
+
+
+function findExactHeaderIndex(headers, candidates) {
+  for (const candidate of candidates.map(normalizeHeader)) {
+    const index = headers.findIndex((header) => header === candidate);
+    if (index >= 0) return index;
+  }
+  return -1;
+}
+
+function isPhoneNumberText(value) {
+  const normalized = text(value).replace(/\s+/g, "");
+  return /^0\d{1,2}-?\d{3,4}-?\d{4}$/.test(normalized) || /^\d{9,11}$/.test(normalized.replace(/-/g, ""));
+}
+
+function isPlausibleEmployeeName(value) {
+  const normalized = text(value);
+  if (!normalized || normalized.length > 50) return false;
+  if (/필터|합계|연락처|이메일/.test(normalized)) return false;
+  if (isPhoneNumberText(normalized) || normalized.includes("@")) return false;
+  if (looksLikeEmployeeId(normalized) || /^\d+(?:\.\d+)?$/.test(normalized)) return false;
+  return /[가-힣A-Za-z]/.test(normalized);
+}
+
+function resolveAnnualEmployeeName(source, cols) {
+  const primary = text(source[cols.name]);
+  if (isPlausibleEmployeeName(primary)) return primary;
+  // 전자랜드 기준대장은 제니엘 사번 바로 오른쪽 열이 사원명입니다.
+  for (const index of [...new Set([Number(cols.employeeId) + 1, Number(cols.name) - 1, Number(cols.name) + 1])]) {
+    if (!Number.isInteger(index) || index < 0) continue;
+    const candidate = text(source[index]);
+    if (isPlausibleEmployeeName(candidate)) return candidate;
+  }
+  return "";
 }
 
 function findAnnualAboveColumns(matrix, headerIndex, baselineDate) {
@@ -3324,7 +3425,7 @@ function findAnnualAboveColumns(matrix, headerIndex, baselineDate) {
   return {
     regionalManager: direct(["지역장"], 3), manager: direct(["매니저"], 4), region1: direct(["지역1"], 5), region2: direct(["지역2"], 6),
     storeCode: direct(["근무처코드", "점포코드"], 7), storeName: direct(["근무처명", "매장명"], 8), portalId: direct(["스핀사번", "포탈사번"], 10),
-    employeeId: direct(["제니엘사번", "사번"], 11), name: direct(["이름", "성명"], 12), hireDate: direct(["제니엘입사일", "입사일"], 15), basisHireDate: direct(["고용승계입사일"], 16),
+    employeeId: direct(["제니엘사번", "사번"], 11), name: direct(["사원명", "성명", "이름"], 12), hireDate: direct(["제니엘입사일", "입사일"], 15), basisHireDate: direct(["고용승계입사일"], 16),
     granted: preferred.grantCol ?? 45, grantDate: preferred.grantDateCol ?? 46,
     used: preferred.usedCols?.[0] ?? 47, remaining: preferred.remainingCol ?? 48, period: preferred.periodCol ?? 49,
     termination, firstPromotion: -1, secondPromotion: -1, expiry: -1, note: direct(["비고"], 75), cycles,
