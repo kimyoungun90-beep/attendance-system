@@ -34,11 +34,6 @@ const state = {
   annualLeaveDashboard: null,
   annualBaselinePreview: null,
   annualMonthlyPreview: null,
-  grantCandidates: [],
-  grantCandidateSourceMonth: "",
-  grantCandidateRoute: "",
-  grantCandidateMonth: "",
-  grantExcludedIds: new Set(),
 };
 
 init();
@@ -52,7 +47,7 @@ async function init() {
   setupDropzone("referenceDropzone", "referenceFile", setReferenceFile);
   await checkBackend();
   syncRouteRuleHelp();
-  if (state.backend.loggedIn) await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard(), loadGrantCandidates()]);
+  if (state.backend.loggedIn) await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard()]);
 }
 
 function bindEvents() {
@@ -66,11 +61,8 @@ function bindEvents() {
   $("#refreshGrantButton").addEventListener("click", loadGrants);
   $("#grantRouteFilter").addEventListener("change", loadGrants);
   $("#grantForm").addEventListener("submit", saveGrant);
-  $("#grantMonth").addEventListener("change", async () => { syncGrantDates(); syncGrantFormVisibility(); await loadGrantCandidates(); });
-  $("#grantRoute").addEventListener("change", loadGrantCandidates);
+  $("#grantMonth").addEventListener("change", () => { syncGrantDates(); syncGrantFormVisibility(); });
   $("#grantScope").addEventListener("change", syncGrantFormVisibility);
-  $("#grantEmployeeSearch").addEventListener("input", () => renderGrantCandidateMatches("employee"));
-  $("#grantExclusionSearch").addEventListener("input", () => renderGrantCandidateMatches("exclusion"));
   $("#grantEligibility").addEventListener("change", syncGrantFormVisibility);
   $("#grantCancelEdit").addEventListener("click", resetGrantForm);
   $("#archiveForm").addEventListener("submit", saveArchiveFile);
@@ -139,7 +131,6 @@ function syncGrantFormVisibility() {
   const scope = $("#grantScope")?.value || "route";
   const eligibility = $("#grantEligibility")?.value || "all";
   $("#grantEmployeeField")?.style.setProperty("display", scope === "employee" ? "block" : "none");
-  $("#grantExclusionSearch")?.toggleAttribute("disabled", scope !== "route");
   $("#grantAmountRow")?.classList.toggle("single", scope !== "employee");
   $("#grantEligibilityField")?.classList.toggle("hidden", scope !== "route");
   $("#grantExclusionField")?.classList.toggle("hidden", scope !== "route");
@@ -151,147 +142,6 @@ function syncGrantFormVisibility() {
     const month = $("#grantMonth").value;
     if (month) $("#grantCriterionDate").value = `${month}-01`;
   }
-}
-
-
-async function loadGrantCandidates() {
-  const route = $("#grantRoute")?.value || "";
-  const month = $("#grantMonth")?.value || "";
-  if (!route || !month || !(state.backend.available && state.backend.configured && state.backend.loggedIn)) {
-    state.grantCandidates = [];
-    state.grantCandidateSourceMonth = "";
-    updateGrantCandidateStatus();
-    return;
-  }
-
-  const routeChanged = Boolean(state.grantCandidateRoute && state.grantCandidateRoute !== route);
-  if (routeChanged) {
-    $("#grantEmployeeId").value = "";
-    $("#grantEmployeeSearch").value = "";
-    state.grantExcludedIds = new Set();
-  }
-  state.grantCandidateRoute = route;
-  state.grantCandidateMonth = month;
-
-  try {
-    const response = await fetch(`/api/workforce?route=${encodeURIComponent(route)}&directory=1`, { cache: "no-store" });
-    const data = await readJsonResponse(response);
-    if (!response.ok) throw new Error(data.error || "직원 목록 조회 실패");
-    state.grantCandidates = (data.members || []).map((row) => ({
-      employeeId: normalizeEmployeeId(row.employeeId || row.employee_id),
-      employeeName: text(row.employeeName || row.employee_name),
-      storeName: text(row.storeName || row.store_name),
-      manager: text(row.manager),
-      regionalManager: text(row.regionalManager || row.regional_manager),
-      hireDate: text(row.hireDate || row.hire_date),
-      sourceMonth: text(row.sourceMonth || row.source_month),
-    })).filter((row) => row.employeeId);
-    state.grantCandidateSourceMonth = data.resolvedMonth || "";
-    updateGrantCandidateStatus(false);
-    updateGrantEmployeeSelected();
-    renderGrantExcludedSelected();
-    renderGrantCandidateMatches("employee");
-    renderGrantCandidateMatches("exclusion");
-  } catch (error) {
-    state.grantCandidates = [];
-    state.grantCandidateSourceMonth = "";
-    updateGrantCandidateStatus(false, error.message || "직원 목록 조회 실패");
-  }
-}
-
-function updateGrantCandidateStatus(fallbackUsed = false, errorText = "") {
-  const status = $("#grantCandidateStatus");
-  if (!status) return;
-  if (errorText) {
-    status.textContent = errorText;
-    return;
-  }
-  if (!state.grantCandidates.length) {
-    status.textContent = "조회 가능한 직원이 없습니다. ‘시스템 수정’에서 인력·매장매칭 파일을 먼저 등록해 주세요.";
-    return;
-  }
-  const sourceText = state.grantCandidateSourceMonth ? `최신 ${state.grantCandidateSourceMonth} 포함 전체 인력자료` : "전체 인력자료";
-  status.textContent = `${sourceText} 기준 ${state.grantCandidates.length}명 조회`;
-}
-
-function renderGrantCandidateMatches(mode) {
-  const input = mode === "employee" ? $("#grantEmployeeSearch") : $("#grantExclusionSearch");
-  const container = mode === "employee" ? $("#grantEmployeeResults") : $("#grantExclusionResults");
-  if (!input || !container) return;
-  const query = normalizeSearchText(input.value);
-  if (!query) {
-    container.classList.add("hidden");
-    container.innerHTML = "";
-    return;
-  }
-  const matches = state.grantCandidates.filter((person) => {
-    const haystack = normalizeSearchText(`${person.employeeId} ${person.employeeName} ${person.storeName} ${person.manager}`);
-    return haystack.includes(query);
-  }).slice(0, 15);
-  container.innerHTML = matches.length ? matches.map((person) => `
-    <button type="button" class="employee-search-item" data-mode="${mode}" data-id="${escapeHtml(person.employeeId)}">
-      <span><strong>${escapeHtml(person.employeeName || "이름 미등록")}</strong><small>${escapeHtml([person.storeName, person.manager, person.hireDate ? `입사 ${person.hireDate}` : ""].filter(Boolean).join(" · "))}</small></span>
-      <span class="employee-id">${escapeHtml(person.employeeId)}</span>
-    </button>`).join("") : `<div class="empty-cell">검색 결과가 없습니다.</div>`;
-  container.classList.remove("hidden");
-  container.querySelectorAll(".employee-search-item").forEach((button) => button.addEventListener("click", () => selectGrantCandidate(button.dataset.mode, button.dataset.id)));
-}
-
-function selectGrantCandidate(mode, employeeId) {
-  const id = normalizeEmployeeId(employeeId);
-  if (!id) return;
-  if (mode === "employee") {
-    $("#grantEmployeeId").value = id;
-    $("#grantEmployeeSearch").value = "";
-    $("#grantEmployeeResults").classList.add("hidden");
-    updateGrantEmployeeSelected();
-    return;
-  }
-  if (state.grantExcludedIds.has(id)) state.grantExcludedIds.delete(id);
-  else state.grantExcludedIds.add(id);
-  $("#grantExclusionSearch").value = "";
-  $("#grantExclusionResults").classList.add("hidden");
-  renderGrantExcludedSelected();
-}
-
-function updateGrantEmployeeSelected() {
-  const container = $("#grantEmployeeSelected");
-  if (!container) return;
-  const employeeId = normalizeEmployeeId($("#grantEmployeeId").value);
-  const person = state.grantCandidates.find((row) => row.employeeId === employeeId);
-  if (!employeeId) {
-    container.className = "employee-selected empty";
-    container.textContent = "선택된 직원이 없습니다.";
-    return;
-  }
-  container.className = "employee-selected";
-  container.textContent = person
-    ? `${person.employeeName || "이름 미등록"} · ${person.employeeId}${person.storeName ? ` · ${person.storeName}` : ""}`
-    : employeeId;
-}
-
-function renderGrantExcludedSelected() {
-  const container = $("#grantExcludedSelected");
-  if (!container) return;
-  const ids = [...state.grantExcludedIds];
-  $("#grantExcludedIds").value = ids.join("\n");
-  if (!ids.length) {
-    container.innerHTML = '<span class="muted">제외 직원 없음</span>';
-    return;
-  }
-  container.innerHTML = ids.map((id) => {
-    const person = state.grantCandidates.find((row) => row.employeeId === id);
-    const label = person ? `${person.employeeName || id} · ${id}${person.storeName ? ` · ${person.storeName}` : ""}` : id;
-    return `<span class="employee-chip">${escapeHtml(label)}<button type="button" data-remove-id="${escapeHtml(id)}" aria-label="제외 해제">×</button></span>`;
-  }).join("");
-  container.querySelectorAll("[data-remove-id]").forEach((button) => button.addEventListener("click", () => {
-    state.grantExcludedIds.delete(normalizeEmployeeId(button.dataset.removeId));
-    renderGrantExcludedSelected();
-  }));
-}
-
-function normalizeSearchText(value) {
-  return String(value || "").toLowerCase().replace(/[\s\u00a0-]+/g, "");
 }
 
 function syncRouteRuleHelp() {
@@ -2259,7 +2109,7 @@ async function saveClosure() {
         note: "다른 작성자 최종본 비교 원본", sourceType: "closure", closureId: data.id, replace: false,
       })] : []),
     ]);
-    await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard(), loadGrantCandidates()]);
+    await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard()]);
     const action = data.replaced ? "기존 월 마감을 완전히 교체했습니다." : "새 월 마감을 저장했습니다.";
     const failedFiles = fileResults.filter((item) => item.status === "rejected");
     const fileMessage = failedFiles.length
@@ -2610,7 +2460,7 @@ async function saveGrant(event) {
     return;
   }
   if (payload.grantScope === "employee" && !payload.employeeId) {
-    showToast("사번별 개별 부여는 대상 직원을 검색해 선택해 주세요.");
+    showToast("사번별 개별 부여는 대상 사번을 입력해 주세요.");
     return;
   }
   if (payload.eligibilityMode === "worked_on_date" && !payload.criterionDate) {
@@ -2679,13 +2529,10 @@ function renderGrants(items) {
     const status = grantStatus(item);
     const statusClass = status === "사용 가능" ? "success-pill" : status === "만료" ? "status-pill" : "neutral-pill";
     const typeLabel = item.grant_type === "compensation" ? "보상휴가" : "대체휴무";
-    const targetText = [item.employee_name, item.employee_id, item.employee_store].filter(Boolean).join(" · ");
-    const scopeLabel = item.grant_scope === "employee" ? `사번별 · ${targetText || item.employee_id || "-"}` : "경로 일괄";
+    const scopeLabel = item.grant_scope === "employee" ? `사번별 · ${item.employee_id || "-"}` : "경로 일괄";
     const criterion = item.eligibility_mode === "worked_on_date"
-      ? `${item.cohort_rule || `${item.grant_month} 말까지 입사자`} 중 ${item.criterion_date} 실제 출근자`
-      : item.grant_scope === "employee" ? "지정 직원" : (item.cohort_rule || `${item.grant_month} 말까지 입사자`);
-    const excludedPeople = (item.excluded_people || []).map((person) => [person.employeeName, person.employeeId].filter(Boolean).join(" ")).filter(Boolean);
-    const exclusionText = excludedPeople.length ? `${number(item.excluded_count || 0)}명<br><span class="muted">${escapeHtml(excludedPeople.slice(0, 4).join(" · "))}${excludedPeople.length > 4 ? " 외" : ""}</span>` : `${number(item.excluded_count || 0)}명`;
+      ? `${item.criterion_date} 실제 출근자`
+      : item.grant_scope === "employee" ? "지정 사번" : "월 마감 대상 전원";
     return `<tr>
       <td>${escapeHtml(ROUTE_LABELS[item.route] || item.route)}</td>
       <td><span class="${item.grant_type === "compensation" ? "warning-pill" : "plan-pill"}">${escapeHtml(typeLabel)}</span></td>
@@ -2697,7 +2544,7 @@ function renderGrants(items) {
       <td>${formatDays(item.used_days)}</td>
       <td>${formatDays(item.unused_days)}</td>
       <td class="message-cell">${escapeHtml(criterion)}<br><span class="${statusClass}">${escapeHtml(status)}</span></td>
-      <td class="message-cell">${exclusionText}</td>
+      <td>${number(item.excluded_count || 0)}명</td>
       <td>${escapeHtml(item.valid_from)} ~ ${escapeHtml(item.valid_to)}</td>
       <td class="message-cell">${escapeHtml([item.reason, item.note].filter(Boolean).join(" · "))}</td>
       <td class="action-cell"><button class="btn secondary small grant-edit" data-id="${escapeHtml(item.id)}" type="button">수정</button><button class="btn danger small grant-delete" data-id="${escapeHtml(item.id)}" type="button">삭제</button></td>
@@ -2722,7 +2569,7 @@ function renderGrantSummary(items) {
   ].map(([label, value]) => `<div class="summary-chip"><span>${label}</span><strong>${value}</strong></div>`).join("");
 }
 
-async function editGrant(id) {
+function editGrant(id) {
   const item = state.grants.find((grant) => grant.id === id);
   if (!item) return;
   $("#grantEditingId").value = item.id;
@@ -2732,21 +2579,16 @@ async function editGrant(id) {
   $("#grantMonth").value = item.grant_month;
   $("#grantDays").value = Number(item.granted_days || 0);
   $("#grantEmployeeId").value = item.employee_id || "";
-  $("#grantEmployeeSearch").value = "";
   $("#grantValidFrom").value = item.valid_from;
   $("#grantValidTo").value = item.valid_to;
   $("#grantEligibility").value = item.eligibility_mode || "all";
   $("#grantCriterionDate").value = item.criterion_date || "";
-  state.grantExcludedIds = new Set(parseStoredEmployeeIds(item.excluded_employee_ids_json));
-  $("#grantExcludedIds").value = [...state.grantExcludedIds].join("\n");
+  $("#grantExcludedIds").value = parseStoredEmployeeIds(item.excluded_employee_ids_json).join("\n");
   $("#grantReason").value = item.reason || "";
   $("#grantNote").value = item.note || "";
   $("#grantSubmitButton").textContent = "부여 설정 수정 저장";
   $("#grantCancelEdit").classList.remove("hidden");
   syncGrantFormVisibility();
-  await loadGrantCandidates();
-  updateGrantEmployeeSelected();
-  renderGrantExcludedSelected();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
@@ -2756,21 +2598,14 @@ function resetGrantForm() {
   $("#grantScope").value = "route";
   $("#grantDays").value = "1";
   $("#grantEmployeeId").value = "";
-  $("#grantEmployeeSearch").value = "";
-  $("#grantEmployeeResults").classList.add("hidden");
   $("#grantEligibility").value = "all";
   $("#grantCriterionDate").value = "";
-  state.grantExcludedIds = new Set();
   $("#grantExcludedIds").value = "";
-  $("#grantExclusionSearch").value = "";
-  $("#grantExclusionResults").classList.add("hidden");
   $("#grantReason").value = "";
   $("#grantNote").value = "";
   $("#grantSubmitButton").textContent = "휴가 부여 저장";
   $("#grantCancelEdit").classList.add("hidden");
   syncGrantFormVisibility();
-  updateGrantEmployeeSelected();
-  renderGrantExcludedSelected();
 }
 
 async function deleteGrant(id) {
@@ -2801,7 +2636,7 @@ function parseStoredEmployeeIds(value) {
 }
 
 function grantStatus(item) {
-  if (Number(item.eligible_people || 0) === 0) return "대상자 없음";
+  if (Number(item.eligible_people || 0) === 0) return "월 마감 대기";
   const today = toISODate(new Date());
   if (item.valid_to < today) return "만료";
   if (item.valid_from > today) return "사용 전";
@@ -2866,8 +2701,8 @@ async function saveWorkforceFile(event) {
     $("#portalReferenceFile").value = "";
     $("#workforcePreview").textContent = "저장할 새 파일을 선택해 주세요.";
     state.workforce = null;
-    await Promise.all([loadWorkforceUploads(), loadGrantCandidates(), loadGrants(), loadHistory()]);
-    showToast(`${month} 인력·매장매칭을 ${data.replaced ? "교체" : "저장"}했습니다. 전자랜드 ${number(data.electrolandCount)}명 · 홈플러스 ${number(data.homeplusCount)}명 · 포탈사번 ${number(data.portalCount)}명 · ${number(data.affectedMonths || 0)}개 월 휴가장부 재계산`);
+    await loadWorkforceUploads();
+    showToast(`${month} 인력·매장매칭을 ${data.replaced ? "교체" : "저장"}했습니다. 전자랜드 ${number(data.electrolandCount)}명 · 홈플러스 ${number(data.homeplusCount)}명 · 포탈사번 ${number(data.portalCount)}명`);
   } catch (error) {
     console.error(error);
     showToast(error.message || "인력·매장매칭 저장 중 오류가 발생했습니다.");
@@ -3644,7 +3479,7 @@ async function login(event) {
     if (!response.ok) throw new Error(data.error || "로그인 실패");
     $("#loginDialog").close();
     await checkBackend();
-    await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard(), loadGrantCandidates()]);
+    await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard()]);
     showToast("관리자 로그인되었습니다.");
   } catch (error) {
     $("#loginError").textContent = error.message;
@@ -3660,14 +3495,6 @@ async function logout() {
   state.workforceUploads = [];
   state.workforce = null;
   state.annualLeaveDashboard = null;
-  state.grantCandidates = [];
-  state.grantCandidateSourceMonth = "";
-  state.grantCandidateRoute = "";
-  state.grantCandidateMonth = "";
-  state.grantExcludedIds = new Set();
-  updateGrantCandidateStatus();
-  updateGrantEmployeeSelected();
-  renderGrantExcludedSelected();
   renderArchiveFiles([]);
   renderWorkforceUploads([]);
   renderAnnualLeaveDashboard(null);
@@ -3679,7 +3506,7 @@ function switchView(view) {
   $$(".view").forEach((section) => section.classList.remove("active"));
   $(`#${view}View`).classList.add("active");
   if (view === "history") loadHistory();
-  if (view === "substitute") Promise.all([loadGrants(), loadGrantCandidates()]);
+  if (view === "substitute") loadGrants();
   if (view === "files") loadArchiveFiles();
   if (view === "system") loadWorkforceUploads();
   if (view === "annualLeave") loadAnnualLeaveDashboard();

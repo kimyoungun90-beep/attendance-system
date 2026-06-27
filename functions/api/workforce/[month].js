@@ -1,6 +1,5 @@
 import { json, requireAuth } from "../../_lib/auth.js";
 import { ensureSchema } from "../../_lib/schema.js";
-import { recalculateRoute } from "../../_lib/recalculate.js";
 
 export async function onRequestGet(context) {
   const denied = await requireAuth(context);
@@ -46,12 +45,7 @@ export async function onRequestDelete(context) {
     context.env.DB.prepare(`DELETE FROM attendance_workforce_file_chunks WHERE upload_id = ?`).bind(item.id),
     context.env.DB.prepare(`DELETE FROM attendance_workforce_uploads WHERE id = ?`).bind(item.id),
   ]);
-  let affectedMonths = 0;
-  for (const route of ["homeplus", "electroland"]) {
-    const recalculated = await recalculateRoute(context.env.DB, route);
-    affectedMonths += Number(recalculated.affectedMonths || 0);
-  }
-  return json({ ok: true, affectedMonths });
+  return json({ ok: true });
 }
 
 function downloadHeaders(item) {
