@@ -67,12 +67,13 @@ export async function buildFinalTemplateWorkbook(result) {
     Author: "근태 관리 시스템",
     Comments: "최초 연차 초본 + 월별 승인·반려 + 근무계획 + 근태 원본 자동 매칭",
   };
+  sanitizeWorkbookForExcel(workbook);
   return workbook;
 }
 
 export async function buildFinalTemplateFile(result) {
   const workbook = await buildFinalTemplateWorkbook(result);
-  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "array", cellStyles: true, bookVBA: true, showGridLines: false });
+  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "array", cellStyles: true, bookVBA: true });
   const monthText = String(result.targetMonth || "").replace("-", "년 ") + "월";
   return new File([buffer], `${monthText}_${result.routeLabel}_출퇴근현황_최종본.xlsx`, {
     type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1390,8 +1391,9 @@ function applySummaryMetricStyle(sheet, address, tone = "normal", leftAlign = fa
 }
 
 function styleMainSheet(sheet, lastRow, daysInMonth, summaryStartCol0, summaryEndCol0, maxColCount, year, monthNo) {
-  const endCol = XLSX.utils.encode_col(maxColCount - 1);
-  sheet["!autofilter"] = { ref: `B6:${endCol}${lastRow}` };
+  // N5:N6 병합 셀이 필터 머리글 행(6행)과 겹치면 Excel이 파일을
+  // 손상된 통합문서로 판단할 수 있습니다. 고정 인적사항 B:M에만 필터를 둡니다.
+  sheet["!autofilter"] = { ref: `B6:M${lastRow}` };
   const cols = Array.from({ length: maxColCount }, () => ({ wch: 10 }));
   cols[0] = { wch: 2 };
   [1, 2, 3, 4].forEach((i) => { cols[i] = { wch: 11 }; });
@@ -1642,6 +1644,34 @@ function extendRefForAddress(sheet, address) {
   current.e.r = Math.max(current.e.r, cell.r);
   current.e.c = Math.max(current.e.c, cell.c);
   sheet["!ref"] = XLSX.utils.encode_range(current);
+}
+
+function sanitizeWorkbookForExcel(workbook) {
+  for (const sheetName of workbook.SheetNames || []) {
+    const sheet = workbook.Sheets?.[sheetName];
+    if (!sheet) continue;
+
+    // xlsx-js-style의 쓰기 옵션에 showGridLines를 직접 넘기지 않습니다.
+    // 지원되는 시트 보기 속성으로만 저장해 파일 구조 손상을 피합니다.
+    sheet["!views"] = [{ showGridLines: false }];
+
+    // 중복 또는 서로 겹치는 병합 범위는 Excel 복구 경고의 주요 원인입니다.
+    const merges = Array.isArray(sheet["!merges"]) ? sheet["!merges"] : [];
+    const clean = [];
+    for (const merge of merges) {
+      if (!merge?.s || !merge?.e) continue;
+      const normalized = {
+        s: { r: Math.min(merge.s.r, merge.e.r), c: Math.min(merge.s.c, merge.e.c) },
+        e: { r: Math.max(merge.s.r, merge.e.r), c: Math.max(merge.s.c, merge.e.c) },
+      };
+      const overlaps = clean.some((item) => !(
+        normalized.e.r < item.s.r || normalized.s.r > item.e.r ||
+        normalized.e.c < item.s.c || normalized.s.c > item.e.c
+      ));
+      if (!overlaps) clean.push(normalized);
+    }
+    sheet["!merges"] = clean;
+  }
 }
 
 function clone(value) {
