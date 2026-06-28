@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=24";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=25";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -843,9 +843,9 @@ function parseEvidenceOverrides(sheets) {
     let evidenceCol = findHeaderIndex(headers, ["증빙여부(O입력)", "증빙여부(O 입력)", "증빙여부", "출근증빙", "증빙"]);
 
     if (dateCol < 0) dateCol = findDateLikeColumn(matrix, headerIndex + 1);
-    // 최종본 고정양식에서 머리글이 지워진 경우: G=제니엘사번, I=근태수정필요일, K=증빙여부.
+    // 최종본 고정양식에서 머리글이 지워진 경우: G=사번, H=발생일, K=증빙여부.
     if (employeeIdCol < 0 && (matrix[headerIndex] || []).length >= 11) employeeIdCol = 6;
-    if (dateCol < 0 && (matrix[headerIndex] || []).length >= 11) dateCol = 8;
+    if (dateCol < 0 && (matrix[headerIndex] || []).length >= 11) dateCol = 7;
     if (evidenceCol < 0 && (matrix[headerIndex] || []).length >= 11) evidenceCol = 10;
     if (employeeIdCol < 0 || dateCol < 0 || evidenceCol < 0) continue;
 
@@ -896,25 +896,14 @@ function applyEvidenceOverrides(result, evidenceKeys = []) {
     && ["missing_clock_in", "missing_plan_and_clock"].includes(row.issueType);
   const markEvidence = (row) => hasEvidence(row) ? { ...row, evidenced: true } : row;
 
-  // O 입력은 출근 미등록 자체를 해소합니다. 다만 계획까지 비어 있던 건은 계획 미입력 검토로 남깁니다.
+  // O 입력은 해당 날짜의 실제 출근을 확정합니다.
+  // 계획까지 비어 있던 건도 출근 증빙이 확인되면 별도 계획 미입력 오류로 다시 만들지 않습니다.
   result.missingRows = (result.missingRows || []).filter((row) => !resolvesAttendanceMissing(row)).map(markEvidence);
-  // 휴무·연차 등인데 출근한 건은 실제 출근으로 인정하되 계획 상이에는 유지합니다.
+  // 휴무·연차 등인데 실제 출근한 건은 계획 상이이므로 유지합니다.
   result.unexpectedRows = (result.unexpectedRows || []).map(markEvidence);
   result.mismatchRows = (result.mismatchRows || []).flatMap((row) => {
     if (!hasEvidence(row)) return [row];
-    if (row.issueType === "missing_clock_in") return [];
-    if (row.issueType === "missing_plan_and_clock") {
-      return [{
-        ...row,
-        issueType: "missing_plan",
-        missingType: "계획 미입력",
-        evidenced: true,
-        actualStatus: "출근",
-        clockStatus: "증빙",
-        result: "검토 필요",
-        reason: "출근 증빙 O 반영 완료 · 근무계획 미입력 확인 필요",
-      }];
-    }
+    if (["missing_clock_in", "missing_plan_and_clock", "missing_plan"].includes(row.issueType)) return [];
     return [{ ...row, evidenced: true }];
   });
   result.missingPeople = uniquePeople(result.missingRows);
@@ -927,9 +916,9 @@ function finalDisplayValue(planStatus, attendanceValue) {
   const planMissing = planStatus === "공백";
   const clockMissing = !attendanceValue?.hasClockIn;
   if (planMissing && clockMissing) return "출ㆍ계 미입력";
-  if (planMissing) return "계획 미입력";
   const actual = normalizeActualCode(attendanceValue?.actualStatus);
   if (actual) return comparableCode(actual) === "근무" ? "출근" : actual;
+  // 근무계획이 비어 있어도 실제 출근시간이 있으면 정상 출근으로 인정합니다.
   if (attendanceValue?.hasClockIn) return "출근";
   if (["근무", "근무A", "근무B", "근무C", "교육", "오전반차", "오후반차"].includes(planStatus)) return "출근 미입력";
   return planStatus;
@@ -1258,46 +1247,31 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       const attendanceValue = withEvidenceAttendance(attendanceMap.get(`${person.employeeId}|${date}`) || emptyAttendanceValue(), evidenceSet.has(evidenceKey));
       let hasPrimaryIssue = false;
 
-      if (planStatus === "공백") {
-        if (!attendanceValue.hasClockIn) {
-          const row = makeIssueRow({
-            issueType: "missing_plan_and_clock",
-            missingType: "출ㆍ계 미입력",
-            route,
-            person,
-            date,
-            dateObject,
-            planStatus,
-            attendanceValue,
-            result: "근무계획·출근기록 없음",
-            reason: "근무계획과 실제 출근시간·변경 출근시간이 모두 없음",
-          });
-          missingRows.push(row);
-          addMismatch(makeMismatchRow({
-            ...row,
-            route,
-            person,
-            date,
-            dateObject,
-            planStatus,
-            attendanceValue,
-            result: "검토 필요",
-            reason: row.reason,
-          }));
-        } else {
-          addMismatch(makeMismatchRow({
-            issueType: "missing_plan",
-            missingType: "계획 미입력",
-            route,
-            person,
-            date,
-            dateObject,
-            planStatus,
-            attendanceValue,
-            result: "검토 필요",
-            reason: "출근기록은 있으나 근무계획이 입력되지 않음",
-          }));
-        }
+      if (planStatus === "공백" && !attendanceValue.hasClockIn) {
+        const row = makeIssueRow({
+          issueType: "missing_plan_and_clock",
+          missingType: "출ㆍ계 미입력",
+          route,
+          person,
+          date,
+          dateObject,
+          planStatus,
+          attendanceValue,
+          result: "근무계획·출근기록 없음",
+          reason: "근무계획과 실제 출근시간·변경 출근시간이 모두 없음",
+        });
+        missingRows.push(row);
+        addMismatch(makeMismatchRow({
+          ...row,
+          route,
+          person,
+          date,
+          dateObject,
+          planStatus,
+          attendanceValue,
+          result: "검토 필요",
+          reason: row.reason,
+        }));
         hasPrimaryIssue = true;
       } else if (REQUIRED_CLOCK_PLANS.has(planStatus) && !attendanceValue.hasClockIn) {
         const row = makeIssueRow({

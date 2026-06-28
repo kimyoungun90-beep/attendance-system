@@ -1612,9 +1612,9 @@ function dailyDisplay(planStatus, attendance) {
   const planMissing = planStatus === "공백";
   const clockMissing = !attendance.hasClockIn;
   if (planMissing && clockMissing) return "출ㆍ계 미입력";
-  if (planMissing) return "계획 미입력";
   const actual = normalizeActual(attendance.actualStatus);
   if (actual) return actual === "근무" ? "출근" : actual;
+  // 계획이 비어 있어도 실제 출근기록이 있으면 정상 출근으로 표시합니다.
   if (attendance.hasClockIn) return "출근";
   if (["근무", "근무A", "근무B", "근무C", "교육", "오전반차", "오후반차"].includes(planStatus)) return "출근 미입력";
   return planStatus;
@@ -2182,7 +2182,9 @@ function extendRefForAddress(sheet, address) {
 }
 
 async function applyLiveEvidenceConditionalFormatting(buffer, result) {
-  if (typeof JSZip === "undefined") return buffer;
+  // v24의 문자열 직접 삽입 방식은 일부 Excel 환경에서 sheet3.xml 복구 경고를 만들 수 있었습니다.
+  // v25부터는 XML DOM으로 노드를 생성하고, 생성 직후 다시 파싱해 정상 XML일 때만 적용합니다.
+  if (typeof JSZip === "undefined" || typeof DOMParser === "undefined" || typeof XMLSerializer === "undefined") return buffer;
   try {
     const zip = await JSZip.loadAsync(buffer);
     const workbookPath = "xl/workbook.xml";
@@ -2190,54 +2192,78 @@ async function applyLiveEvidenceConditionalFormatting(buffer, result) {
     const stylesPath = "xl/styles.xml";
     const workbookXml = await zip.file(workbookPath)?.async("string");
     const relsXml = await zip.file(relsPath)?.async("string");
-    let stylesXml = await zip.file(stylesPath)?.async("string");
-    if (!workbookXml || !relsXml || !stylesXml) return buffer;
+    const originalStylesXml = await zip.file(stylesPath)?.async("string");
+    if (!workbookXml || !relsXml || !originalStylesXml) return buffer;
 
     const evidencePath = findWorksheetPath(workbookXml, relsXml, "출근 미등록");
     const attendancePath = findWorksheetPath(workbookXml, relsXml, "상담사근태");
     if (!evidencePath || !attendancePath) return buffer;
 
-    const dxfResult = appendConditionalDxfs(stylesXml);
-    stylesXml = dxfResult.xml;
-    zip.file(stylesPath, stylesXml);
+    const originalEvidenceXml = await zip.file(evidencePath)?.async("string");
+    const originalAttendanceXml = await zip.file(attendancePath)?.async("string");
+    if (!originalEvidenceXml || !originalAttendanceXml) return buffer;
 
-    let evidenceXml = await zip.file(evidencePath)?.async("string");
-    let attendanceXml = await zip.file(attendancePath)?.async("string");
-    if (!evidenceXml || !attendanceXml) return buffer;
-
-    evidenceXml = removeManagedConditionalFormatting(evidenceXml, "v24-evidence");
-    attendanceXml = removeManagedConditionalFormatting(attendanceXml, "v24-attendance");
-
-    const evidenceRules = `<!--v24-evidence-->
-<conditionalFormatting sqref="K8:K1000"><cfRule type="expression" dxfId="${dxfResult.evidence}" priority="1"><formula>OR(UPPER(TRIM(K8))=&quot;O&quot;,K8=&quot;○&quot;,K8=&quot;ㅇ&quot;)</formula></cfRule></conditionalFormatting>
-<conditionalFormatting sqref="M8:M1000"><cfRule type="expression" dxfId="${dxfResult.completed}" priority="2"><formula>$M8=&quot;처리 완료&quot;</formula></cfRule><cfRule type="expression" dxfId="${dxfResult.pending}" priority="3"><formula>$M8=&quot;미처리&quot;</formula></cfRule></conditionalFormatting>
-<!--/v24-evidence-->`;
-    evidenceXml = insertWorksheetConditionalFormatting(evidenceXml, evidenceRules);
-
+    const dxfResult = appendConditionalDxfs(originalStylesXml);
     const [year, month] = String(result?.targetMonth || "").split("-").map(Number);
     const days = year && month ? new Date(year, month, 0).getDate() : 31;
     const lastDayColumn = XLSX.utils.encode_col(14 + days - 1);
-    const attendanceFormula = `(COUNTIFS('출근 미등록'!$G$8:$G$1000,$I7,'출근 미등록'!$H$8:$H$1000,O$5,'출근 미등록'!$K$8:$K$1000,&quot;O&quot;)+COUNTIFS('출근 미등록'!$G$8:$G$1000,$I7,'출근 미등록'!$H$8:$H$1000,O$5,'출근 미등록'!$K$8:$K$1000,&quot;○&quot;)+COUNTIFS('출근 미등록'!$G$8:$G$1000,$I7,'출근 미등록'!$H$8:$H$1000,O$5,'출근 미등록'!$K$8:$K$1000,&quot;ㅇ&quot;))&gt;0`;
-    const attendanceRules = `<!--v24-attendance-->
-<conditionalFormatting sqref="O7:${lastDayColumn}500"><cfRule type="expression" dxfId="${dxfResult.attendance}" priority="1"><formula>${attendanceFormula}</formula></cfRule></conditionalFormatting>
-<!--/v24-attendance-->`;
-    attendanceXml = insertWorksheetConditionalFormatting(attendanceXml, attendanceRules);
 
+    const evidenceXml = addWorksheetConditionalFormatting(originalEvidenceXml, [
+      {
+        sqref: "K8:K1000",
+        rules: [
+          { dxfId: dxfResult.evidence, formula: 'OR(UPPER(TRIM(K8))="O",K8="○",K8="ㅇ")' },
+        ],
+      },
+      {
+        sqref: "M8:M1000",
+        rules: [
+          { dxfId: dxfResult.completed, formula: '$M8="처리 완료"' },
+          { dxfId: dxfResult.pending, formula: '$M8="미처리"' },
+        ],
+      },
+    ]);
+
+    const attendanceFormula = `(COUNTIFS('출근 미등록'!$G$8:$G$1000,$I7,'출근 미등록'!$H$8:$H$1000,O$5,'출근 미등록'!$K$8:$K$1000,"O")+COUNTIFS('출근 미등록'!$G$8:$G$1000,$I7,'출근 미등록'!$H$8:$H$1000,O$5,'출근 미등록'!$K$8:$K$1000,"○")+COUNTIFS('출근 미등록'!$G$8:$G$1000,$I7,'출근 미등록'!$H$8:$H$1000,O$5,'출근 미등록'!$K$8:$K$1000,"ㅇ"))>0`;
+    const attendanceXml = addWorksheetConditionalFormatting(originalAttendanceXml, [
+      {
+        sqref: `O7:${lastDayColumn}500`,
+        rules: [{ dxfId: dxfResult.attendance, formula: attendanceFormula }],
+      },
+    ]);
+
+    // 수정된 각 XML을 한 번 더 파싱해 손상된 경우 원본 XLSX를 반환합니다.
+    parseXmlOrThrow(dxfResult.xml, "styles.xml");
+    parseXmlOrThrow(evidenceXml, "출근 미등록 XML");
+    parseXmlOrThrow(attendanceXml, "상담사근태 XML");
+
+    zip.file(stylesPath, dxfResult.xml);
     zip.file(evidencePath, evidenceXml);
     zip.file(attendancePath, attendanceXml);
-    return await zip.generateAsync({ type: "arraybuffer", compression: "DEFLATE" });
+    const candidate = await zip.generateAsync({ type: "arraybuffer", compression: "DEFLATE" });
+
+    // ZIP 재생성 후에도 실제 저장된 XML이 파싱되는지 최종 확인합니다.
+    const verifyZip = await JSZip.loadAsync(candidate);
+    const verifyStyles = await verifyZip.file(stylesPath)?.async("string");
+    const verifyEvidence = await verifyZip.file(evidencePath)?.async("string");
+    const verifyAttendance = await verifyZip.file(attendancePath)?.async("string");
+    parseXmlOrThrow(verifyStyles || "", "저장 후 styles.xml");
+    parseXmlOrThrow(verifyEvidence || "", "저장 후 출근 미등록 XML");
+    parseXmlOrThrow(verifyAttendance || "", "저장 후 상담사근태 XML");
+    return candidate;
   } catch (error) {
-    console.warn("실시간 증빙 색상 규칙 적용 실패", error);
+    console.warn("실시간 증빙 색상 규칙 적용 실패 · 손상 방지를 위해 기본 파일로 저장", error);
     return buffer;
   }
 }
 
 function findWorksheetPath(workbookXml, relsXml, sheetName) {
-  const sheetTags = workbookXml.match(/<sheet\b[^>]*\/>/g) || [];
-  const tag = sheetTags.find((item) => item.includes(`name="${sheetName}"`));
+  const escapedName = escapeRegExp(sheetName);
+  const sheetTags = workbookXml.match(/<sheet\b[^>]*\/?\s*>/g) || [];
+  const tag = sheetTags.find((item) => new RegExp(`\\bname="${escapedName}"`).test(item));
   const relationId = tag?.match(/r:id="([^"]+)"/)?.[1];
   if (!relationId) return "";
-  const relTags = relsXml.match(/<Relationship\b[^>]*\/>/g) || [];
+  const relTags = relsXml.match(/<Relationship\b[^>]*\/?\s*>/g) || [];
   const rel = relTags.find((item) => item.includes(`Id="${relationId}"`));
   let target = rel?.match(/Target="([^"]+)"/)?.[1] || "";
   if (!target) return "";
@@ -2247,44 +2273,128 @@ function findWorksheetPath(workbookXml, relsXml, sheetName) {
 }
 
 function appendConditionalDxfs(stylesXml) {
-  const dxfs = [
-    `<dxf><font><b/><color rgb="FF107C41"/></font><fill><patternFill patternType="solid"><fgColor rgb="FFE2F0D9"/><bgColor indexed="64"/></patternFill></fill></dxf>`,
-    `<dxf><font><b/><color rgb="FFC00000"/></font><fill><patternFill patternType="solid"><fgColor rgb="FFFFE4E6"/><bgColor indexed="64"/></patternFill></fill></dxf>`,
-    `<dxf><font><b/><color rgb="FF107C41"/></font><fill><patternFill patternType="solid"><fgColor rgb="FFE2F0D9"/><bgColor indexed="64"/></patternFill></fill></dxf>`,
-    `<dxf><font><b/><color rgb="FF000000"/></font><fill><patternFill patternType="solid"><fgColor rgb="FFA9D08E"/><bgColor indexed="64"/></patternFill></fill></dxf>`,
-  ];
-  let start = 0;
-  const normal = stylesXml.match(/<dxfs\b[^>]*count="(\d+)"[^>]*>([\s\S]*?)<\/dxfs>/);
-  if (normal) {
-    start = Number(normal[1] || 0);
-    const replacement = normal[0]
-      .replace(/count="\d+"/, `count="${start + dxfs.length}"`)
-      .replace(/<\/dxfs>$/, `${dxfs.join("")}</dxfs>`);
-    stylesXml = stylesXml.replace(normal[0], replacement);
-  } else {
-    const selfClosing = stylesXml.match(/<dxfs\b[^>]*count="(\d+)"[^>]*\/>/);
-    if (selfClosing) {
-      start = Number(selfClosing[1] || 0);
-      stylesXml = stylesXml.replace(selfClosing[0], `<dxfs count="${start + dxfs.length}">${dxfs.join("")}</dxfs>`);
-    } else {
-      const block = `<dxfs count="${dxfs.length}">${dxfs.join("")}</dxfs>`;
-      stylesXml = stylesXml.includes("<tableStyles")
-        ? stylesXml.replace("<tableStyles", `${block}<tableStyles`)
-        : stylesXml.replace("</styleSheet>", `${block}</styleSheet>`);
-    }
+  const doc = parseXmlOrThrow(stylesXml, "styles.xml");
+  const root = doc.documentElement;
+  const namespace = root.namespaceURI || "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+  let dxfs = directXmlChild(root, "dxfs");
+  if (!dxfs) {
+    dxfs = doc.createElementNS(namespace, "dxfs");
+    const tableStyles = directXmlChild(root, "tableStyles");
+    root.insertBefore(dxfs, tableStyles || null);
   }
-  return { xml: stylesXml, completed: start, pending: start + 1, evidence: start + 2, attendance: start + 3 };
+
+  const existingDxfs = xmlElementChildren(dxfs).filter((node) => node.localName === "dxf");
+  const start = existingDxfs.length;
+  const formats = [
+    { font: "FF107C41", fill: "FFE2F0D9" }, // 처리 완료
+    { font: "FFC00000", fill: "FFFFE4E6" }, // 미처리
+    { font: "FF107C41", fill: "FFE2F0D9" }, // K열 O
+    { font: "FF000000", fill: "FFA9D08E" }, // 상담사근태 확정 출근
+  ];
+  for (const format of formats) dxfs.appendChild(createDxfNode(doc, namespace, format));
+  dxfs.setAttribute("count", String(start + formats.length));
+
+  return {
+    xml: serializeXml(doc, stylesXml),
+    completed: start,
+    pending: start + 1,
+    evidence: start + 2,
+    attendance: start + 3,
+  };
 }
 
-function removeManagedConditionalFormatting(xml, marker) {
-  const expression = new RegExp(`<!--${marker}-->[\\s\\S]*?<!--\\/${marker}-->`, "g");
-  return xml.replace(expression, "");
+function createDxfNode(doc, namespace, format) {
+  const dxf = doc.createElementNS(namespace, "dxf");
+  const font = doc.createElementNS(namespace, "font");
+  font.appendChild(doc.createElementNS(namespace, "b"));
+  const fontColor = doc.createElementNS(namespace, "color");
+  fontColor.setAttribute("rgb", format.font);
+  font.appendChild(fontColor);
+  dxf.appendChild(font);
+
+  const fill = doc.createElementNS(namespace, "fill");
+  const patternFill = doc.createElementNS(namespace, "patternFill");
+  patternFill.setAttribute("patternType", "solid");
+  const foreground = doc.createElementNS(namespace, "fgColor");
+  foreground.setAttribute("rgb", format.fill);
+  const background = doc.createElementNS(namespace, "bgColor");
+  background.setAttribute("indexed", "64");
+  patternFill.appendChild(foreground);
+  patternFill.appendChild(background);
+  fill.appendChild(patternFill);
+  dxf.appendChild(fill);
+  return dxf;
 }
 
-function insertWorksheetConditionalFormatting(xml, rules) {
-  if (xml.includes("<pageMargins")) return xml.replace("<pageMargins", `${rules}<pageMargins`);
-  if (xml.includes("<pageSetup")) return xml.replace("<pageSetup", `${rules}<pageSetup`);
-  return xml.replace("</worksheet>", `${rules}</worksheet>`);
+function addWorksheetConditionalFormatting(worksheetXml, configurations) {
+  const doc = parseXmlOrThrow(worksheetXml, "worksheet.xml");
+  const root = doc.documentElement;
+  const namespace = root.namespaceURI || "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+
+  // 동일 범위의 기존 규칙만 제거해 재생성·중복 실행에도 규칙이 누적되지 않게 합니다.
+  const managedRanges = new Set(configurations.map((item) => item.sqref));
+  for (const node of [...root.getElementsByTagNameNS("*", "conditionalFormatting")]) {
+    if (node.parentNode === root && managedRanges.has(node.getAttribute("sqref") || "")) root.removeChild(node);
+  }
+
+  let maxPriority = 0;
+  for (const rule of root.getElementsByTagNameNS("*", "cfRule")) {
+    maxPriority = Math.max(maxPriority, Number(rule.getAttribute("priority") || 0));
+  }
+
+  const laterElements = new Set([
+    "dataValidations", "hyperlinks", "printOptions", "pageMargins", "pageSetup", "headerFooter",
+    "rowBreaks", "colBreaks", "customProperties", "cellWatches", "ignoredErrors", "smartTags",
+    "drawing", "legacyDrawing", "legacyDrawingHF", "picture", "oleObjects", "controls",
+    "webPublishItems", "tableParts", "extLst",
+  ]);
+  const anchor = xmlElementChildren(root).find((node) => laterElements.has(node.localName)) || null;
+
+  for (const configuration of configurations) {
+    const conditional = doc.createElementNS(namespace, "conditionalFormatting");
+    conditional.setAttribute("sqref", configuration.sqref);
+    for (const configRule of configuration.rules || []) {
+      const rule = doc.createElementNS(namespace, "cfRule");
+      rule.setAttribute("type", "expression");
+      rule.setAttribute("dxfId", String(configRule.dxfId));
+      rule.setAttribute("priority", String(++maxPriority));
+      const formula = doc.createElementNS(namespace, "formula");
+      formula.textContent = configRule.formula;
+      rule.appendChild(formula);
+      conditional.appendChild(rule);
+    }
+    root.insertBefore(conditional, anchor);
+  }
+  return serializeXml(doc, worksheetXml);
+}
+
+function parseXmlOrThrow(xml, label) {
+  if (!xml) throw new Error(`${label} 내용이 비어 있습니다.`);
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  const errors = doc.getElementsByTagName("parsererror");
+  if (errors.length) throw new Error(`${label} 파싱 실패: ${String(errors[0].textContent || "XML 오류").slice(0, 200)}`);
+  return doc;
+}
+
+function serializeXml(doc, originalXml = "") {
+  const body = new XMLSerializer().serializeToString(doc.documentElement);
+  const declaration = String(originalXml).match(/^\s*(<\?xml[^?]*\?>)/)?.[1]
+    || '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+  const xml = `${declaration}${body}`;
+  parseXmlOrThrow(xml, "직렬화 XML");
+  return xml;
+}
+
+function directXmlChild(parent, localName) {
+  return xmlElementChildren(parent).find((node) => node.localName === localName) || null;
+}
+
+function xmlElementChildren(parent) {
+  return Array.from(parent.childNodes || []).filter((node) => node.nodeType === 1);
+}
+
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function sanitizeWorkbookForExcel(workbook) {
