@@ -103,7 +103,11 @@ function buildContext(result, daysInMonth) {
   const summaryById = new Map((result.employeeSummaries || []).map((row) => [normalizeId(row.employeeId), row]));
   const evidenceSet = new Set((result.evidenceOverrides || []).map(String));
   const issueMap = new Map();
-  for (const issue of result.mismatchRows || []) addIssue(issueMap, issue.employeeId, issue.date, issue.reason || issue.result);
+  for (const issue of result.mismatchRows || []) {
+    // 계획 미입력 + 실제 출근은 상담사근태의 경고색/비고에는 넣지 않고 계획&근태 상이 시트에서만 표시합니다.
+    if (issue.issueType === "missing_plan") continue;
+    addIssue(issueMap, issue.employeeId, issue.date, issue.reason || issue.result);
+  }
   for (const summary of result.employeeSummaries || []) {
     for (const event of summary.baseExcessEvents || []) {
       addIssue(issueMap, summary.employeeId, event.date, `기본 휴무 기준 ${daysText(summary.baseAllowance)} 초과분`);
@@ -222,6 +226,8 @@ function buildIssueSummarySheet(workbook, result, ctx, year, monthNo) {
   };
 
   for (const row of result.mismatchRows || []) {
+    // 계획 미입력 + 실제 출근은 계획&근태 상이 인원 전용 검토 항목입니다.
+    if (row.issueType === "missing_plan") continue;
     const group = ensureGroup(row.employeeId, row);
     if (!group) continue;
     const text = summarizeIssueRow(row);
@@ -1247,7 +1253,8 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
     const col = (offset) => XLSX.utils.encode_col(summaryStartCol0 + offset);
     const addr = (offset) => `${col(offset)}${row}`;
 
-    setFormula(sheet, addr(0), `COUNTIFS(${dailyRange},"<>",${dailyRange},"<>미입력")`, registeredCount);
+    // '출근 미입력'·'계획 미입력'·'출ㆍ계 미입력'처럼 미입력이 포함된 모든 셀은 총 등록 현황에서 제외합니다.
+    setFormula(sheet, addr(0), `COUNTIFS(${dailyRange},"<>",${dailyRange},"<>*미입력*")`, registeredCount);
     setFormula(sheet, addr(1), `COUNTIF(${dailyRange},"출근")`, displayedWorkCount);
     setValue(sheet, addr(2), baseAllowance);
     setFormula(sheet, addr(3), `COUNTIF(${dailyRange},"휴무")`, displayedDayoffCount);
@@ -1662,11 +1669,16 @@ function buildAttendanceMap(rows) {
     if (!id || !row.date) continue;
     const key = `${id}|${row.date}`;
     const existing = map.get(key) || emptyAttendance();
+    const actualIn = cleanClock(row.actualIn);
+    const changedIn = cleanClock(row.changedIn);
+    const actualStatus = cleanPlaceholder(row.actualStatus);
+    const actualStatusIsWork = normalizeActual(actualStatus) === "근무";
     map.set(key, {
-      hasClockIn: existing.hasClockIn || Boolean(cleanClock(row.actualIn) || cleanClock(row.changedIn)),
-      actualIn: cleanClock(row.actualIn) || existing.actualIn,
-      changedIn: cleanClock(row.changedIn) || existing.changedIn,
-      actualStatus: cleanPlaceholder(row.actualStatus) || existing.actualStatus,
+      // 출근시간 또는 실제근태의 출근·근무·정상 값 중 하나라도 있으면 실제 출근으로 표시합니다.
+      hasClockIn: existing.hasClockIn || Boolean(actualIn || changedIn) || actualStatusIsWork,
+      actualIn: actualIn || existing.actualIn,
+      changedIn: changedIn || existing.changedIn,
+      actualStatus: actualStatus || existing.actualStatus,
       location: cleanPlaceholder(row.location) || existing.location,
     });
   }
@@ -2183,7 +2195,7 @@ function extendRefForAddress(sheet, address) {
 
 async function applyLiveEvidenceConditionalFormatting(buffer, result) {
   // v24의 문자열 직접 삽입 방식은 일부 Excel 환경에서 sheet3.xml 복구 경고를 만들 수 있었습니다.
-  // v25부터는 XML DOM으로 노드를 생성하고, 생성 직후 다시 파싱해 정상 XML일 때만 적용합니다.
+  // v26은 XML DOM 검증을 유지하고, Excel 기본 DXF(bgColor) 방식으로 채우기를 생성합니다.
   if (typeof JSZip === "undefined" || typeof DOMParser === "undefined" || typeof XMLSerializer === "undefined") return buffer;
   try {
     const zip = await JSZip.loadAsync(buffer);
@@ -2286,9 +2298,9 @@ function appendConditionalDxfs(stylesXml) {
   const existingDxfs = xmlElementChildren(dxfs).filter((node) => node.localName === "dxf");
   const start = existingDxfs.length;
   const formats = [
-    { font: "FF107C41", fill: "FFE2F0D9" }, // 처리 완료
-    { font: "FFC00000", fill: "FFFFE4E6" }, // 미처리
-    { font: "FF107C41", fill: "FFE2F0D9" }, // K열 O
+    { font: "FF107C41", fill: "FFC6E0B4" }, // 처리 완료 · 연녹색
+    { font: "FFC00000", fill: "FFF4CCCC" }, // 미처리 · 연분홍색
+    { font: "FF107C41", fill: "FFD9EAD3" }, // K열 O · 연한 민트색
     { font: "FF000000", fill: "FFA9D08E" }, // 상담사근태 확정 출근
   ];
   for (const format of formats) dxfs.appendChild(createDxfNode(doc, namespace, format));
@@ -2314,12 +2326,10 @@ function createDxfNode(doc, namespace, format) {
 
   const fill = doc.createElementNS(namespace, "fill");
   const patternFill = doc.createElementNS(namespace, "patternFill");
-  patternFill.setAttribute("patternType", "solid");
-  const foreground = doc.createElementNS(namespace, "fgColor");
-  foreground.setAttribute("rgb", format.fill);
+  // Excel이 생성한 기존 DXF와 동일하게 bgColor 방식으로 기록합니다.
+  // fgColor+solid 조합은 일부 Excel 다크 모드에서 검은 채우기로 보일 수 있습니다.
   const background = doc.createElementNS(namespace, "bgColor");
-  background.setAttribute("indexed", "64");
-  patternFill.appendChild(foreground);
+  background.setAttribute("rgb", format.fill);
   patternFill.appendChild(background);
   fill.appendChild(patternFill);
   dxf.appendChild(fill);
