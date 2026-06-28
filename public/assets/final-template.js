@@ -78,7 +78,8 @@ export async function buildFinalTemplateWorkbook(result) {
 
 export async function buildFinalTemplateFile(result) {
   const workbook = await buildFinalTemplateWorkbook(result);
-  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "array", cellStyles: true, bookVBA: true });
+  const rawBuffer = XLSX.write(workbook, { bookType: "xlsx", type: "array", cellStyles: true, bookVBA: true });
+  const buffer = await applyLiveEvidenceConditionalFormatting(rawBuffer, result);
   const monthText = String(result.targetMonth || "").replace("-", "년 ") + "월";
   return new File([buffer], `${monthText}_${result.routeLabel}_출퇴근현황_최종본.xlsx`, {
     type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -535,9 +536,9 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
     matrix[3][col] = value;
   }
   matrix[2][10] = "구분 색상 안내";
-  matrix[3][10] = "● 근무인데 출근기록 없음";
-  matrix[3][11] = "● 증빙 O 입력 대기";
-  matrix[4][10] = "● 검토 필요";
+  matrix[3][10] = "● 출근 미입력";
+  matrix[3][11] = "● 계획 미입력";
+  matrix[4][10] = "● 출ㆍ계 미입력";
   matrix[4][11] = "● 처리 완료";
   matrix[6] = ["No", "지역장", "매니저", "지역", "매장명", "이름", "사번", "발생일", "근무계획", "구분", "증빙여부(O 입력)", "상세사유", "처리상태"];
 
@@ -547,12 +548,18 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
   for (const region of regionOrder) {
     const group = rows.filter((row) => row.region === region);
     const regionRowIndex = matrix.length;
+    const typeCounts = {
+      clock: group.filter((row) => evidenceMissingType(row) === "출근 미입력").length,
+      plan: group.filter((row) => evidenceMissingType(row) === "계획 미입력").length,
+      both: group.filter((row) => evidenceMissingType(row) === "출ㆍ계 미입력").length,
+    };
     matrix.push([
       `▼  ${region} (총 ${group.length}건)`, "", "", "", "", "", "", "",
-      `미등록 ${group.length}건  |  증빙 O 0건  |  미처리 ${group.length}건  |  완료 0건`, "", "", "", "",
+      `출근 미입력 ${typeCounts.clock}건  |  계획 미입력 ${typeCounts.plan}건  |  출ㆍ계 미입력 ${typeCounts.both}건  |  완료 0건`, "", "", "", "",
     ]);
-    regionRows.push({ row: regionRowIndex, region, count: group.length });
+    regionRows.push({ row: regionRowIndex, region, count: group.length, typeCounts });
     for (const row of group) {
+      const missingType = evidenceMissingType(row);
       matrix.push([
         number++,
         row.member.regionalManager || "",
@@ -562,13 +569,13 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
         row.name || row.member.employeeName || "",
         normalizeId(row.employeeId),
         row.date ? new Date(`${row.date}T00:00:00`) : "",
-        row.planStatus || "근무",
-        "근무인데 출근기록 없음",
+        row.planStatus && row.planStatus !== "공백" ? row.planStatus : "미입력",
+        missingType,
         "",
-        row.reason || row.result || "근무 계획이나 실제 출근기록이 없음",
+        row.reason || row.result || "근무계획 또는 실제 출근기록 확인 필요",
         "미처리",
       ]);
-      dataRows.push({ row: matrix.length - 1 });
+      dataRows.push({ row: matrix.length - 1, missingType });
     }
   }
 
@@ -605,15 +612,19 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
   setFormula(sheet, "A4", `COUNTA($G$${rangeStart}:$G$${rangeEnd})&"건"`, `${rows.length}건`);
   setValue(sheet, "C4", `${uniquePeople}명`);
   setValue(sheet, "E4", `${uniqueStores}개`);
-  setFormula(sheet, "G4", `(COUNTA($G$${rangeStart}:$G$${rangeEnd})-COUNTIF($K$${rangeStart}:$K$${rangeEnd},"O"))&"건"`, `${rows.length}건`);
-  setFormula(sheet, "I4", `COUNTIF($K$${rangeStart}:$K$${rangeEnd},"O")&"건"`, "0건");
+  const doneAllFormula = `(COUNTIF($K$${rangeStart}:$K$${rangeEnd},"O")+COUNTIF($K$${rangeStart}:$K$${rangeEnd},"○")+COUNTIF($K$${rangeStart}:$K$${rangeEnd},"ㅇ"))`;
+  setFormula(sheet, "G4", `(COUNTA($G$${rangeStart}:$G$${rangeEnd})-${doneAllFormula})&"건"`, `${rows.length}건`);
+  setFormula(sheet, "I4", `${doneAllFormula}&"건"`, "0건");
 
   for (const item of regionRows) {
     const excelRow = item.row + 1;
     const totalFormula = `COUNTIF($D$${rangeStart}:$D$${rangeEnd},"${item.region}")`;
-    const doneFormula = `COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$K$${rangeStart}:$K$${rangeEnd},"O")`;
+    const doneFormula = `(COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$K$${rangeStart}:$K$${rangeEnd},"O")+COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$K$${rangeStart}:$K$${rangeEnd},"○")+COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$K$${rangeStart}:$K$${rangeEnd},"ㅇ"))`;
+    const clockFormula = `COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$J$${rangeStart}:$J$${rangeEnd},"출근 미입력")`;
+    const planFormula = `COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$J$${rangeStart}:$J$${rangeEnd},"계획 미입력")`;
+    const bothFormula = `COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$J$${rangeStart}:$J$${rangeEnd},"출ㆍ계 미입력")`;
     setFormula(sheet, `A${excelRow}`, `"▼  ${item.region} (총 "&${totalFormula}&"건)"`, `▼  ${item.region} (총 ${item.count}건)`);
-    setFormula(sheet, `I${excelRow}`, `"미등록 "&${totalFormula}&"건  |  증빙 O "&${doneFormula}&"건  |  미처리 "&(${totalFormula}-${doneFormula})&"건  |  완료 "&${doneFormula}&"건"`, `미등록 ${item.count}건  |  증빙 O 0건  |  미처리 ${item.count}건  |  완료 0건`);
+    setFormula(sheet, `I${excelRow}`, `"출근 미입력 "&${clockFormula}&"건  |  계획 미입력 "&${planFormula}&"건  |  출ㆍ계 미입력 "&${bothFormula}&"건  |  완료 "&${doneFormula}&"건"`, `출근 미입력 ${item.typeCounts.clock}건  |  계획 미입력 ${item.typeCounts.plan}건  |  출ㆍ계 미입력 ${item.typeCounts.both}건  |  완료 0건`);
   }
 
   dataRows.forEach((item) => {
@@ -693,7 +704,7 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
     });
     const reasonAddr = XLSX.utils.encode_cell({ r: item.row, c: 11 });
     if (sheet[reasonAddr]) sheet[reasonAddr].s.alignment = { horizontal: "left", vertical: "center", wrapText: true };
-    applyMismatchBadgeStyle(sheet, XLSX.utils.encode_cell({ r: item.row, c: 9 }), "근무인데 출근기록 없음");
+    applyMissingTypeStyle(sheet, XLSX.utils.encode_cell({ r: item.row, c: 9 }), item.missingType);
     const evidenceAddr = XLSX.utils.encode_cell({ r: item.row, c: 10 });
     if (sheet[evidenceAddr]) {
       sheet[evidenceAddr].s = {
@@ -726,7 +737,9 @@ function buildPlanAttendanceMatchSheet(workbook, result, ctx, year, monthNo) {
       evidenced,
       category,
       region: normalizeDashboardRegion(member.region2 || member.region1 || row.region || "", member.storeName || row.store || ""),
-      status: evidenced ? "처리 완료" : category === "근무인데 출근기록 없음" ? "미처리" : "확인중",
+      status: evidenced && row.issueType !== "missing_plan"
+        ? "처리 완료"
+        : category === "근무인데 출근기록 없음" ? "미처리" : "확인중",
     };
   }).filter((row) => !(row.evidenced && row.category === "근무인데 출근기록 없음"));
 
@@ -965,6 +978,22 @@ function applyMismatchBadgeStyle(sheet, address, category) {
   };
 }
 
+function applyMissingTypeStyle(sheet, address, missingType) {
+  if (!sheet[address]) return;
+  const palette = missingType === "계획 미입력"
+    ? { fill: "FFFFF2CC", font: "FFC55A11", border: "FFF4C27A" }
+    : missingType === "출ㆍ계 미입력"
+      ? { fill: "FFF4EAF7", font: "FF7030A0", border: "FFD4B3E2" }
+      : { fill: "FFFFE4E6", font: "FFC00000", border: "FFF1A2A7" };
+  sheet[address].s = {
+    ...(sheet[address].s || {}),
+    fill: { patternType: "solid", fgColor: { rgb: palette.fill } },
+    font: { name: "맑은 고딕", sz: 8, bold: true, color: { rgb: palette.font } },
+    alignment: { horizontal: "center", vertical: "center", wrapText: true },
+    border: thinBorder(palette.border),
+  };
+}
+
 function applyProcessStatusStyle(sheet, address, status) {
   if (!sheet[address]) return;
   const palette = status === "처리 완료"
@@ -1160,15 +1189,17 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
       }
       const item = daily[day];
       applyNeutralDayStyle(sheet, address);
-      if (item?.display === "미입력") {
+      if (String(item?.display || "").includes("미입력") && item?.attendance && !item.attendance.hasClockIn) {
         const colLetter = XLSX.utils.encode_col(col0);
-        setFormula(sheet, address, `IF(COUNTIFS('출근 미등록'!$G$5:$G$300,$I${row},'출근 미등록'!$I$5:$I$300,${colLetter}$5,'출근 미등록'!$K$5:$K$300,"O")>0,"출근","미입력")`, "미입력");
+        const evidenceCount = `(COUNTIFS('출근 미등록'!$G$8:$G$1000,$I${row},'출근 미등록'!$H$8:$H$1000,${colLetter}$5,'출근 미등록'!$K$8:$K$1000,"O")+COUNTIFS('출근 미등록'!$G$8:$G$1000,$I${row},'출근 미등록'!$H$8:$H$1000,${colLetter}$5,'출근 미등록'!$K$8:$K$1000,"○")+COUNTIFS('출근 미등록'!$G$8:$G$1000,$I${row},'출근 미등록'!$H$8:$H$1000,${colLetter}$5,'출근 미등록'!$K$8:$K$1000,"ㅇ"))`;
+        setFormula(sheet, address, `IF(${evidenceCount}>0,"출근","${item.display}")`, item.display);
       } else {
         setValue(sheet, address, item?.display || "");
       }
       applyStatusStyle(sheet, address, item?.display || "");
       if (item?.issues?.length) {
-        applyIssueStyle(sheet, address, item.issues);
+        // 미입력 유형은 각각의 구분색과 8pt 글씨를 유지하고, 그 외 오류만 공통 경고색을 적용합니다.
+        if (!String(item?.display || "").includes("미입력")) applyIssueStyle(sheet, address, item.issues);
         issueCount += 1;
       }
       // 증빙 O는 계획 상이 여부와 무관하게 상담사근태 셀을 최종 확정색으로 표시합니다.
@@ -1178,7 +1209,7 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
 
     const planValues = Object.values(daily).map((item) => item.planStatus);
     const displayValues = Object.values(daily).map((item) => item?.display || "");
-    const registeredCount = displayValues.filter((value) => value && value !== "미입력").length;
+    const registeredCount = displayValues.filter((value) => value && !String(value).includes("미입력")).length;
     const displayedWorkCount = displayValues.filter((value) => value === "출근").length;
     const plannedDayoffCount = planValues.filter((value) => value === "휴무").length;
     const displayedDayoffCount = displayValues.filter((value) => value === "휴무").length;
@@ -1578,12 +1609,24 @@ function makeMissingPlanRow(plan, person) {
 }
 
 function dailyDisplay(planStatus, attendance) {
+  const planMissing = planStatus === "공백";
+  const clockMissing = !attendance.hasClockIn;
+  if (planMissing && clockMissing) return "출ㆍ계 미입력";
+  if (planMissing) return "계획 미입력";
   const actual = normalizeActual(attendance.actualStatus);
   if (actual) return actual === "근무" ? "출근" : actual;
   if (attendance.hasClockIn) return "출근";
-  if (planStatus === "공백") return "미입력";
-  if (["근무", "근무A", "근무B", "근무C", "교육", "오전반차", "오후반차"].includes(planStatus)) return "미입력";
+  if (["근무", "근무A", "근무B", "근무C", "교육", "오전반차", "오후반차"].includes(planStatus)) return "출근 미입력";
   return planStatus;
+}
+
+function evidenceMissingType(row) {
+  if (row?.missingType) return row.missingType;
+  const planMissing = !row?.planStatus || row.planStatus === "공백";
+  const clockMissing = !row?.actualIn && !row?.changedIn && !row?.actualStatus;
+  if (planMissing && clockMissing) return "출ㆍ계 미입력";
+  if (planMissing) return "계획 미입력";
+  return "출근 미입력";
 }
 
 function normalizeActual(value) {
@@ -1825,6 +1868,9 @@ function applyStatusStyle(sheet, address, value) {
   let fontColor = "FF000000";
   let bold = false;
   if (text === "출근") fill = "FFE2F0D9";
+  else if (text === "출근 미입력") { fill = "FFF33E0D"; fontColor = "FFFFFFFF"; bold = true; }
+  else if (text === "계획 미입력") { fill = "FFFFC000"; fontColor = "FF7F4100"; bold = true; }
+  else if (text === "출ㆍ계 미입력") { fill = "FFC00000"; fontColor = "FFFFFFFF"; bold = true; }
   else if (text === "미입력") { fill = "FFF33E0D"; fontColor = "FFFFFFFF"; bold = true; }
   else if (text === "휴무") fill = "FFE7E6E6";
   else if (text.includes("대체휴일") || text === "대체휴무") fill = "FFBFBFBF";
@@ -1837,7 +1883,7 @@ function applyStatusStyle(sheet, address, value) {
   sheet[address].s = {
     ...base,
     fill: { patternType: "solid", fgColor: { rgb: fill } },
-    font: { ...(base.font || {}), name: "맑은 고딕", sz: 10, bold, color: { rgb: fontColor } },
+    font: { ...(base.font || {}), name: "맑은 고딕", sz: text.includes("미입력") ? 8 : 10, bold, color: { rgb: fontColor } },
   };
 }
 
@@ -2133,6 +2179,112 @@ function extendRefForAddress(sheet, address) {
   current.e.r = Math.max(current.e.r, cell.r);
   current.e.c = Math.max(current.e.c, cell.c);
   sheet["!ref"] = XLSX.utils.encode_range(current);
+}
+
+async function applyLiveEvidenceConditionalFormatting(buffer, result) {
+  if (typeof JSZip === "undefined") return buffer;
+  try {
+    const zip = await JSZip.loadAsync(buffer);
+    const workbookPath = "xl/workbook.xml";
+    const relsPath = "xl/_rels/workbook.xml.rels";
+    const stylesPath = "xl/styles.xml";
+    const workbookXml = await zip.file(workbookPath)?.async("string");
+    const relsXml = await zip.file(relsPath)?.async("string");
+    let stylesXml = await zip.file(stylesPath)?.async("string");
+    if (!workbookXml || !relsXml || !stylesXml) return buffer;
+
+    const evidencePath = findWorksheetPath(workbookXml, relsXml, "출근 미등록");
+    const attendancePath = findWorksheetPath(workbookXml, relsXml, "상담사근태");
+    if (!evidencePath || !attendancePath) return buffer;
+
+    const dxfResult = appendConditionalDxfs(stylesXml);
+    stylesXml = dxfResult.xml;
+    zip.file(stylesPath, stylesXml);
+
+    let evidenceXml = await zip.file(evidencePath)?.async("string");
+    let attendanceXml = await zip.file(attendancePath)?.async("string");
+    if (!evidenceXml || !attendanceXml) return buffer;
+
+    evidenceXml = removeManagedConditionalFormatting(evidenceXml, "v24-evidence");
+    attendanceXml = removeManagedConditionalFormatting(attendanceXml, "v24-attendance");
+
+    const evidenceRules = `<!--v24-evidence-->
+<conditionalFormatting sqref="K8:K1000"><cfRule type="expression" dxfId="${dxfResult.evidence}" priority="1"><formula>OR(UPPER(TRIM(K8))=&quot;O&quot;,K8=&quot;○&quot;,K8=&quot;ㅇ&quot;)</formula></cfRule></conditionalFormatting>
+<conditionalFormatting sqref="M8:M1000"><cfRule type="expression" dxfId="${dxfResult.completed}" priority="2"><formula>$M8=&quot;처리 완료&quot;</formula></cfRule><cfRule type="expression" dxfId="${dxfResult.pending}" priority="3"><formula>$M8=&quot;미처리&quot;</formula></cfRule></conditionalFormatting>
+<!--/v24-evidence-->`;
+    evidenceXml = insertWorksheetConditionalFormatting(evidenceXml, evidenceRules);
+
+    const [year, month] = String(result?.targetMonth || "").split("-").map(Number);
+    const days = year && month ? new Date(year, month, 0).getDate() : 31;
+    const lastDayColumn = XLSX.utils.encode_col(14 + days - 1);
+    const attendanceFormula = `(COUNTIFS('출근 미등록'!$G$8:$G$1000,$I7,'출근 미등록'!$H$8:$H$1000,O$5,'출근 미등록'!$K$8:$K$1000,&quot;O&quot;)+COUNTIFS('출근 미등록'!$G$8:$G$1000,$I7,'출근 미등록'!$H$8:$H$1000,O$5,'출근 미등록'!$K$8:$K$1000,&quot;○&quot;)+COUNTIFS('출근 미등록'!$G$8:$G$1000,$I7,'출근 미등록'!$H$8:$H$1000,O$5,'출근 미등록'!$K$8:$K$1000,&quot;ㅇ&quot;))&gt;0`;
+    const attendanceRules = `<!--v24-attendance-->
+<conditionalFormatting sqref="O7:${lastDayColumn}500"><cfRule type="expression" dxfId="${dxfResult.attendance}" priority="1"><formula>${attendanceFormula}</formula></cfRule></conditionalFormatting>
+<!--/v24-attendance-->`;
+    attendanceXml = insertWorksheetConditionalFormatting(attendanceXml, attendanceRules);
+
+    zip.file(evidencePath, evidenceXml);
+    zip.file(attendancePath, attendanceXml);
+    return await zip.generateAsync({ type: "arraybuffer", compression: "DEFLATE" });
+  } catch (error) {
+    console.warn("실시간 증빙 색상 규칙 적용 실패", error);
+    return buffer;
+  }
+}
+
+function findWorksheetPath(workbookXml, relsXml, sheetName) {
+  const sheetTags = workbookXml.match(/<sheet\b[^>]*\/>/g) || [];
+  const tag = sheetTags.find((item) => item.includes(`name="${sheetName}"`));
+  const relationId = tag?.match(/r:id="([^"]+)"/)?.[1];
+  if (!relationId) return "";
+  const relTags = relsXml.match(/<Relationship\b[^>]*\/>/g) || [];
+  const rel = relTags.find((item) => item.includes(`Id="${relationId}"`));
+  let target = rel?.match(/Target="([^"]+)"/)?.[1] || "";
+  if (!target) return "";
+  target = target.replace(/^\//, "");
+  if (target.startsWith("xl/")) return target;
+  return `xl/${target.replace(/^\.\//, "")}`;
+}
+
+function appendConditionalDxfs(stylesXml) {
+  const dxfs = [
+    `<dxf><font><b/><color rgb="FF107C41"/></font><fill><patternFill patternType="solid"><fgColor rgb="FFE2F0D9"/><bgColor indexed="64"/></patternFill></fill></dxf>`,
+    `<dxf><font><b/><color rgb="FFC00000"/></font><fill><patternFill patternType="solid"><fgColor rgb="FFFFE4E6"/><bgColor indexed="64"/></patternFill></fill></dxf>`,
+    `<dxf><font><b/><color rgb="FF107C41"/></font><fill><patternFill patternType="solid"><fgColor rgb="FFE2F0D9"/><bgColor indexed="64"/></patternFill></fill></dxf>`,
+    `<dxf><font><b/><color rgb="FF000000"/></font><fill><patternFill patternType="solid"><fgColor rgb="FFA9D08E"/><bgColor indexed="64"/></patternFill></fill></dxf>`,
+  ];
+  let start = 0;
+  const normal = stylesXml.match(/<dxfs\b[^>]*count="(\d+)"[^>]*>([\s\S]*?)<\/dxfs>/);
+  if (normal) {
+    start = Number(normal[1] || 0);
+    const replacement = normal[0]
+      .replace(/count="\d+"/, `count="${start + dxfs.length}"`)
+      .replace(/<\/dxfs>$/, `${dxfs.join("")}</dxfs>`);
+    stylesXml = stylesXml.replace(normal[0], replacement);
+  } else {
+    const selfClosing = stylesXml.match(/<dxfs\b[^>]*count="(\d+)"[^>]*\/>/);
+    if (selfClosing) {
+      start = Number(selfClosing[1] || 0);
+      stylesXml = stylesXml.replace(selfClosing[0], `<dxfs count="${start + dxfs.length}">${dxfs.join("")}</dxfs>`);
+    } else {
+      const block = `<dxfs count="${dxfs.length}">${dxfs.join("")}</dxfs>`;
+      stylesXml = stylesXml.includes("<tableStyles")
+        ? stylesXml.replace("<tableStyles", `${block}<tableStyles`)
+        : stylesXml.replace("</styleSheet>", `${block}</styleSheet>`);
+    }
+  }
+  return { xml: stylesXml, completed: start, pending: start + 1, evidence: start + 2, attendance: start + 3 };
+}
+
+function removeManagedConditionalFormatting(xml, marker) {
+  const expression = new RegExp(`<!--${marker}-->[\\s\\S]*?<!--\\/${marker}-->`, "g");
+  return xml.replace(expression, "");
+}
+
+function insertWorksheetConditionalFormatting(xml, rules) {
+  if (xml.includes("<pageMargins")) return xml.replace("<pageMargins", `${rules}<pageMargins`);
+  if (xml.includes("<pageSetup")) return xml.replace("<pageSetup", `${rules}<pageSetup`);
+  return xml.replace("</worksheet>", `${rules}</worksheet>`);
 }
 
 function sanitizeWorkbookForExcel(workbook) {

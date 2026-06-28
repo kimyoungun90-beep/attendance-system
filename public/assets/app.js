@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=23";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=24";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -891,15 +891,32 @@ function applyEvidenceOverrides(result, evidenceKeys = []) {
   }
 
   const keyOf = (row) => `${normalizeEmployeeId(row.employeeId)}|${row.date}`;
-  const isResolvedMissing = (row) => evidenceSet.has(keyOf(row))
-    && (row.issueType === "missing_clock_in" || row.result === "근무인데 출근기록 없음");
-  const markEvidence = (row) => evidenceSet.has(keyOf(row)) ? { ...row, evidenced: true } : row;
+  const hasEvidence = (row) => evidenceSet.has(keyOf(row));
+  const resolvesAttendanceMissing = (row) => hasEvidence(row)
+    && ["missing_clock_in", "missing_plan_and_clock"].includes(row.issueType);
+  const markEvidence = (row) => hasEvidence(row) ? { ...row, evidenced: true } : row;
 
-  // 단순 출근 미입력만 모든 미해결 목록에서 제거합니다.
-  result.missingRows = (result.missingRows || []).filter((row) => !isResolvedMissing(row)).map(markEvidence);
+  // O 입력은 출근 미등록 자체를 해소합니다. 다만 계획까지 비어 있던 건은 계획 미입력 검토로 남깁니다.
+  result.missingRows = (result.missingRows || []).filter((row) => !resolvesAttendanceMissing(row)).map(markEvidence);
   // 휴무·연차 등인데 출근한 건은 실제 출근으로 인정하되 계획 상이에는 유지합니다.
   result.unexpectedRows = (result.unexpectedRows || []).map(markEvidence);
-  result.mismatchRows = (result.mismatchRows || []).filter((row) => !isResolvedMissing(row)).map(markEvidence);
+  result.mismatchRows = (result.mismatchRows || []).flatMap((row) => {
+    if (!hasEvidence(row)) return [row];
+    if (row.issueType === "missing_clock_in") return [];
+    if (row.issueType === "missing_plan_and_clock") {
+      return [{
+        ...row,
+        issueType: "missing_plan",
+        missingType: "계획 미입력",
+        evidenced: true,
+        actualStatus: "출근",
+        clockStatus: "증빙",
+        result: "검토 필요",
+        reason: "출근 증빙 O 반영 완료 · 근무계획 미입력 확인 필요",
+      }];
+    }
+    return [{ ...row, evidenced: true }];
+  });
   result.missingPeople = uniquePeople(result.missingRows);
   result.unexpectedPeople = uniquePeople(result.unexpectedRows);
   result.mismatchPeople = uniquePeople(result.mismatchRows);
@@ -907,10 +924,14 @@ function applyEvidenceOverrides(result, evidenceKeys = []) {
 }
 
 function finalDisplayValue(planStatus, attendanceValue) {
+  const planMissing = planStatus === "공백";
+  const clockMissing = !attendanceValue?.hasClockIn;
+  if (planMissing && clockMissing) return "출ㆍ계 미입력";
+  if (planMissing) return "계획 미입력";
   const actual = normalizeActualCode(attendanceValue?.actualStatus);
   if (actual) return comparableCode(actual) === "근무" ? "출근" : actual;
   if (attendanceValue?.hasClockIn) return "출근";
-  if (["공백", "근무", "근무A", "근무B", "근무C", "교육", "오전반차", "오후반차"].includes(planStatus)) return "미입력";
+  if (["근무", "근무A", "근무B", "근무C", "교육", "오전반차", "오후반차"].includes(planStatus)) return "출근 미입력";
   return planStatus;
 }
 
@@ -1023,7 +1044,9 @@ function buildManagerRequests(result, annualComparison, workforce, targetMonth) 
   for (const row of result.mismatchRows || []) {
     const day = Number(String(row.date || "").slice(-2));
     let message;
-    if (row.result === "근무인데 출근기록 없음") message = `${monthNo}월 ${day}일 근태 미입력`;
+    if (row.issueType === "missing_plan_and_clock") message = `${monthNo}월 ${day}일 근무계획·출근기록 모두 미입력`;
+    else if (row.issueType === "missing_plan") message = `${monthNo}월 ${day}일 근무계획 미입력`;
+    else if (row.result === "근무인데 출근기록 없음") message = `${monthNo}월 ${day}일 출근기록 미입력`;
     else if (row.result === "휴무·휴가인데 출근기록 있음") message = `${monthNo}월 ${day}일 ${row.planStatus}이나 출근 기록 있음`;
     else if (String(row.reason || "").includes("인력·매장매칭") || String(row.reason || "").includes("사번 없음")) message = `${monthNo}월 인력·매장매칭 확인 필요(${row.reason})`;
     else message = `${monthNo}월 ${day}일 계획 ${row.planStatus} / 실제 ${row.actualStatus || row.clockStatus || "미기재"}`;
@@ -1235,9 +1258,51 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       const attendanceValue = withEvidenceAttendance(attendanceMap.get(`${person.employeeId}|${date}`) || emptyAttendanceValue(), evidenceSet.has(evidenceKey));
       let hasPrimaryIssue = false;
 
-      if (REQUIRED_CLOCK_PLANS.has(planStatus) && !attendanceValue.hasClockIn) {
+      if (planStatus === "공백") {
+        if (!attendanceValue.hasClockIn) {
+          const row = makeIssueRow({
+            issueType: "missing_plan_and_clock",
+            missingType: "출ㆍ계 미입력",
+            route,
+            person,
+            date,
+            dateObject,
+            planStatus,
+            attendanceValue,
+            result: "근무계획·출근기록 없음",
+            reason: "근무계획과 실제 출근시간·변경 출근시간이 모두 없음",
+          });
+          missingRows.push(row);
+          addMismatch(makeMismatchRow({
+            ...row,
+            route,
+            person,
+            date,
+            dateObject,
+            planStatus,
+            attendanceValue,
+            result: "검토 필요",
+            reason: row.reason,
+          }));
+        } else {
+          addMismatch(makeMismatchRow({
+            issueType: "missing_plan",
+            missingType: "계획 미입력",
+            route,
+            person,
+            date,
+            dateObject,
+            planStatus,
+            attendanceValue,
+            result: "검토 필요",
+            reason: "출근기록은 있으나 근무계획이 입력되지 않음",
+          }));
+        }
+        hasPrimaryIssue = true;
+      } else if (REQUIRED_CLOCK_PLANS.has(planStatus) && !attendanceValue.hasClockIn) {
         const row = makeIssueRow({
           issueType: "missing_clock_in",
+          missingType: "출근 미입력",
           route,
           person,
           date,
@@ -1626,9 +1691,10 @@ function emptyAttendanceValue() {
   return { hasClockIn: false, actualIn: "", changedIn: "", location: "", actualStatus: "" };
 }
 
-function makeIssueRow({ issueType, route, person, date, dateObject, planStatus, attendanceValue, result, reason }) {
+function makeIssueRow({ issueType, missingType = "", route, person, date, dateObject, planStatus, attendanceValue, result, reason }) {
   return {
     issueType,
+    missingType,
     route,
     routeLabel: ROUTE_LABELS[route],
     store: person.store,
@@ -1648,8 +1714,10 @@ function makeIssueRow({ issueType, route, person, date, dateObject, planStatus, 
   };
 }
 
-function makeMismatchRow({ route, person, date, dateObject, planStatus, attendanceValue, result, reason }) {
+function makeMismatchRow({ issueType = "", missingType = "", route, person, date, dateObject, planStatus, attendanceValue, result, reason }) {
   return {
+    issueType,
+    missingType,
     route,
     routeLabel: ROUTE_LABELS[route],
     store: person.store,
@@ -2044,8 +2112,8 @@ async function exportResults() {
   try {
     button.disabled = true;
     button.textContent = "최종본 양식 생성 중...";
-    const workbook = await buildFinalTemplateWorkbook(state.result);
-    XLSX.writeFile(workbook, `${state.result.targetMonth.replace("-", "년 ")}월_${state.result.routeLabel}_출퇴근현황_최종본.xlsx`, { cellStyles: true });
+    const file = await buildFinalTemplateFile(state.result);
+    downloadGeneratedFile(file);
     showToast("기존 최종본 양식으로 엑셀을 생성했습니다.");
   } catch (error) {
     console.error(error);
@@ -2054,6 +2122,17 @@ async function exportResults() {
     button.disabled = false;
     button.textContent = "최종본 양식 엑셀 저장";
   }
+}
+
+function downloadGeneratedFile(file) {
+  const url = URL.createObjectURL(file);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = file.name;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
 
 function buildResultsWorkbook(result) {
