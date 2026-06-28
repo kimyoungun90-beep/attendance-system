@@ -310,6 +310,7 @@ async function loadPriorLedger(route, month) {
       lotsByEmployee: data.lotsByEmployee || {},
       annualLeaveBefore: data.annualLeaveBefore || {},
       currentGrants: data.currentGrants || [],
+      settlementGrants: data.settlementGrants || [],
       autoUseDates: data.autoUseDates || [],
     };
   } catch (error) {
@@ -319,7 +320,7 @@ async function loadPriorLedger(route, month) {
 }
 
 function emptyLedger() {
-  return { lotsByEmployee: {}, annualLeaveBefore: {}, currentGrants: [], autoUseDates: [] };
+  return { lotsByEmployee: {}, annualLeaveBefore: {}, currentGrants: [], settlementGrants: [], autoUseDates: [] };
 }
 
 async function fileToWorkbookSheets(file) {
@@ -815,26 +816,46 @@ function findDateLikeColumn(matrix, startRow = 0) {
 }
 
 function parseEvidenceOverrides(sheets) {
-  const evidenceSheet = (sheets || []).find((sheet) => /출근\s*미등록|증빙/.test(String(sheet.sheetName || "")));
-  if (!evidenceSheet) return [];
-  const matrix = evidenceSheet.matrix || [];
-  const headerIndex = findFlexibleHeaderRow(matrix, (headers) => (
-    findHeaderIndex(headers, ["사번", "사원번호"]) >= 0
-    && findHeaderIndex(headers, ["증빙여부(O입력)", "증빙여부", "출근증빙", "증빙"]) >= 0
-  ));
-  if (headerIndex < 0) return [];
-  const headers = (matrix[headerIndex] || []).map(normalizeHeader);
-  const employeeIdCol = findHeaderIndex(headers, ["사번", "사원번호"]);
-  let dateCol = findEvidenceDateColumn(headers);
-  const evidenceCol = findHeaderIndex(headers, ["증빙여부(O입력)", "증빙여부", "출근증빙", "증빙"]);
-  if (dateCol < 0) dateCol = findDateLikeColumn(matrix, headerIndex + 1);
   const keys = new Set();
-  for (const row of matrix.slice(headerIndex + 1)) {
-    const employeeId = normalizeEmployeeId(row[employeeIdCol]);
-    const date = dateCol >= 0 ? parseReferenceFinalDate(row[dateCol]) : "";
-    const mark = String(row[evidenceCol] ?? "").trim().toUpperCase().replace(/\s+/g, "");
-    const approved = ["O", "0", "○", "ㅇ", "Y", "YES", "TRUE", "완료", "증빙완료"].includes(mark);
-    if (approved && looksLikeEmployeeId(employeeId) && date) keys.add(`${employeeId}|${date}`);
+  const candidates = (sheets || []).filter((sheet) => /출근\s*미등록|증빙/.test(String(sheet.sheetName || "")));
+  // 시트명이 수기로 바뀐 경우에도 머리글을 찾아 읽을 수 있도록 전체 시트를 보조 탐색합니다.
+  const scanSheets = candidates.length ? candidates : (sheets || []);
+
+  for (const evidenceSheet of scanSheets) {
+    const matrix = evidenceSheet.matrix || [];
+    let headerIndex = findFlexibleHeaderRow(matrix, (headers) => (
+      findHeaderIndex(headers, ["제니엘사번", "사번", "사원번호"]) >= 0
+      && findHeaderIndex(headers, ["증빙여부(O입력)", "증빙여부(O 입력)", "증빙여부", "출근증빙", "증빙"]) >= 0
+    ));
+
+    // 기존 최종본의 고정 양식(B~K)을 수기로 일부 변경한 경우를 위한 안전한 보조 탐색입니다.
+    if (headerIndex < 0) {
+      headerIndex = findFlexibleHeaderRow(matrix, (headers) => (
+        findHeaderIndex(headers, ["제니엘사번", "사번", "사원번호"]) >= 0
+        && findHeaderIndex(headers, ["근태수정필요일", "근태수정필요일자", "발생일", "근무일자", "일자", "날짜"]) >= 0
+      ));
+    }
+    if (headerIndex < 0) continue;
+
+    const headers = (matrix[headerIndex] || []).map(normalizeHeader);
+    let employeeIdCol = findHeaderIndex(headers, ["제니엘사번", "사번", "사원번호"]);
+    let dateCol = findEvidenceDateColumn(headers);
+    let evidenceCol = findHeaderIndex(headers, ["증빙여부(O입력)", "증빙여부(O 입력)", "증빙여부", "출근증빙", "증빙"]);
+
+    if (dateCol < 0) dateCol = findDateLikeColumn(matrix, headerIndex + 1);
+    // 최종본 고정양식에서 머리글이 지워진 경우: G=제니엘사번, I=근태수정필요일, K=증빙여부.
+    if (employeeIdCol < 0 && (matrix[headerIndex] || []).length >= 11) employeeIdCol = 6;
+    if (dateCol < 0 && (matrix[headerIndex] || []).length >= 11) dateCol = 8;
+    if (evidenceCol < 0 && (matrix[headerIndex] || []).length >= 11) evidenceCol = 10;
+    if (employeeIdCol < 0 || dateCol < 0 || evidenceCol < 0) continue;
+
+    for (const row of matrix.slice(headerIndex + 1)) {
+      const employeeId = normalizeEmployeeId(row[employeeIdCol]);
+      const date = parseReferenceFinalDate(row[dateCol]);
+      const mark = String(row[evidenceCol] ?? "").trim().toUpperCase().replace(/\s+/g, "");
+      const approved = ["O", "○", "ㅇ", "Y", "YES", "TRUE", "완료", "증빙완료"].includes(mark);
+      if (approved && looksLikeEmployeeId(employeeId) && date) keys.add(`${employeeId}|${date}`);
+    }
   }
   return [...keys];
 }
@@ -866,12 +887,14 @@ function applyEvidenceOverrides(result, evidenceKeys = []) {
     }
   }
 
-  result.missingRows = (result.missingRows || []).filter((row) => !evidenceSet.has(`${normalizeEmployeeId(row.employeeId)}|${row.date}`));
-  result.mismatchRows = (result.mismatchRows || []).filter((row) => {
-    const key = `${normalizeEmployeeId(row.employeeId)}|${row.date}`;
-    return !(evidenceSet.has(key) && row.result === "근무인데 출근기록 없음");
-  });
+  const notEvidenced = (row) => !evidenceSet.has(`${normalizeEmployeeId(row.employeeId)}|${row.date}`);
+  // K열 O는 해당 사번·일자의 최종 수정 완료 표시입니다.
+  // 상담사근태는 출근으로 바꾸고 모든 미해결 목록에서는 제거합니다.
+  result.missingRows = (result.missingRows || []).filter(notEvidenced);
+  result.unexpectedRows = (result.unexpectedRows || []).filter(notEvidenced);
+  result.mismatchRows = (result.mismatchRows || []).filter(notEvidenced);
   result.missingPeople = uniquePeople(result.missingRows);
+  result.unexpectedPeople = uniquePeople(result.unexpectedRows);
   result.mismatchPeople = uniquePeople(result.mismatchRows);
   return result;
 }
@@ -1138,7 +1161,8 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
   for (const person of selectedPlans) {
     const basicDayoffDates = [];
     const explicitSubstituteEvents = [];
-    const autoSubstituteEvents = [];
+    const occurrenceRestAllowances = [];
+    const occurrenceSubstituteDates = [];
     const compensationEvents = [];
     const annualLeaveEvents = [];
     const workedDates = [];
@@ -1148,20 +1172,25 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       const planCode = normalizePlanCode(person.plans[day]);
       const evidenceKey = `${normalizeEmployeeId(person.employeeId)}|${date}`;
       const attendanceValue = withEvidenceAttendance(attendanceMap.get(`${person.employeeId}|${date}`) || emptyAttendanceValue(), evidenceSet.has(evidenceKey));
-      const automaticDays = planCode === "휴무" && !attendanceValue.hasClockIn
-        ? automaticSubstituteDays(ledger, person.employeeId, date)
-        : 0;
-      // 지정 발생일은 계획이 휴무이고 출근시간이 없으면 실제 근태 열의 표기보다
-      // "휴무"를 우선합니다. 따라서 휴무 1일로 세면서 대체휴무도 동시에 1일 차감합니다.
-      const displayedStatus = automaticDays > 0 ? "휴무" : finalDisplayValue(planCode, attendanceValue);
+      const occurrenceDays = settlementOccurrenceDays(ledger, person.employeeId, date, cutoffDate);
+      const displayedStatus = finalDisplayValue(planCode, attendanceValue);
+      // 발생일은 근무계획을 먼저 기준으로 선반영합니다.
+      // 1) 계획이 근무 계열이면 출근기록이 없어도 대체휴무를 우선 부여합니다.
+      // 2) 계획이 휴무이고 실제 출근하지 않았으면 기본 휴무 가능 수량만 늘립니다.
+      // 3) 계획이 휴무여도 실제 출근했다면 기본 휴무 추가를 취소하고 대체휴무를 부여합니다.
+      if (occurrenceDays > 0) {
+        const plannedWork = REQUIRED_CLOCK_PLANS.has(planCode);
+        if (plannedWork || attendanceValue.hasClockIn) {
+          occurrenceSubstituteDates.push(date);
+        } else if (planCode === "휴무") {
+          occurrenceRestAllowances.push({ date, days: occurrenceDays, source: "발생일 휴무 기본휴무 추가" });
+        }
+      }
       // 휴무 사용량은 계획표 원본이 아니라 최종 일별 표시값을 기준으로 계산합니다.
       // 계획이 휴무여도 실제 출근기록이 있으면 출근으로 보며 휴무 사용에서 제외합니다.
       if (displayedStatus === "휴무") basicDayoffDates.push(date);
       const substituteDays = substitutePlanValue(displayedStatus);
       if (substituteDays > 0) explicitSubstituteEvents.push({ date, days: substituteDays, source: "표기 대체휴무", planStatus: displayedStatus });
-      if (automaticDays > 0 && substituteDays <= 0) {
-        autoSubstituteEvents.push({ date, days: automaticDays, source: "발생일 지정 자동 대체휴무", planStatus: "휴무", automatic: true });
-      }
       const compensationDays = compensationPlanValue(displayedStatus);
       if (compensationDays > 0) compensationEvents.push({ date, days: compensationDays, source: "표기 보상휴가", planStatus: displayedStatus });
       const annualDays = annualLeaveValue(planCode);
@@ -1169,16 +1198,17 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       if (attendanceValue.hasClockIn) workedDates.push(date);
     }
 
-    const baseExcessEvents = basicDayoffDates.slice(baseAllowance).map((date) => ({
+    const occurrenceRestDays = roundHalf(occurrenceRestAllowances.reduce((sum, event) => sum + Number(event.days || 0), 0));
+    const personBaseAllowance = roundHalf(baseAllowance + occurrenceRestDays);
+    const baseExcessEvents = basicDayoffDates.slice(Math.max(0, Math.floor(personBaseAllowance))).map((date) => ({
       date,
       days: 1,
       source: "기본 휴무 초과",
       planStatus: "휴무",
     }));
-    // 기본 휴무 초과는 대체휴무 사용과 별개로 관리합니다.
-    // 대체휴무 잔여는 근무계획에 실제로 "대체휴일"로 등록한 일자만 차감합니다.
-    const substituteEvents = [...explicitSubstituteEvents, ...autoSubstituteEvents].sort((a, b) => a.date.localeCompare(b.date));
-    const autoSubstituteDateSet = new Set(autoSubstituteEvents.map((event) => event.date));
+    // 기본 휴무 초과와 대체휴무 사용은 별도 관리합니다.
+    // 발생일에 쉰 직원은 기본 휴무 가능 수량만 늘고, 대체휴무 사용·차감은 발생하지 않습니다.
+    const substituteEvents = [...explicitSubstituteEvents].sort((a, b) => a.date.localeCompare(b.date));
 
     for (let day = 1; day <= lastDay; day += 1) {
       const planStatus = normalizePlanCode(person.plans[day]);
@@ -1222,10 +1252,7 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
         hasPrimaryIssue = true;
       }
 
-      // 지정 발생일에 휴무 계획 + 출근시간 없음이면 실제로 쉰 것으로 확정합니다.
-      // 실제 근태 열에 다른 값이 남아 있어도 이 경우에는 계획 상이로 올리지 않습니다.
-      const isAutomaticSubstituteDayoff = autoSubstituteDateSet.has(date) && planStatus === "휴무" && !attendanceValue.hasClockIn;
-      if (!hasPrimaryIssue && !isAutomaticSubstituteDayoff) {
+      if (!hasPrimaryIssue) {
         const mismatch = evaluateMismatch(planStatus, attendanceValue, attendance.hasActualStatusColumn);
         if (mismatch) {
           addMismatch(makeMismatchRow({
@@ -1244,10 +1271,10 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
 
     const basicDayoffUsed = roundHalf(basicDayoffDates.length);
     const explicitSubDayoffUsed = roundHalf(explicitSubstituteEvents.reduce((sum, event) => sum + event.days, 0));
-    const autoSubstituteUsed = roundHalf(autoSubstituteEvents.reduce((sum, event) => sum + event.days, 0));
+    const autoSubstituteUsed = 0;
     const compensationLeaveUsed = roundHalf(compensationEvents.reduce((sum, event) => sum + event.days, 0));
-    const baseExcess = roundHalf(Math.max(0, basicDayoffUsed - baseAllowance));
-    const substituteNeeded = roundHalf(explicitSubDayoffUsed + autoSubstituteUsed);
+    const baseExcess = roundHalf(Math.max(0, basicDayoffUsed - personBaseAllowance));
+    const substituteNeeded = roundHalf(explicitSubDayoffUsed);
     const compensationNeeded = compensationLeaveUsed;
     const annualLeaveUsed = roundHalf(annualLeaveEvents.reduce((sum, event) => sum + event.days, 0));
     const preview = calculatePreviewLedger({
@@ -1255,7 +1282,9 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       substituteEvents,
       compensationEvents,
       workedDates,
+      occurrenceSubstituteDates,
       targetMonth,
+      cutoffDate,
       ledger,
     });
     const combinedAvailable = roundHalf(Number(preview.availableSubstitute || 0) + Number(preview.availableCompensation || 0));
@@ -1264,7 +1293,7 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
     const combinedRemaining = roundHalf(Math.max(0, combinedAvailable - combinedLeaveUsed));
     const cumulativeAnnualLeave = roundHalf(Number(ledger.annualLeaveBefore[person.employeeId] || 0) + annualLeaveUsed);
     const judgment = buildDayoffJudgment({
-      baseAllowance,
+      baseAllowance: personBaseAllowance,
       basicDayoffUsed,
       explicitSubDayoffUsed,
       baseExcess,
@@ -1287,10 +1316,12 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       store: person.store,
       employeeId: person.employeeId,
       name: person.name,
-      baseAllowance,
+      baseAllowance: personBaseAllowance,
       basicDayoffUsed,
       explicitSubDayoffUsed,
       autoSubstituteUsed,
+      occurrenceRestDays,
+      occurrenceRestAllowances,
       compensationLeaveUsed,
       baseExcess,
       baseExcessEvents,
@@ -1301,6 +1332,7 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       compensationEvents,
       annualLeaveEvents,
       workedDates,
+      occurrenceSubstituteDates: [...new Set(occurrenceSubstituteDates)].sort(),
       duplicatePlanNote: person.duplicatePlanNote || "",
     };
     employeeFacts.push(fact);
@@ -1414,19 +1446,22 @@ function assembleResultCollections(base) {
   };
 }
 
-function automaticSubstituteDays(ledger, employeeId, date) {
-  // 자동 휴무 처리일은 “그날 새로 부여받은 직원”에게만 한정하지 않습니다.
-  // 같은 경로의 대체휴무 발생일이면, 계획이 휴무이고 출근시간이 없는 직원은
-  // 기존 보유 대체휴무에서 1일을 사용합니다. 잔여가 없으면 초과 사용으로 표시됩니다.
-  const dates = new Set((ledger?.autoUseDates || []).map(String));
-  return dates.has(date) ? 1 : 0;
+function settlementOccurrenceDays(ledger, employeeId, date, cutoffDate) {
+  if (!date || !cutoffDate || date > cutoffDate) return 0;
+  const normalizedId = normalizeEmployeeId(employeeId);
+  return roundHalf((ledger?.settlementGrants || [])
+    .filter((grant) => String(grant.occurrenceDate || "") === date)
+    .filter((grant) => (grant.eligibleEmployeeIds || []).map(normalizeEmployeeId).includes(normalizedId))
+    .reduce((sum, grant) => sum + Number(grant.grantedDays || 0), 0));
 }
 
-function calculatePreviewLedger({ employeeId, substituteEvents, compensationEvents, workedDates, targetMonth, ledger }) {
+function calculatePreviewLedger({ employeeId, substituteEvents, compensationEvents, workedDates, occurrenceSubstituteDates, targetMonth, cutoffDate, ledger }) {
   const lots = (ledger.lotsByEmployee[employeeId] || []).map((lot) => ({
     grantId: lot.grantId,
     grantType: lot.grantType || "substitute",
     grantMonth: lot.grantMonth,
+    occurrenceDate: lot.occurrenceDate || "",
+    settlementMode: Boolean(lot.settlementMode),
     validFrom: lot.validFrom,
     validTo: lot.validTo,
     remaining: roundHalf(lot.remaining),
@@ -1440,6 +1475,7 @@ function calculatePreviewLedger({ employeeId, substituteEvents, compensationEven
       grantType: grant.grantType || "substitute",
       grantMonth: grant.grantMonth,
       occurrenceDate: grant.occurrenceDate || "",
+      settlementMode: Boolean(grant.settlementMode),
       validFrom: grant.validFrom,
       validTo: grant.validTo,
       remaining: roundHalf(grant.grantedDays),
@@ -1447,7 +1483,16 @@ function calculatePreviewLedger({ employeeId, substituteEvents, compensationEven
     existingGrantIds.add(String(grant.id || ""));
   }
 
-  const pools = consumePreviewCombinedPools(lots, substituteEvents, compensationEvents, targetMonth);
+  const occurrenceEntitlementSet = new Set((occurrenceSubstituteDates || []).map(String));
+  const settledLots = lots.filter((lot) => {
+    if (!lot.settlementMode || !lot.occurrenceDate) return true;
+    if (!cutoffDate || lot.occurrenceDate > cutoffDate) return true; // 발생일 전에는 사용 시작일 기준으로 선반영
+    if (!lot.occurrenceDate.startsWith(targetMonth)) return true; // 과거 발생분은 서버 재계산 결과를 사용
+    // 발생일이 지난 현재 월은 실제 출근만 보는 것이 아니라 근무계획을 우선합니다.
+    // 계획 근무자는 미입력이어도 대체휴무를 유지하며, 휴무 계획자는 실제 출근했을 때만 대체휴무로 전환됩니다.
+    return occurrenceEntitlementSet.has(lot.occurrenceDate);
+  });
+  const pools = consumePreviewCombinedPools(settledLots, substituteEvents, compensationEvents, targetMonth);
   return {
     availableSubstitute: pools.substitute.available,
     substituteApplied: pools.substitute.applied,
@@ -1550,8 +1595,10 @@ function withEvidenceAttendance(attendanceValue, evidenced) {
   return {
     ...attendanceValue,
     hasClockIn: true,
-    actualStatus: attendanceValue.actualStatus || "출근",
+    // 원본 실제근태가 '미입력'으로 남아 있어도 K열 O가 최종 확정값입니다.
+    actualStatus: "출근",
     changedIn: attendanceValue.changedIn || attendanceValue.actualIn || "증빙",
+    evidenced: true,
   };
 }
 
@@ -2305,11 +2352,14 @@ async function saveClosure() {
     ]);
     await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard()]);
     const action = data.replaced ? "기존 월 마감을 완전히 교체했습니다." : "새 월 마감을 저장했습니다.";
+    const recalculateMessage = data.recalculateWarning
+      ? ` 월 마감 원본은 저장됐지만 누적 재계산 경고가 있습니다: ${data.recalculateWarning}`
+      : ` ${data.affectedMonths || 0}개 월의 연차·대체휴무·보상휴가 누적을 다시 계산했습니다.`;
     const failedFiles = fileResults.filter((item) => item.status === "rejected");
     const fileMessage = failedFiles.length
       ? ` 월 마감은 정상 저장됐지만 원본 파일 ${failedFiles.length}개는 보관하지 못했습니다: ${failedFiles.map((item) => item.reason?.message || "파일 보관 오류").join(" / ")}`
       : " 계획표·근태표·보고용 결과본과 선택한 비교 원본을 파일 보관함에 저장했습니다.";
-    showToast(`${action} ${data.affectedMonths || 0}개 월의 연차·대체휴무·보상휴가 누적을 다시 계산했습니다.${fileMessage}`);
+    showToast(`${action}${recalculateMessage}${fileMessage}`);
   } catch (error) {
     showToast(error.message || "월 마감 저장 중 오류가 발생했습니다.");
   } finally {
@@ -2876,7 +2926,10 @@ async function saveGrant(event) {
     if (!response.ok) throw new Error(data.error || "휴가 부여 저장 실패");
     resetGrantForm();
     await Promise.all([loadGrants(), loadHistory()]);
-    showToast(`${data.replaced ? "기존 부여 설정을 수정" : `발생일 ${data.createdCount || 1}건을 저장`}하고 ${data.affectedMonths || 0}개 월의 대체휴무·보상휴가를 다시 계산했습니다.`);
+    const savedMessage = `${data.replaced ? "기존 부여 설정을 수정" : `발생일 ${data.createdCount || 1}건을 저장`}했습니다.`;
+    showToast(data.recalculateWarning
+      ? `${savedMessage} 기존 기록은 유지됐으며 누적 재계산은 월 마감 저장 시 다시 실행됩니다.`
+      : `${savedMessage} ${data.affectedMonths || 0}개 월의 대체휴무·보상휴가를 다시 계산했습니다.`);
   } catch (error) {
     showToast(error.message);
   } finally {
@@ -2909,6 +2962,8 @@ async function loadGrants() {
   } catch (error) {
     state.grants = [];
     renderGrants([]);
+    const body = $("#grantTableBody");
+    if (body) body.innerHTML = `<tr><td colspan="15" class="empty-cell">조회 오류: ${escapeHtml(error.message || "휴가 부여 내역 조회 실패")}</td></tr>`;
     showToast(error.message || "휴가 부여 내역 조회 실패");
   }
 }
@@ -2920,9 +2975,11 @@ function renderGrants(items) {
     const statusClass = status === "사용 가능" ? "success-pill" : status === "만료" ? "status-pill" : "neutral-pill";
     const typeLabel = item.grant_type === "compensation" ? "보상휴가" : "대체휴무";
     const scopeLabel = item.grant_scope === "employee" ? `사번별 · ${item.employee_id || "-"}` : "경로 일괄";
-    const criterion = item.eligibility_mode === "worked_on_date"
-      ? `${item.criterion_date || item.occurrence_date} 실제 출근자`
-      : item.grant_scope === "employee" ? "지정 사번" : `${item.eligibility_cutoff || item.occurrence_date || `${item.grant_month}-01`} 당일 포함 이전 입사자`;
+    const criterion = item.settlement_mode
+      ? `${item.occurrence_date || item.criterion_date} 계획 근무자 대체휴무 선부여 / 휴무자는 기본휴무 추가 / 휴무 중 출근자는 대체휴무 전환`
+      : item.eligibility_mode === "worked_on_date"
+        ? `${item.criterion_date || item.occurrence_date} 실제 출근자`
+        : item.grant_scope === "employee" ? "지정 사번" : `${item.eligibility_cutoff || item.occurrence_date || `${item.grant_month}-01`} 당일 포함 이전 입사자`;
     return `<tr>
       <td>${escapeHtml(ROUTE_LABELS[item.route] || item.route)}</td>
       <td><span class="${item.grant_type === "compensation" ? "warning-pill" : "plan-pill"}">${escapeHtml(typeLabel)}</span></td>
@@ -3542,12 +3599,12 @@ async function loadAnnualLeaveDashboard() {
     renderAnnualLeaveDashboard(data);
   } catch (error) {
     state.annualLeaveDashboard = null;
-    renderAnnualLeaveDashboard(null);
+    renderAnnualLeaveDashboard(null, error.message || "연차 누적현황 조회 실패");
     showToast(error.message || "연차 누적현황 조회 실패");
   }
 }
 
-function renderAnnualLeaveDashboard(data) {
+function renderAnnualLeaveDashboard(data, errorMessage = "") {
   const status = $("#annualLedgerStatus");
   const summary = $("#annualLedgerSummary");
   const employeeBody = $("#annualLedgerTableBody");
@@ -3556,7 +3613,7 @@ function renderAnnualLeaveDashboard(data) {
   if (!status || !summary || !employeeBody || !reminderBody || !historyBody) return;
   if (!data) {
     status.className = "alert warning";
-    status.textContent = "관리자 로그인 후 연차 누적현황을 조회할 수 있습니다.";
+    status.textContent = errorMessage || "관리자 로그인 후 연차 누적현황을 조회할 수 있습니다.";
     summary.innerHTML = "";
     employeeBody.innerHTML = '<tr><td colspan="15" class="empty-cell">조회할 연차 자료가 없습니다.</td></tr>';
     reminderBody.innerHTML = '<tr><td colspan="10" class="empty-cell">표시할 촉진 대상이 없습니다.</td></tr>';

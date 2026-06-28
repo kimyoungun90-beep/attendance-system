@@ -41,18 +41,8 @@ export async function recalculateRoute(db, route) {
   const closures = closuresResult.results || [];
   const facts = factsResult.results || [];
   const grants = grantsResult.results || [];
-  const automaticSubstituteDates = new Set(grants
-    .filter((grant) => (grant.grant_type || "substitute") === "substitute")
-    .map((grant) => String(grant.occurrence_date || grant.criterion_date || ""))
-    .filter(Boolean));
   const workforceRows = workforceResult.results || [];
   const annualEmployeeRows = annualEmployeeResult.results || [];
-
-  await runBatch(db, [
-    db.prepare("DELETE FROM attendance_leave_allocations_v5 WHERE route = ?").bind(route),
-    db.prepare("DELETE FROM route_substitute_allocations WHERE route = ?").bind(route),
-    db.prepare("DELETE FROM attendance_monthly_summaries_v3 WHERE route = ?").bind(route),
-  ]);
 
   if (!closures.length) return { affectedMonths: 0, affectedEmployees: 0 };
 
@@ -63,16 +53,42 @@ export async function recalculateRoute(db, route) {
   }
 
   const factsByMonth = new Map();
+  const workedDatesByMonthEmployee = new Map();
+  const occurrenceSubstituteDatesByMonthEmployee = new Map();
   for (const fact of facts) {
     if (!factsByMonth.has(fact.month)) factsByMonth.set(fact.month, []);
     factsByMonth.get(fact.month).push(fact);
+    const employeeId = normalizeEmployeeId(fact.employee_id);
+    if (employeeId) {
+      const key = `${fact.month}|${employeeId}`;
+      if (!workedDatesByMonthEmployee.has(key)) workedDatesByMonthEmployee.set(key, new Set());
+      const set = workedDatesByMonthEmployee.get(key);
+      for (const value of parseEvents(fact.worked_dates_json)) {
+        const date = typeof value === "string" ? value : value?.date;
+        if (date) set.add(String(date));
+      }
+      const entitlementKey = `${fact.month}|${employeeId}`;
+      if (!occurrenceSubstituteDatesByMonthEmployee.has(entitlementKey)) occurrenceSubstituteDatesByMonthEmployee.set(entitlementKey, new Set());
+      const entitlementSet = occurrenceSubstituteDatesByMonthEmployee.get(entitlementKey);
+      const savedEntitlements = parseEvents(fact.occurrence_substitute_dates_json)
+        .map((value) => typeof value === "string" ? value : value?.date)
+        .filter(Boolean);
+      // 구버전 월 마감에는 전용 필드가 없으므로 실제 출근일을 안전한 보조값으로 사용합니다.
+      for (const date of (savedEntitlements.length ? savedEntitlements : set)) entitlementSet.add(String(date));
+    }
   }
 
   const lotsByEmployee = new Map();
   // 부여분은 월 마감자료가 아니라 인력·매장매칭의 입사일을 기준으로 직원별 lot를 만듭니다.
   // 예: 5월 발생분은 5월 1일 이전 입사자, 6월 발생분은 6월 1일 이전 입사자입니다.
   for (const grant of grants) {
-    const eligibility = resolveEligibleEmployees(grant, {
+    const occurrenceDate = String(grant.occurrence_date || grant.criterion_date || "");
+    const settlementMode = (grant.grant_type || "substitute") === "substitute"
+      && (grant.grant_scope || "route") === "route"
+      && /^\d{4}-\d{2}-\d{2}$/.test(occurrenceDate);
+    // 발생일 전 사용을 허용할 수 있도록 먼저 입사일 기준 대상자 전원에게 lot를 만듭니다.
+    // 발생 월이 지나면 아래 월별 처리에서 실제 출근자는 유지하고 휴무자는 남은 lot를 종료합니다.
+    const eligibility = resolveEligibleEmployees(settlementMode ? { ...grant, eligibility_mode: "all", criterion_date: null } : grant, {
       workforceRows,
       annualRows: annualEmployeeRows,
       factsByMonth,
@@ -83,7 +99,8 @@ export async function recalculateRoute(db, route) {
         grantId: grant.id,
         grantType: VALID_GRANT_TYPES.has(grant.grant_type) ? grant.grant_type : "substitute",
         grantMonth: grant.grant_month,
-        occurrenceDate: grant.occurrence_date || "",
+        occurrenceDate,
+        settlementMode,
         validFrom: grant.valid_from,
         validTo: grant.valid_to,
         remaining: roundHalf(grant.granted_days),
@@ -113,6 +130,14 @@ export async function recalculateRoute(db, route) {
       const monthStart = `${closure.month}-01`;
       const monthEnd = endOfMonth(closure.month);
       const nextMonthStart = startOfNextMonth(closure.month);
+      const occurrenceEntitlementDates = occurrenceSubstituteDatesByMonthEmployee.get(`${closure.month}|${employeeId}`) || new Set();
+      for (const lot of lots) {
+        if (!lot.settlementMode || !lot.occurrenceDate || !lot.occurrenceDate.startsWith(closure.month)) continue;
+        // 발생일은 계획 우선 판정 결과를 사용합니다.
+        // 계획 근무자는 출근 미입력이어도 대체휴무를 유지하고, 휴무 계획자는 실제 출근했을 때만 유지합니다.
+        // 발생일 전에 이미 사용한 수량은 과거 마감 이력으로 유지하고 남은 수량만 종료합니다.
+        if (!occurrenceEntitlementDates.has(lot.occurrenceDate)) lot.remaining = 0;
+      }
 
       const legacyEvents = parseEvents(fact.substitute_events_json);
       const compensationEvents = mergeEvents(
@@ -121,14 +146,7 @@ export async function recalculateRoute(db, route) {
       );
       const substituteEvents = legacyEvents
         .filter((event) => !String(event.planStatus || "").startsWith("보상휴가"))
-        .filter((event) => String(event.source || "") !== "기본 휴무 초과")
-        // 자동 휴무 차감은 해당 직원이 그날 새 부여 대상이었는지와 별개입니다.
-        // 경로에 등록된 대체휴무 발생일이면 기존 보유분을 사용하고, 잔여가 없으면 초과로 계산합니다.
-        .filter((event) => {
-          const automatic = Boolean(event?.automatic) || String(event?.source || "") === "발생일 지정 자동 대체휴무";
-          if (!automatic) return true;
-          return automaticSubstituteDates.has(String(event.date || ""));
-        })
+        .filter((event) => !["기본 휴무 초과", "발생일 지정 자동 대체휴무"].includes(String(event.source || "")))
         .filter(validUsageEvent)
         .sort(eventSort);
 
@@ -221,6 +239,13 @@ export async function recalculateRoute(db, route) {
     `).bind(grantId, closureId, route, grantType, employeeId, closure?.month || "", usedDays));
   }
 
+  // 모든 계산이 정상 완료된 뒤 기존 계산 결과를 지웁니다.
+  // 조회·계산 오류 때문에 기존 부여/잔여 표시가 갑자기 사라지는 현상을 방지합니다.
+  await db.batch([
+    db.prepare("DELETE FROM attendance_leave_allocations_v5 WHERE route = ?").bind(route),
+    db.prepare("DELETE FROM route_substitute_allocations WHERE route = ?").bind(route),
+    db.prepare("DELETE FROM attendance_monthly_summaries_v3 WHERE route = ?").bind(route),
+  ]);
   await runBatch(db, allocationStatements);
   await runBatch(db, summaryStatements);
   await runBatch(db, closureUpdates);

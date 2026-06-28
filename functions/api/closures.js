@@ -162,8 +162,8 @@ export async function onRequestPost(context) {
        base_allowance, basic_dayoff_used, explicit_sub_dayoff_used, base_excess,
        substitute_needed, compensation_leave_used, compensation_needed,
        annual_leave_used, substitute_events_json, compensation_events_json,
-       annual_leave_events_json, worked_dates_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       annual_leave_events_json, worked_dates_json, occurrence_substitute_dates_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       closureId,
       route,
@@ -182,7 +182,8 @@ export async function onRequestPost(context) {
       JSON.stringify(Array.isArray(row.substituteEvents) ? row.substituteEvents : []),
       JSON.stringify(Array.isArray(row.compensationEvents) ? row.compensationEvents : []),
       JSON.stringify(Array.isArray(row.annualLeaveEvents) ? row.annualLeaveEvents : []),
-      JSON.stringify(Array.isArray(row.workedDates) ? row.workedDates : [])
+      JSON.stringify(Array.isArray(row.workedDates) ? row.workedDates : []),
+      JSON.stringify(Array.isArray(row.occurrenceSubstituteDates) ? row.occurrenceSubstituteDates : [])
     ));
 
     await runBatch(context.env.DB, issueStatements);
@@ -190,28 +191,40 @@ export async function onRequestPost(context) {
     await runBatch(context.env.DB, mismatchStatements);
     await runBatch(context.env.DB, factStatements);
 
-    const recalculated = await recalculateRoute(context.env.DB, route);
-    const summaries = await context.env.DB.prepare(`
-      SELECT *
-      FROM attendance_monthly_summaries_v3
-      WHERE closure_id = ?
-      ORDER BY MAX(shortage, compensation_shortage) DESC, base_excess DESC, store ASC, employee_name ASC
-    `).bind(closureId).all();
+    // 월 마감 원본 저장과 누적 재계산은 실패 범위를 분리합니다.
+    // 재계산 오류 때문에 정상 저장된 마감 원본까지 삭제되는 현상을 방지합니다.
+    let affectedMonths = 0;
+    let recalculateWarning = "";
+    let summaries = { results: [] };
+    try {
+      const recalculated = await recalculateRoute(context.env.DB, route);
+      affectedMonths = recalculated.affectedMonths || 0;
+      summaries = await context.env.DB.prepare(`
+        SELECT *
+        FROM attendance_monthly_summaries_v3
+        WHERE closure_id = ?
+        ORDER BY MAX(shortage, compensation_shortage) DESC, base_excess DESC, store ASC, employee_name ASC
+      `).bind(closureId).all();
+    } catch (error) {
+      recalculateWarning = error?.message || "누적 재계산은 다음 저장 또는 부여 수정 시 다시 실행됩니다.";
+      console.error("closure recalculation failed", route, month, error);
+    }
 
     return json({
       ok: true,
       id: closureId,
       replaced,
-      affectedMonths: recalculated.affectedMonths,
+      affectedMonths,
+      recalculateWarning,
       summaries: summaries.results || [],
     }, 201);
   } catch (error) {
-    await cleanupFailedClosure(context.env.DB, closureId);
+    await cleanupFailedClosure(context.env.DB, closureId, replaced);
     return json({ error: `월 마감 저장 중 오류가 발생했습니다: ${error.message || "알 수 없는 오류"}` }, 500);
   }
 }
 
-async function cleanupFailedClosure(db, closureId) {
+async function cleanupFailedClosure(db, closureId, replaced = false) {
   try {
     await db.batch([
       db.prepare("DELETE FROM attendance_leave_allocations_v5 WHERE closure_id = ?").bind(closureId),
@@ -221,7 +234,9 @@ async function cleanupFailedClosure(db, closureId) {
       db.prepare("DELETE FROM attendance_mismatch_items WHERE closure_id = ?").bind(closureId),
       db.prepare("DELETE FROM attendance_issue_items WHERE closure_id = ?").bind(closureId),
       db.prepare("DELETE FROM attendance_missing_items WHERE closure_id = ?").bind(closureId),
-      db.prepare("DELETE FROM attendance_closures WHERE id = ?").bind(closureId),
+      // 신규 저장 실패 때만 껍데기 행을 제거합니다. 교체 저장 중 오류라면 월 식별 행은 남겨
+      // 사용자가 같은 월 수정본을 다시 올릴 수 있게 합니다.
+      ...(replaced ? [] : [db.prepare("DELETE FROM attendance_closures WHERE id = ?").bind(closureId)]),
     ]);
   } catch {
     // 원래 오류를 우선 반환합니다.

@@ -14,6 +14,7 @@ const FACT_COLUMNS = {
   compensation_needed: "REAL NOT NULL DEFAULT 0",
   compensation_events_json: "TEXT NOT NULL DEFAULT '[]'",
   worked_dates_json: "TEXT NOT NULL DEFAULT '[]'",
+  occurrence_substitute_dates_json: "TEXT NOT NULL DEFAULT '[]'",
 };
 
 

@@ -162,25 +162,19 @@ function buildContext(result, daysInMonth) {
   for (const person of people) {
     const daily = {};
     const summary = summaryById.get(person.employeeId) || {};
-    const automaticSubstituteDates = new Set((summary.substituteEvents || [])
-      .filter((event) => Boolean(event?.automatic) || String(event?.source || "") === "발생일 지정 자동 대체휴무")
-      .map((event) => String(event.date || ""))
-      .filter(Boolean));
     for (let day = 1; day <= daysInMonth; day += 1) {
       const date = `${result.targetMonth}-${String(day).padStart(2, "0")}`;
       const planStatus = normalizePlan(person.plan?.plans?.[day]);
       const attendance = attendanceByKey.get(`${person.employeeId}|${date}`) || emptyAttendance();
       const evidenceKey = `${person.employeeId}|${date}`;
       const evidence = evidenceSet.has(evidenceKey);
-      const automaticSubstituteDayoff = automaticSubstituteDates.has(date) && planStatus === "휴무" && !attendance.hasClockIn;
       const issues = issueMap.get(`${person.employeeId}|${day}`) || [];
       daily[day] = {
         date,
         planStatus,
         attendance,
         evidence,
-        automaticSubstituteDayoff,
-        display: evidence ? "출근" : automaticSubstituteDayoff ? "휴무" : dailyDisplay(planStatus, attendance),
+        display: evidence ? "출근" : dailyDisplay(planStatus, attendance),
         issues: evidence ? [] : [...new Set(issues)],
       };
     }
@@ -746,8 +740,6 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
     if (member.note) noteParts.push(member.note);
     if (plannedDayoffCount !== displayedDayoffCount) noteParts.push(`계획 휴무 ${plannedDayoffCount}일 / 최종 표시 휴무 ${displayedDayoffCount}일`);
     if (displayedDayoffExcess > 0) noteParts.push(`기본 휴무 ${compactNumber(displayedDayoffExcess)}일 초과`);
-    const autoDates = (summary.substituteEvents || []).filter((event) => event.automatic).map((event) => String(event.date || "").slice(5).replace("-", "/"));
-    if (autoDates.length) noteParts.push(`지정일 자동 대체휴무 ${autoDates.join(", ")} · ${compactNumber(autoSubstituteUsed)}일`);
     for (let day = 1; day <= daysInMonth; day += 1) {
       if (daily[day]?.issues?.length) noteParts.push(`${monthNo}/${day} ${daily[day].issues.join("/")}`);
     }

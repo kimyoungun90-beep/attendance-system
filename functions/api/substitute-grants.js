@@ -1,5 +1,5 @@
 import { json, requireAuth } from "../_lib/auth.js";
-import { resolveEligibleEmployees, normalizeEmployeeId, parseEmployeeIds } from "../_lib/leave-eligibility.js";
+import { resolveEligibleEmployees, normalizeEmployeeId, parseEmployeeIds, parseEvents } from "../_lib/leave-eligibility.js";
 import { recalculateRoute } from "../_lib/recalculate.js";
 import { ensureSchema } from "../_lib/schema.js";
 
@@ -16,12 +16,6 @@ export async function onRequestGet(context) {
   const url = new URL(context.request.url);
   const route = url.searchParams.get("route") || "";
   if (route && !VALID_ROUTES.has(route)) return json({ error: "경로 구분이 올바르지 않습니다." }, 400);
-
-  // 배포 전에 저장된 0명 부여·0일 잔여도 새 입사일 기준으로 즉시 다시 계산합니다.
-  const routesToRecalculate = route ? [route] : [...VALID_ROUTES];
-  for (const targetRoute of routesToRecalculate) {
-    await recalculateRoute(context.env.DB, targetRoute);
-  }
 
   const routeWhere = route ? " WHERE route = ?" : "";
   const routeBind = (statement) => route ? statement.bind(route) : statement;
@@ -56,15 +50,42 @@ export async function onRequestGet(context) {
       const [factRoute, month] = key.split("|");
       if (factRoute === grant.route) factsByMonth.set(month, rows);
     }
-    const eligibility = resolveEligibleEmployees(grant, {
+    const occurrenceDate = String(grant.occurrence_date || grant.criterion_date || "");
+    const occurrenceMonth = occurrenceDate.slice(0, 7);
+    const settlementMode = (grant.grant_type || "substitute") === "substitute"
+      && (grant.grant_scope || "route") === "route"
+      && /^\d{4}-\d{2}-\d{2}$/.test(occurrenceDate);
+    const baseEligibility = resolveEligibleEmployees(settlementMode ? { ...grant, eligibility_mode: "all", criterion_date: null } : grant, {
       workforceRows: workforceByRoute.get(grant.route) || [],
       annualRows: annualByRoute.get(grant.route) || [],
       factsByMonth,
     });
+    let eligibility = baseEligibility;
+    const occurrenceFacts = factsByMonth.get(occurrenceMonth) || [];
+    if (settlementMode && occurrenceFacts.length) {
+      const entitled = new Set();
+      for (const fact of occurrenceFacts) {
+        const employeeId = normalizeEmployeeId(fact.employee_id);
+        if (!employeeId) continue;
+        const saved = parseEvents(fact.occurrence_substitute_dates_json)
+          .map((value) => typeof value === "string" ? value : value?.date)
+          .filter(Boolean);
+        const fallback = parseEvents(fact.worked_dates_json)
+          .map((value) => typeof value === "string" ? value : value?.date)
+          .filter(Boolean);
+        if ((saved.length ? saved : fallback).includes(occurrenceDate)) entitled.add(employeeId);
+      }
+      eligibility = {
+        ...baseEligibility,
+        employeeIds: baseEligibility.employeeIds.filter((employeeId) => entitled.has(normalizeEmployeeId(employeeId))),
+      };
+    }
     const usedDays = usedByGrant.get(grant.id) || 0;
     const assignedDays = roundHalf(roundHalf(grant.granted_days) * eligibility.employeeIds.length);
     return {
       ...grant,
+      settlement_mode: settlementMode ? 1 : 0,
+      provisional_people: baseEligibility.employeeIds.length,
       eligible_people: eligibility.employeeIds.length,
       assigned_days: assignedDays,
       used_days: usedDays,
@@ -181,12 +202,19 @@ export async function onRequestPost(context) {
   const affectedRoutes = new Set([route]);
   if (existing?.route) affectedRoutes.add(existing.route);
   let affectedMonths = 0;
+  let recalculateWarning = "";
   for (const affectedRoute of affectedRoutes) {
-    const recalculated = await recalculateRoute(context.env.DB, affectedRoute);
-    affectedMonths += recalculated.affectedMonths;
+    try {
+      const recalculated = await recalculateRoute(context.env.DB, affectedRoute);
+      affectedMonths += recalculated.affectedMonths;
+    } catch (error) {
+      // 부여 기록 저장 자체는 성공했으므로 기록을 숨기거나 실패로 돌리지 않습니다.
+      recalculateWarning = error?.message || "누적 재계산은 다음 월 마감 저장 시 다시 실행됩니다.";
+      console.error("leave grant recalculation failed", affectedRoute, error);
+    }
   }
 
-  return json({ ok: true, id: savedIds[0], ids: savedIds, createdCount: savedIds.length, replaced: Boolean(existing), affectedMonths }, 201);
+  return json({ ok: true, id: savedIds[0], ids: savedIds, createdCount: savedIds.length, replaced: Boolean(existing), affectedMonths, recalculateWarning }, 201);
 }
 
 function groupByRoute(rows) {

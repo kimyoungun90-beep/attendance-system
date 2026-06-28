@@ -1,5 +1,5 @@
 import { json, requireAuth } from "../_lib/auth.js";
-import { normalizeEmployeeId, parseEmployeeIds, resolveEligibleEmployees } from "../_lib/leave-eligibility.js";
+import { normalizeEmployeeId, parseEmployeeIds, parseEvents, resolveEligibleEmployees } from "../_lib/leave-eligibility.js";
 import { ensureSchema } from "../_lib/schema.js";
 
 const VALID_ROUTES = new Set(["homeplus", "electroland"]);
@@ -65,15 +65,56 @@ export async function onRequestGet(context) {
   // grant_month가 7월이어도 사용 시작일이 5월이면 6월 분석에서 사용할 수 있습니다.
   const grants = grantsResult.results || [];
   const lotsByEmployee = {};
+  const settlementGrants = [];
   for (const grant of grants) {
-    // 대상 월의 실제 출근자 부여는 현재 업로드한 근태를 기준으로 브라우저에서 판정합니다.
-    // 이미 저장돼 있던 같은 월 마감자료로 미리 배분하면 수정본 재분석 시 과거 출근자가 남을 수 있습니다.
-    if (grant.grant_month === month && grant.eligibility_mode === "worked_on_date") continue;
-    const eligibility = resolveEligibleEmployees(grant, {
+    const occurrenceDate = String(grant.occurrence_date || grant.criterion_date || "");
+    const occurrenceMonth = occurrenceDate.slice(0, 7);
+    const settlementMode = (grant.grant_type || "substitute") === "substitute"
+      && (grant.grant_scope || "route") === "route"
+      && /^\d{4}-\d{2}-\d{2}$/.test(occurrenceDate);
+    const baseGrant = settlementMode
+      ? { ...grant, eligibility_mode: "all", criterion_date: null }
+      : grant;
+    const baseEligibility = resolveEligibleEmployees(baseGrant, {
       workforceRows: workforceResult.results || [],
       annualRows: annualEmployeeResult.results || [],
       factsByMonth,
     });
+
+    let eligibility = baseEligibility;
+    // 발생일이 지난 뒤에는 월 마감에 저장된 "계획 우선 대체휴무 대상일"을 사용합니다.
+    // 구버전 월 마감은 해당 필드가 없으므로 실제 출근일을 보조값으로 사용합니다.
+    if (settlementMode && occurrenceMonth < month) {
+      const occurrenceFacts = factsByMonth.get(occurrenceMonth) || [];
+      if (occurrenceFacts.length) {
+        const entitled = new Set();
+        for (const fact of occurrenceFacts) {
+          const employeeId = normalizeEmployeeId(fact.employee_id);
+          if (!employeeId) continue;
+          const saved = parseEvents(fact.occurrence_substitute_dates_json)
+            .map((value) => typeof value === "string" ? value : value?.date)
+            .filter(Boolean);
+          const fallback = parseEvents(fact.worked_dates_json)
+            .map((value) => typeof value === "string" ? value : value?.date)
+            .filter(Boolean);
+          if ((saved.length ? saved : fallback).includes(occurrenceDate)) entitled.add(employeeId);
+        }
+        eligibility = {
+          ...baseEligibility,
+          employeeIds: baseEligibility.employeeIds.filter((employeeId) => entitled.has(normalizeEmployeeId(employeeId))),
+        };
+      }
+    }
+
+    if (settlementMode && occurrenceMonth === month) {
+      settlementGrants.push({
+        id: grant.id,
+        occurrenceDate,
+        grantedDays: roundHalf(grant.granted_days),
+        eligibleEmployeeIds: baseEligibility.employeeIds,
+      });
+    }
+
     for (const employeeId of eligibility.employeeIds) {
       const remaining = roundHalf(Number(grant.granted_days || 0) - (usedMap.get(`${grant.id}|${employeeId}`) || 0));
       if (!(remaining > 0)) continue;
@@ -82,7 +123,8 @@ export async function onRequestGet(context) {
         grantId: grant.id,
         grantType: grant.grant_type || "substitute",
         grantMonth: grant.grant_month,
-        occurrenceDate: grant.occurrence_date || grant.criterion_date || "",
+        occurrenceDate,
+        settlementMode,
         grantedDays: roundHalf(grant.granted_days),
         remaining,
         validFrom: grant.valid_from,
@@ -109,15 +151,16 @@ export async function onRequestGet(context) {
     .map((grant) => String(grant.occurrence_date || grant.criterion_date || ""))
     .filter((date) => date >= monthStart && date <= monthEnd))].sort();
 
-  // 같은 월의 실제 출근자 부여는 현재 분석 중인 출근기록으로 판정할 수 있도록 원본 설정을 함께 내려보냅니다.
+  // 같은 월의 계획 우선 부여는 현재 분석 중인 근무계획과 출근기록으로 판정할 수 있도록 원본 설정을 함께 내려보냅니다.
   const currentGrants = grants
-    .filter((grant) => grant.grant_month === month && grant.eligibility_mode === "worked_on_date")
+    .filter((grant) => String(grant.occurrence_date || grant.criterion_date || "").startsWith(month))
     .map((grant) => ({
       id: grant.id,
       grantType: grant.grant_type || "substitute",
       grantScope: grant.grant_scope || "route",
       grantMonth: grant.grant_month,
       occurrenceDate: grant.occurrence_date || grant.criterion_date || "",
+      settlementMode: (grant.grant_type || "substitute") === "substitute" && (grant.grant_scope || "route") === "route",
       grantedDays: roundHalf(grant.granted_days),
       validFrom: grant.valid_from,
       validTo: grant.valid_to,
@@ -127,7 +170,7 @@ export async function onRequestGet(context) {
       excludedEmployeeIds: parseEmployeeIds(grant.excluded_employee_ids_json),
     }));
 
-  return json({ lotsByEmployee, balances, annualLeaveBefore, currentGrants, autoUseDates });
+  return json({ lotsByEmployee, balances, annualLeaveBefore, currentGrants, settlementGrants, autoUseDates });
 }
 
 function endOfMonth(monthText) {
