@@ -1300,19 +1300,18 @@ function calculatePreviewLedger({ employeeId, substituteEvents, compensationEven
     });
   }
 
-  const substitute = consumePreviewPool(lots, "substitute", substituteEvents, targetMonth);
-  const compensation = consumePreviewPool(lots, "compensation", compensationEvents, targetMonth);
+  const pools = consumePreviewCombinedPools(lots, substituteEvents, compensationEvents, targetMonth);
   return {
-    availableSubstitute: substitute.available,
-    substituteApplied: substitute.applied,
-    remainingSubstitute: substitute.remaining,
-    expiredSubstitute: substitute.expired,
-    shortage: substitute.shortage,
-    availableCompensation: compensation.available,
-    compensationApplied: compensation.applied,
-    remainingCompensation: compensation.remaining,
-    expiredCompensation: compensation.expired,
-    compensationShortage: compensation.shortage,
+    availableSubstitute: pools.substitute.available,
+    substituteApplied: pools.substitute.applied,
+    remainingSubstitute: pools.substitute.remaining,
+    expiredSubstitute: pools.substitute.expired,
+    shortage: pools.substitute.shortage,
+    availableCompensation: pools.compensation.available,
+    compensationApplied: pools.compensation.applied,
+    remainingCompensation: pools.compensation.remaining,
+    expiredCompensation: pools.compensation.expired,
+    compensationShortage: pools.compensation.shortage,
   };
 }
 
@@ -1324,35 +1323,63 @@ function isCurrentGrantEligible(grant, employeeId, workedDates) {
   return true;
 }
 
-function consumePreviewPool(lots, grantType, events, targetMonth) {
-  const typedLots = lots.filter((lot) => lot.grantType === grantType);
+function consumePreviewCombinedPools(lots, substituteEvents, compensationEvents, targetMonth) {
   const monthStart = `${targetMonth}-01`;
   const monthEnd = endOfMonth(targetMonth);
   const nextMonthStart = startOfNextMonth(targetMonth);
-  const available = roundHalf(typedLots
-    .filter((lot) => lot.remaining > 0 && lot.validFrom <= monthEnd && lot.validTo >= monthStart)
-    .reduce((sum, lot) => sum + lot.remaining, 0));
+  const availableByType = {
+    substitute: roundHalf(lots
+      .filter((lot) => lot.grantType === "substitute" && lot.remaining > 0 && lot.validFrom <= monthEnd && lot.validTo >= monthStart)
+      .reduce((sum, lot) => sum + lot.remaining, 0)),
+    compensation: roundHalf(lots
+      .filter((lot) => lot.grantType === "compensation" && lot.remaining > 0 && lot.validFrom <= monthEnd && lot.validTo >= monthStart)
+      .reduce((sum, lot) => sum + lot.remaining, 0)),
+  };
+  const appliedByType = { substitute: 0, compensation: 0 };
+  const shortageByOrigin = { substitute: 0, compensation: 0 };
+  const events = [
+    ...(substituteEvents || []).map((event) => ({ ...event, originType: "substitute" })),
+    ...(compensationEvents || []).map((event) => ({ ...event, originType: "compensation" })),
+  ].filter((event) => event?.date && Number(event.days) > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
 
-  let applied = 0;
-  let shortage = 0;
-  for (const event of [...(events || [])].sort((a, b) => a.date.localeCompare(b.date))) {
+  for (const event of events) {
     let need = roundHalf(event.days);
-    const candidates = typedLots
+    const candidates = lots
       .filter((lot) => lot.remaining > 0 && lot.validFrom <= event.date && lot.validTo >= event.date)
-      .sort((a, b) => a.validTo.localeCompare(b.validTo) || a.validFrom.localeCompare(b.validFrom) || a.grantMonth.localeCompare(b.grantMonth));
+      .sort((a, b) => {
+        const aPriority = a.grantType === event.originType ? 0 : 1;
+        const bPriority = b.grantType === event.originType ? 0 : 1;
+        return aPriority - bPriority
+          || a.validTo.localeCompare(b.validTo)
+          || a.validFrom.localeCompare(b.validFrom)
+          || a.grantMonth.localeCompare(b.grantMonth);
+      });
     for (const lot of candidates) {
       if (need <= 0) break;
       const used = roundHalf(Math.min(need, lot.remaining));
       lot.remaining = roundHalf(lot.remaining - used);
       need = roundHalf(need - used);
-      applied = roundHalf(applied + used);
+      appliedByType[lot.grantType] = roundHalf((appliedByType[lot.grantType] || 0) + used);
     }
-    shortage = roundHalf(shortage + Math.max(0, need));
+    shortageByOrigin[event.originType] = roundHalf((shortageByOrigin[event.originType] || 0) + Math.max(0, need));
   }
 
-  const remaining = roundHalf(typedLots.filter((lot) => lot.remaining > 0 && lot.validTo >= nextMonthStart).reduce((sum, lot) => sum + lot.remaining, 0));
-  const expired = roundHalf(typedLots.filter((lot) => lot.remaining > 0 && lot.validTo >= monthStart && lot.validTo < nextMonthStart).reduce((sum, lot) => sum + lot.remaining, 0));
-  return { available, applied, remaining, expired, shortage };
+  const resultFor = (grantType, shortage) => ({
+    available: availableByType[grantType],
+    applied: appliedByType[grantType],
+    remaining: roundHalf(lots
+      .filter((lot) => lot.grantType === grantType && lot.remaining > 0 && lot.validTo >= nextMonthStart)
+      .reduce((sum, lot) => sum + lot.remaining, 0)),
+    expired: roundHalf(lots
+      .filter((lot) => lot.grantType === grantType && lot.remaining > 0 && lot.validTo >= monthStart && lot.validTo < nextMonthStart)
+      .reduce((sum, lot) => sum + lot.remaining, 0)),
+    shortage: roundHalf(shortage),
+  });
+  return {
+    substitute: resultFor("substitute", shortageByOrigin.substitute),
+    compensation: resultFor("compensation", shortageByOrigin.compensation),
+  };
 }
 
 function buildAttendanceMap(rows) {
@@ -2553,7 +2580,7 @@ function renderGrants(items) {
     const scopeLabel = item.grant_scope === "employee" ? `사번별 · ${item.employee_id || "-"}` : "경로 일괄";
     const criterion = item.eligibility_mode === "worked_on_date"
       ? `${item.criterion_date} 실제 출근자`
-      : item.grant_scope === "employee" ? "지정 사번" : "월 마감 대상 전원";
+      : item.grant_scope === "employee" ? "지정 사번" : `${item.eligibility_cutoff || `${item.grant_month}-01`} 이전 입사자`;
     return `<tr>
       <td>${escapeHtml(ROUTE_LABELS[item.route] || item.route)}</td>
       <td><span class="${item.grant_type === "compensation" ? "warning-pill" : "plan-pill"}">${escapeHtml(typeLabel)}</span></td>

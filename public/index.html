@@ -12,7 +12,7 @@
     <header class="topbar">
       <div>
         <p class="eyebrow">ATTENDANCE MANAGEMENT</p>
-        <h1>전자랜드 · 홈플러스 근태 관리 <span class="version-tag">v10</span></h1>
+        <h1>전자랜드 · 홈플러스 근태 관리 <span class="version-tag">v14</span></h1>
       </div>
       <div class="topbar-actions">
         <span id="storageBadge" class="badge neutral">저장 방식 확인 중</span>
@@ -271,10 +271,10 @@
               <div class="field-group" id="grantEligibilityField">
                 <label class="field-label" for="grantEligibility">경로 일괄 부여 대상</label>
                 <select id="grantEligibility" class="input">
-                  <option value="all">발생 월 마감 대상 전원</option>
+                  <option value="all">발생 월 1일 이전 입사자</option>
                   <option value="worked_on_date">기준일에 실제 출근한 직원만</option>
                 </select>
-                <p class="field-help">예: 5월 1일 실제 출근자에게만 1.5일을 부여하면, 5월 1일 휴무자는 자동 제외됩니다.</p>
+                <p class="field-help">기본값은 발생 월 1일 이전 입사자입니다. 예: 5월분은 5월 1일 이전, 6월분은 6월 1일 이전 입사자에게 부여됩니다. 실제 출근자 기준도 선택할 수 있습니다.</p>
               </div>
               <div class="field-group hidden" id="grantCriterionField"><label class="field-label" for="grantCriterionDate">실제 출근 기준일</label><input id="grantCriterionDate" class="input" type="date" /></div>
               <div class="field-group" id="grantExclusionField">

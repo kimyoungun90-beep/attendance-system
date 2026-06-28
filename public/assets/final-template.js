@@ -592,8 +592,8 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
   const lastDayCol0 = firstDayCol0 + daysInMonth - 1;
   const summaryStartCol0 = firstDayCol0 + daysInMonth;
   const summaryHeaders = [
-    "총 등록 현황", "출근 등록 횟수", "휴무 가능 개수", "휴무 사용 개수", "휴무 초과 개수",
-    "대체+보상 휴무 개수", "대체+보상 초과 개수", "출근 수정", "교육", "반차", "연차", "공가",
+    "총 등록 현황", "출근 등록 횟수", "휴무 가능 개수", "휴무 등록 개수", "휴무 초과 개수",
+    "대체+보상 가능 개수", "대체+보상 등록 개수", "대체+보상 초과 개수", "출근 수정", "교육", "반차", "연차", "공가",
     "무급휴무", "경조사", "총 일수", "연차 미신청", "연차 신청(승인)", "출근 증빙", "수정 완료", "비고",
   ];
   const summaryEndCol0 = summaryStartCol0 + summaryHeaders.length - 1;
@@ -607,7 +607,7 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
   addMerge(sheet, 3, 1, 3, lastCol0);
   setValue(sheet, "B2", `■ ${year}년 ${monthNo}월 ${result.routeLabel} 출퇴근현황  |  대상 ${ctx.people.length}명  |  ${daysInMonth}일  |  평일 ${countWeekdays(year, monthNo)}일  |  주말 ${countWeekendDays(year, monthNo)}일`);
   setValue(sheet, "B3", "※ ‘출근 미등록’ 시트의 ‘증빙여부’에 O를 입력하면 해당 직원·날짜의 ‘미입력’이 ‘출근’으로 자동 반영됩니다.");
-  setValue(sheet, "B4", "※ 휴무 초과는 대체·보상 휴무 잔여로 충당하며, 잔여까지 부족한 경우에만 ‘대체+보상 초과’가 빨간색으로 표시됩니다.");
+  setValue(sheet, "B4", "※ 휴무와 대체·보상휴가는 별도 집계합니다. 휴무 초과+대체·보상 등록이 대체·보상 가능 개수를 넘는 경우에만 ‘대체+보상 초과’가 빨간색으로 표시됩니다.");
   setValue(sheet, "N5", `${monthNo}월1일 \n근무계획\n일치확인`);
 
   for (let day = 1; day <= 31; day += 1) {
@@ -714,32 +714,36 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
 
     setFormula(sheet, addr(0), `COUNTIFS(${dailyRange},"<>",${dailyRange},"<>미입력")`, registeredCount);
     setFormula(sheet, addr(1), `COUNTIF(${dailyRange},"출근")`, displayedWorkCount);
-    setValue(sheet, addr(2), `${compactNumber(baseAllowance)}(${compactNumber(additionalAvailable)})`);
+    setValue(sheet, addr(2), baseAllowance);
     setFormula(sheet, addr(3), `COUNTIF(${dailyRange},"휴무")`, displayedDayoffCount);
-    setFormula(sheet, addr(4), `MAX(0,${addr(3)}-${compactNumber(baseAllowance)})`, displayedDayoffExcess);
-    setFormula(sheet, addr(5), `COUNTIF(${dailyRange},"대체휴일(1일)")+COUNTIF(${dailyRange},"대체휴무")+COUNTIF(${dailyRange},"보상휴가(1일)")+COUNTIF(${dailyRange},"보상휴가")+0.5*COUNTIF(${dailyRange},"대체휴일(0.5일)")+0.5*COUNTIF(${dailyRange},"보상휴가(0.5일)")`, combinedLeaveUsed);
-    setFormula(sheet, addr(6), `MAX(0,${addr(4)}+${addr(5)}-${compactNumber(additionalAvailable)})`, combinedShortage);
-    setValue(sheet, addr(7), clockCorrection);
-    setValue(sheet, addr(8), educationCount);
-    setValue(sheet, addr(9), halfCount);
-    setValue(sheet, addr(10), annualCount);
-    setValue(sheet, addr(11), publicCount);
-    setValue(sheet, addr(12), unpaidCount);
-    setValue(sheet, addr(13), familyCount);
-    setValue(sheet, addr(14), daysInMonth);
-    setValue(sheet, addr(15), roundHalf(Number(summary.annualMissingApplication || 0)));
-    setValue(sheet, addr(16), roundHalf(Number(summary.annualApproved ?? summary.currentAnnualLeave ?? 0)));
-    setValue(sheet, addr(17), evidenceNeeded ? "O" : "");
-    setValue(sheet, addr(18), "");
-    setValue(sheet, addr(19), [...new Set(noteParts)].join(" · "));
+    setFormula(sheet, addr(4), `MAX(0,${addr(3)}-${addr(2)})`, displayedDayoffExcess);
+    setValue(sheet, addr(5), additionalAvailable);
+    setFormula(sheet, addr(6), `COUNTIF(${dailyRange},"대체휴일(1일)")+COUNTIF(${dailyRange},"대체휴무")+COUNTIF(${dailyRange},"보상휴가(1일)")+COUNTIF(${dailyRange},"보상휴가")+0.5*COUNTIF(${dailyRange},"대체휴일(0.5일)")+0.5*COUNTIF(${dailyRange},"보상휴가(0.5일)")`, combinedLeaveUsed);
+    setFormula(sheet, addr(7), `MAX(0,${addr(4)}+${addr(6)}-${addr(5)})`, combinedShortage);
+    setValue(sheet, addr(8), clockCorrection);
+    setValue(sheet, addr(9), educationCount);
+    setValue(sheet, addr(10), halfCount);
+    setValue(sheet, addr(11), annualCount);
+    setValue(sheet, addr(12), publicCount);
+    setValue(sheet, addr(13), unpaidCount);
+    setValue(sheet, addr(14), familyCount);
+    setValue(sheet, addr(15), daysInMonth);
+    setValue(sheet, addr(16), roundHalf(Number(summary.annualMissingApplication || 0)));
+    setValue(sheet, addr(17), roundHalf(Number(summary.annualApproved ?? summary.currentAnnualLeave ?? 0)));
+    setValue(sheet, addr(18), evidenceNeeded ? "O" : "");
+    setValue(sheet, addr(19), "");
+    setValue(sheet, addr(20), [...new Set(noteParts)].join(" · "));
 
     for (let offset = 0; offset < summaryHeaders.length; offset += 1) {
       let tone = "normal";
+      if (offset === 2) tone = "dayoffAvailable";
+      if (offset === 3) tone = "dayoffUsed";
       if (offset === 4 && displayedDayoffExcess > 0) tone = combinedShortage > 0 ? "danger" : "covered";
-      if (offset === 5 && combinedLeaveUsed > 0) tone = "used";
-      if (offset === 6) tone = combinedShortage > 0 ? "danger" : "safe";
-      if (offset === 19) tone = noteParts.length ? "note" : "normal";
-      applySummaryMetricStyle(sheet, addr(offset), tone, offset === 19);
+      if (offset === 5) tone = "extraAvailable";
+      if (offset === 6) tone = combinedLeaveUsed > 0 ? "extraUsed" : "extraAvailable";
+      if (offset === 7) tone = combinedShortage > 0 ? "danger" : "safe";
+      if (offset === 20) tone = noteParts.length ? "note" : "normal";
+      applySummaryMetricStyle(sheet, addr(offset), tone, offset === 20);
     }
     row += 1;
   }
@@ -1345,6 +1349,10 @@ function applySummaryMetricStyle(sheet, address, tone = "normal", leftAlign = fa
     safe: { fill: "FFE2F0D9", font: "FF375623" },
     covered: { fill: "FFE2F0D9", font: "FF375623" },
     used: { fill: "FFE4DFEC", font: "FF5F497A" },
+    dayoffAvailable: { fill: "FFDDEBF7", font: "FF1F4E78" },
+    dayoffUsed: { fill: "FFE7E6E6", font: "FF404040" },
+    extraAvailable: { fill: "FFE4DFEC", font: "FF5F497A" },
+    extraUsed: { fill: "FFFCE4D6", font: "FF9E480E" },
     danger: { fill: "FFF4CCCC", font: "FF9C0006" },
     note: { fill: "FFFFF2CC", font: "FF7F6000" },
   };
@@ -1374,8 +1382,10 @@ function styleMainSheet(sheet, lastRow, daysInMonth, summaryStartCol0, summaryEn
   for (let i = 14; i < 45 && i < maxColCount; i += 1) cols[i] = { wch: i - 13 <= daysInMonth ? 10.5 : 3 };
   for (let i = summaryStartCol0; i <= summaryEndCol0; i += 1) cols[i] = { wch: 12 };
   cols[summaryStartCol0 + 2] = { wch: 14 };
-  cols[summaryStartCol0 + 5] = { wch: 14 };
-  cols[summaryStartCol0 + 6] = { wch: 14 };
+  cols[summaryStartCol0 + 3] = { wch: 14 };
+  cols[summaryStartCol0 + 5] = { wch: 16 };
+  cols[summaryStartCol0 + 6] = { wch: 16 };
+  cols[summaryStartCol0 + 7] = { wch: 16 };
   cols[summaryEndCol0] = { wch: 46 };
   sheet["!cols"] = cols;
   sheet["!rows"] = sheet["!rows"] || [];
@@ -1407,6 +1417,19 @@ function styleMainSheet(sheet, lastRow, daysInMonth, summaryStartCol0, summaryEn
     font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: "FF123B72" } },
     alignment: { horizontal: "center", vertical: "center", wrapText: true },
     border: thinBorder("FF9FBAD0"),
+  });
+  // 휴무 집계(AU~AW)와 대체·보상 집계(AX~AZ)를 색상으로 구분합니다.
+  styleCellRange(sheet, 4, summaryStartCol0 + 2, 4, summaryStartCol0 + 4, {
+    fill: { patternType: "solid", fgColor: { rgb: "FF5B9BD5" } },
+    font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: "FFFFFFFF" } },
+    alignment: { horizontal: "center", vertical: "center", wrapText: true },
+    border: thinBorder("FFFFFFFF"),
+  });
+  styleCellRange(sheet, 4, summaryStartCol0 + 5, 4, summaryStartCol0 + 7, {
+    fill: { patternType: "solid", fgColor: { rgb: "FF8064A2" } },
+    font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: "FFFFFFFF" } },
+    alignment: { horizontal: "center", vertical: "center", wrapText: true },
+    border: thinBorder("FFFFFFFF"),
   });
   styleCellRange(sheet, 6, 1, lastRow - 1, 13, {
     font: { name: "맑은 고딕", sz: 9, color: { rgb: "FF222222" } },

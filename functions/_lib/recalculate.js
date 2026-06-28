@@ -1,10 +1,12 @@
+import { normalizeEmployeeId, parseEvents, resolveEligibleEmployees } from "./leave-eligibility.js";
+
 const VALID_ROUTES = new Set(["homeplus", "electroland"]);
 const VALID_GRANT_TYPES = new Set(["substitute", "compensation"]);
 
 export async function recalculateRoute(db, route) {
   if (!VALID_ROUTES.has(route)) throw new Error("경로 구분이 올바르지 않습니다.");
 
-  const [closuresResult, factsResult, grantsResult] = await Promise.all([
+  const [closuresResult, factsResult, grantsResult, workforceResult, annualEmployeeResult] = await Promise.all([
     db.prepare(`
       SELECT id, company AS route, month
       FROM attendance_closures
@@ -23,11 +25,24 @@ export async function recalculateRoute(db, route) {
       WHERE route = ?
       ORDER BY grant_month ASC, valid_to ASC, valid_from ASC, created_at ASC
     `).bind(route).all(),
+    db.prepare(`
+      SELECT *
+      FROM attendance_workforce_members
+      WHERE route = ?
+      ORDER BY month ASC, id ASC
+    `).bind(route).all(),
+    db.prepare(`
+      SELECT *
+      FROM annual_leave_employees
+      WHERE route = ?
+    `).bind(route).all(),
   ]);
 
   const closures = closuresResult.results || [];
   const facts = factsResult.results || [];
   const grants = grantsResult.results || [];
+  const workforceRows = workforceResult.results || [];
+  const annualEmployeeRows = annualEmployeeResult.results || [];
 
   await runBatch(db, [
     db.prepare("DELETE FROM attendance_leave_allocations_v5 WHERE route = ?").bind(route),
@@ -43,13 +58,33 @@ export async function recalculateRoute(db, route) {
     factsByClosure.get(fact.closure_id).push(fact);
   }
 
-  const grantsByMonth = new Map();
-  for (const grant of grants) {
-    if (!grantsByMonth.has(grant.grant_month)) grantsByMonth.set(grant.grant_month, []);
-    grantsByMonth.get(grant.grant_month).push(grant);
+  const factsByMonth = new Map();
+  for (const fact of facts) {
+    if (!factsByMonth.has(fact.month)) factsByMonth.set(fact.month, []);
+    factsByMonth.get(fact.month).push(fact);
   }
 
   const lotsByEmployee = new Map();
+  // 부여분은 월 마감자료가 아니라 인력·매장매칭의 입사일을 기준으로 직원별 lot를 만듭니다.
+  // 예: 5월 발생분은 5월 1일 이전 입사자, 6월 발생분은 6월 1일 이전 입사자입니다.
+  for (const grant of grants) {
+    const eligibility = resolveEligibleEmployees(grant, {
+      workforceRows,
+      annualRows: annualEmployeeRows,
+      factsByMonth,
+    });
+    for (const employeeId of eligibility.employeeIds) {
+      if (!lotsByEmployee.has(employeeId)) lotsByEmployee.set(employeeId, []);
+      lotsByEmployee.get(employeeId).push({
+        grantId: grant.id,
+        grantType: VALID_GRANT_TYPES.has(grant.grant_type) ? grant.grant_type : "substitute",
+        grantMonth: grant.grant_month,
+        validFrom: grant.valid_from,
+        validTo: grant.valid_to,
+        remaining: roundHalf(grant.granted_days),
+      });
+    }
+  }
   const cumulativeAnnualByEmployee = new Map();
   const allocationTotals = new Map();
   const summaryStatements = [];
@@ -58,24 +93,6 @@ export async function recalculateRoute(db, route) {
 
   for (const closure of closures) {
     const monthFacts = factsByClosure.get(closure.id) || [];
-    const monthGrants = grantsByMonth.get(closure.month) || [];
-
-    for (const grant of monthGrants) {
-      for (const fact of monthFacts) {
-        if (!isEligibleForGrant(grant, fact)) continue;
-        const employeeId = normalizeEmployeeId(fact.employee_id);
-        if (!employeeId) continue;
-        if (!lotsByEmployee.has(employeeId)) lotsByEmployee.set(employeeId, []);
-        lotsByEmployee.get(employeeId).push({
-          grantId: grant.id,
-          grantType: VALID_GRANT_TYPES.has(grant.grant_type) ? grant.grant_type : "substitute",
-          grantMonth: grant.grant_month,
-          validFrom: grant.valid_from,
-          validTo: grant.valid_to,
-          remaining: roundHalf(grant.granted_days),
-        });
-      }
-    }
 
     let dayoffExcessPeople = 0;
     let substituteShortagePeople = 0;
@@ -102,10 +119,10 @@ export async function recalculateRoute(db, route) {
         .filter(validUsageEvent)
         .sort(eventSort);
 
-      const substitute = consumePool({
+      const combinedPools = consumeCombinedPools({
         lots,
-        grantType: "substitute",
-        events: substituteEvents,
+        substituteEvents,
+        compensationEvents,
         monthStart,
         monthEnd,
         nextMonthStart,
@@ -113,17 +130,8 @@ export async function recalculateRoute(db, route) {
         employeeId,
         allocationTotals,
       });
-      const compensation = consumePool({
-        lots,
-        grantType: "compensation",
-        events: compensationEvents,
-        monthStart,
-        monthEnd,
-        nextMonthStart,
-        closureId: closure.id,
-        employeeId,
-        allocationTotals,
-      });
+      const substitute = combinedPools.substitute;
+      const compensation = combinedPools.compensation;
 
       const currentAnnual = roundHalf(fact.annual_leave_used);
       const cumulativeAnnual = roundHalf((cumulativeAnnualByEmployee.get(employeeId) || 0) + currentAnnual);
@@ -207,19 +215,34 @@ export async function recalculateRoute(db, route) {
   return { affectedMonths: closures.length, affectedEmployees };
 }
 
-function consumePool({ lots, grantType, events, monthStart, monthEnd, nextMonthStart, closureId, employeeId, allocationTotals }) {
-  const typedLots = lots.filter((lot) => lot.grantType === grantType);
-  const available = roundHalf(typedLots
-    .filter((lot) => lot.remaining > 0 && lot.validFrom <= monthEnd && lot.validTo >= monthStart)
-    .reduce((sum, lot) => sum + lot.remaining, 0));
+function consumeCombinedPools({ lots, substituteEvents, compensationEvents, monthStart, monthEnd, nextMonthStart, closureId, employeeId, allocationTotals }) {
+  const availableByType = {
+    substitute: roundHalf(lots
+      .filter((lot) => lot.grantType === "substitute" && lot.remaining > 0 && lot.validFrom <= monthEnd && lot.validTo >= monthStart)
+      .reduce((sum, lot) => sum + lot.remaining, 0)),
+    compensation: roundHalf(lots
+      .filter((lot) => lot.grantType === "compensation" && lot.remaining > 0 && lot.validFrom <= monthEnd && lot.validTo >= monthStart)
+      .reduce((sum, lot) => sum + lot.remaining, 0)),
+  };
+  const appliedByType = { substitute: 0, compensation: 0 };
+  const shortageByOrigin = { substitute: 0, compensation: 0 };
+  const events = [
+    ...substituteEvents.map((event) => ({ ...event, originType: "substitute" })),
+    ...compensationEvents.map((event) => ({ ...event, originType: "compensation" })),
+  ].filter(validUsageEvent).sort(eventSort);
 
-  let applied = 0;
-  let shortage = 0;
-  for (const event of [...events].filter(validUsageEvent).sort(eventSort)) {
+  for (const event of events) {
     let need = roundHalf(event.days);
-    const candidates = typedLots
+    const candidates = lots
       .filter((lot) => lot.remaining > 0 && lot.validFrom <= event.date && lot.validTo >= event.date)
-      .sort((a, b) => a.validTo.localeCompare(b.validTo) || a.validFrom.localeCompare(b.validFrom) || a.grantMonth.localeCompare(b.grantMonth));
+      .sort((a, b) => {
+        const aPriority = a.grantType === event.originType ? 0 : 1;
+        const bPriority = b.grantType === event.originType ? 0 : 1;
+        return aPriority - bPriority
+          || a.validTo.localeCompare(b.validTo)
+          || a.validFrom.localeCompare(b.validFrom)
+          || a.grantMonth.localeCompare(b.grantMonth);
+      });
 
     for (const lot of candidates) {
       if (need <= 0) break;
@@ -227,54 +250,29 @@ function consumePool({ lots, grantType, events, monthStart, monthEnd, nextMonthS
       if (used <= 0) continue;
       lot.remaining = roundHalf(lot.remaining - used);
       need = roundHalf(need - used);
-      applied = roundHalf(applied + used);
-      const key = `${lot.grantId}|${closureId}|${employeeId}|${grantType}`;
+      appliedByType[lot.grantType] = roundHalf((appliedByType[lot.grantType] || 0) + used);
+      const key = `${lot.grantId}|${closureId}|${employeeId}|${lot.grantType}`;
       allocationTotals.set(key, roundHalf((allocationTotals.get(key) || 0) + used));
     }
-    shortage = roundHalf(shortage + Math.max(0, need));
+    shortageByOrigin[event.originType] = roundHalf((shortageByOrigin[event.originType] || 0) + Math.max(0, need));
   }
 
-  const remaining = roundHalf(typedLots
-    .filter((lot) => lot.remaining > 0 && lot.validTo >= nextMonthStart)
-    .reduce((sum, lot) => sum + lot.remaining, 0));
-  const expired = roundHalf(typedLots
-    .filter((lot) => lot.remaining > 0 && lot.validTo >= monthStart && lot.validTo < nextMonthStart)
-    .reduce((sum, lot) => sum + lot.remaining, 0));
+  const poolResult = (grantType, shortage) => ({
+    available: availableByType[grantType],
+    applied: appliedByType[grantType],
+    remaining: roundHalf(lots
+      .filter((lot) => lot.grantType === grantType && lot.remaining > 0 && lot.validTo >= nextMonthStart)
+      .reduce((sum, lot) => sum + lot.remaining, 0)),
+    expired: roundHalf(lots
+      .filter((lot) => lot.grantType === grantType && lot.remaining > 0 && lot.validTo >= monthStart && lot.validTo < nextMonthStart)
+      .reduce((sum, lot) => sum + lot.remaining, 0)),
+    shortage: roundHalf(shortage),
+  });
 
-  return { available, applied, remaining, expired, shortage };
-}
-
-function isEligibleForGrant(grant, fact) {
-  const employeeId = normalizeEmployeeId(fact.employee_id);
-  if (!employeeId) return false;
-
-  if (grant.grant_scope === "employee") {
-    if (employeeId !== normalizeEmployeeId(grant.employee_id)) return false;
-  } else {
-    const exclusions = new Set(parseEmployeeIds(grant.excluded_employee_ids_json));
-    if (exclusions.has(employeeId)) return false;
-  }
-
-  if (grant.eligibility_mode === "worked_on_date") {
-    if (!grant.criterion_date) return false;
-    const workedDates = new Set(parseEvents(fact.worked_dates_json).map((value) => typeof value === "string" ? value : value?.date).filter(Boolean));
-    if (!workedDates.has(grant.criterion_date)) return false;
-  }
-
-  return true;
-}
-
-function parseEmployeeIds(value) {
-  try {
-    const parsed = JSON.parse(value || "[]");
-    return Array.isArray(parsed) ? parsed.map(normalizeEmployeeId).filter(Boolean) : [];
-  } catch {
-    return [];
-  }
-}
-
-function normalizeEmployeeId(value) {
-  return String(value || "").trim().toUpperCase().replace(/\.0+$/, "").replace(/[\s\u00A0-]+/g, "").replace(/[^0-9A-Z가-힣]/g, "");
+  return {
+    substitute: poolResult("substitute", shortageByOrigin.substitute),
+    compensation: poolResult("compensation", shortageByOrigin.compensation),
+  };
 }
 
 function mergeEvents(...groups) {
@@ -299,15 +297,6 @@ export async function runBatch(db, statements, chunkSize = 80) {
   for (let index = 0; index < statements.length; index += chunkSize) {
     const chunk = statements.slice(index, index + chunkSize);
     if (chunk.length) await db.batch(chunk);
-  }
-}
-
-function parseEvents(value) {
-  try {
-    const parsed = JSON.parse(value || "[]");
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
   }
 }
 

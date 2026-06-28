@@ -1,4 +1,5 @@
 import { json, requireAuth } from "../_lib/auth.js";
+import { resolveEligibleEmployees, normalizeEmployeeId, parseEmployeeIds } from "../_lib/leave-eligibility.js";
 import { recalculateRoute } from "../_lib/recalculate.js";
 import { ensureSchema } from "../_lib/schema.js";
 
@@ -16,40 +17,61 @@ export async function onRequestGet(context) {
   const route = url.searchParams.get("route") || "";
   if (route && !VALID_ROUTES.has(route)) return json({ error: "경로 구분이 올바르지 않습니다." }, 400);
 
-  const grantsResult = route
-    ? await context.env.DB.prepare(`SELECT * FROM attendance_leave_grants_v5 WHERE route = ? ORDER BY grant_month DESC, created_at DESC`).bind(route).all()
-    : await context.env.DB.prepare(`SELECT * FROM attendance_leave_grants_v5 ORDER BY grant_month DESC, route ASC, created_at DESC`).all();
+  // 배포 전에 저장된 0명 부여·0일 잔여도 새 입사일 기준으로 즉시 다시 계산합니다.
+  const routesToRecalculate = route ? [route] : [...VALID_ROUTES];
+  for (const targetRoute of routesToRecalculate) {
+    await recalculateRoute(context.env.DB, targetRoute);
+  }
+
+  const routeWhere = route ? " WHERE route = ?" : "";
+  const routeBind = (statement) => route ? statement.bind(route) : statement;
+  const [grantsResult, factsResult, allocationsResult, workforceResult, annualResult] = await Promise.all([
+    routeBind(context.env.DB.prepare(`SELECT * FROM attendance_leave_grants_v5${routeWhere} ORDER BY grant_month DESC, created_at DESC`)).all(),
+    routeBind(context.env.DB.prepare(`SELECT * FROM attendance_monthly_employee_facts${routeWhere}`)).all(),
+    routeBind(context.env.DB.prepare(`
+      SELECT grant_id, ROUND(SUM(used_days), 1) AS used_days
+      FROM attendance_leave_allocations_v5${routeWhere}
+      GROUP BY grant_id
+    `)).all(),
+    routeBind(context.env.DB.prepare(`SELECT * FROM attendance_workforce_members${routeWhere} ORDER BY month, id`)).all(),
+    routeBind(context.env.DB.prepare(`SELECT * FROM annual_leave_employees${routeWhere}`)).all(),
+  ]);
+
   const grants = grantsResult.results || [];
   if (!grants.length) return json({ items: [] });
 
-  const factsResult = route
-    ? await context.env.DB.prepare(`SELECT f.* FROM attendance_monthly_employee_facts f WHERE f.route = ?`).bind(route).all()
-    : await context.env.DB.prepare(`SELECT f.* FROM attendance_monthly_employee_facts f`).all();
-  const facts = factsResult.results || [];
   const factsByRouteMonth = new Map();
-  for (const fact of facts) {
+  for (const fact of factsResult.results || []) {
     const key = `${fact.route}|${fact.month}`;
     if (!factsByRouteMonth.has(key)) factsByRouteMonth.set(key, []);
     factsByRouteMonth.get(key).push(fact);
   }
-
-  const allocationsResult = route
-    ? await context.env.DB.prepare(`SELECT grant_id, ROUND(SUM(used_days), 1) AS used_days FROM attendance_leave_allocations_v5 WHERE route = ? GROUP BY grant_id`).bind(route).all()
-    : await context.env.DB.prepare(`SELECT grant_id, ROUND(SUM(used_days), 1) AS used_days FROM attendance_leave_allocations_v5 GROUP BY grant_id`).all();
+  const workforceByRoute = groupByRoute(workforceResult.results || []);
+  const annualByRoute = groupByRoute(annualResult.results || []);
   const usedByGrant = new Map((allocationsResult.results || []).map((row) => [row.grant_id, roundHalf(row.used_days)]));
 
   const items = grants.map((grant) => {
-    const monthFacts = factsByRouteMonth.get(`${grant.route}|${grant.grant_month}`) || [];
-    const eligible = monthFacts.filter((fact) => isEligibleForGrant(grant, fact));
+    const factsByMonth = new Map();
+    for (const [key, rows] of factsByRouteMonth.entries()) {
+      const [factRoute, month] = key.split("|");
+      if (factRoute === grant.route) factsByMonth.set(month, rows);
+    }
+    const eligibility = resolveEligibleEmployees(grant, {
+      workforceRows: workforceByRoute.get(grant.route) || [],
+      annualRows: annualByRoute.get(grant.route) || [],
+      factsByMonth,
+    });
     const usedDays = usedByGrant.get(grant.id) || 0;
-    const assignedDays = roundHalf(roundHalf(grant.granted_days) * eligible.length);
+    const assignedDays = roundHalf(roundHalf(grant.granted_days) * eligibility.employeeIds.length);
     return {
       ...grant,
-      eligible_people: eligible.length,
+      eligible_people: eligibility.employeeIds.length,
       assigned_days: assignedDays,
       used_days: usedDays,
       unused_days: roundHalf(Math.max(0, assignedDays - usedDays)),
       excluded_count: parseEmployeeIds(grant.excluded_employee_ids_json).length,
+      eligibility_cutoff: eligibility.cutoffDate,
+      missing_hire_count: eligibility.missingHireCount,
     };
   });
 
@@ -143,42 +165,18 @@ export async function onRequestPost(context) {
   return json({ ok: true, id, replaced: Boolean(existing), affectedMonths }, 201);
 }
 
-function isEligibleForGrant(grant, fact) {
-  const employeeId = normalizeEmployeeId(fact.employee_id);
-  if (!employeeId) return false;
-  if (grant.grant_scope === "employee") {
-    if (employeeId !== normalizeEmployeeId(grant.employee_id)) return false;
-  } else if (new Set(parseEmployeeIds(grant.excluded_employee_ids_json)).has(employeeId)) {
-    return false;
+function groupByRoute(rows) {
+  const map = new Map();
+  for (const row of rows) {
+    if (!map.has(row.route)) map.set(row.route, []);
+    map.get(row.route).push(row);
   }
-
-  if (grant.eligibility_mode === "worked_on_date") {
-    const workedDates = new Set(parseJsonArray(fact.worked_dates_json).map((value) => typeof value === "string" ? value : value?.date).filter(Boolean));
-    return workedDates.has(grant.criterion_date);
-  }
-  return true;
-}
-
-function parseEmployeeIds(value) {
-  return parseJsonArray(value).map(normalizeEmployeeId).filter(Boolean);
-}
-
-function parseJsonArray(value) {
-  try {
-    const parsed = JSON.parse(value || "[]");
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+  return map;
 }
 
 function normalizeEmployeeIdList(value) {
   const values = Array.isArray(value) ? value : String(value || "").split(/[\s,;]+/);
   return [...new Set(values.map(normalizeEmployeeId).filter(Boolean))];
-}
-
-function normalizeEmployeeId(value) {
-  return String(value || "").trim().toUpperCase().replace(/\.0+$/, "").replace(/[\s\u00A0-]+/g, "").replace(/[^0-9A-Z가-힣]/g, "");
 }
 
 function roundHalf(value) {

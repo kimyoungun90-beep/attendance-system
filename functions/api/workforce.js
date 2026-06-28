@@ -1,4 +1,5 @@
 import { json, requireAuth } from "../_lib/auth.js";
+import { recalculateRoute } from "../_lib/recalculate.js";
 import { ensureSchema } from "../_lib/schema.js";
 
 const VALID_ROUTES = new Set(["homeplus", "electroland"]);
@@ -68,6 +69,9 @@ export async function onRequestPost(context) {
   if (!members.length) return json({ error: "저장할 직원 매칭 정보가 없습니다." }, 400);
   const portalMappings = normalizePortalMappings(portalMappingsRaw);
   const old = await context.env.DB.prepare(`SELECT * FROM attendance_workforce_uploads WHERE month = ? LIMIT 1`).bind(month).first();
+  const oldRoutesResult = old?.id
+    ? await context.env.DB.prepare(`SELECT DISTINCT route FROM attendance_workforce_members WHERE upload_id = ?`).bind(old.id).all()
+    : { results: [] };
   const replaced = Boolean(old?.id);
   const id = crypto.randomUUID();
   const contentType = file.type || "application/octet-stream";
@@ -153,6 +157,20 @@ export async function onRequestPost(context) {
       await context.env.FILES.delete(old.object_key).catch(() => {});
     }
 
+    const affectedRoutes = new Set([
+      ...(oldRoutesResult.results || []).map((row) => row.route),
+      ...finalMembers.map((row) => row.route),
+    ].filter((value) => VALID_ROUTES.has(value)));
+    let recalculatedMonths = 0;
+    for (const affectedRoute of affectedRoutes) {
+      try {
+        const recalculated = await recalculateRoute(context.env.DB, affectedRoute);
+        recalculatedMonths += Number(recalculated.affectedMonths || 0);
+      } catch (error) {
+        console.error("인력자료 저장 후 휴가 잔여 재계산 실패", affectedRoute, error);
+      }
+    }
+
     return json({
       ok: true,
       id,
@@ -162,6 +180,7 @@ export async function onRequestPost(context) {
       homeplusCount,
       portalCount,
       storageType,
+      recalculatedMonths,
     }, replaced ? 200 : 201);
   } catch (error) {
     if (storageType === "r2" && objectKey && context.env.FILES) await context.env.FILES.delete(objectKey).catch(() => {});
