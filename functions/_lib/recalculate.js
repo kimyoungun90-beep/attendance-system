@@ -116,6 +116,7 @@ export async function recalculateRoute(db, route) {
       );
       const substituteEvents = legacyEvents
         .filter((event) => !String(event.planStatus || "").startsWith("보상휴가"))
+        .filter((event) => String(event.source || "") !== "기본 휴무 초과")
         .filter(validUsageEvent)
         .sort(eventSort);
 
@@ -316,18 +317,22 @@ function roundHalf(value) {
 }
 
 function buildJudgment({ label, baseAllowance, basicDayoffUsed, explicitUsed, baseExcess, needed, remaining, expired, shortage }) {
-  if (shortage > 0) return `${label} ${formatDays(shortage)} 초과 사용`;
-  if (label === "대체휴무" && baseExcess > 0) {
-    const explicit = explicitUsed > 0 ? ` · 표기 대체휴무 ${formatDays(explicitUsed)} 사용` : "";
-    const expiredText = expired > 0 ? ` · ${formatDays(expired)} 만료` : "";
-    return `휴무 개수 초과 ${formatDays(baseExcess)} · 대체휴무 여분 활용${explicit} · 잔여 ${formatDays(remaining)}${expiredText}`;
+  if (label === "대체휴무") {
+    const parts = [];
+    if (baseExcess > 0) parts.push(`휴무 개수 초과 ${formatDays(baseExcess)}`);
+    else parts.push(`기본 휴무 ${formatDays(basicDayoffUsed)} / 기준 ${formatDays(baseAllowance)}`);
+    if (shortage > 0) parts.push(`대체휴무 ${formatDays(shortage)} 초과 사용`);
+    else if (needed > 0) parts.push(`대체휴무 ${formatDays(needed)} 사용 · 잔여 ${formatDays(remaining)}`);
+    else parts.push(`대체휴무 사용 없음 · 잔여 ${formatDays(remaining)}`);
+    if (expired > 0) parts.push(`${formatDays(expired)} 만료`);
+    return parts.join(" · ");
   }
+  if (shortage > 0) return `${label} ${formatDays(shortage)} 초과 사용`;
   if (needed > 0) {
     const expiredText = expired > 0 ? ` · ${formatDays(expired)} 만료` : "";
     return `${label} ${formatDays(needed)} 사용 · 잔여 ${formatDays(remaining)}${expiredText}`;
   }
   if (expired > 0) return `미사용 ${label} ${formatDays(expired)} 만료`;
-  if (label === "대체휴무") return `정상 · 기본 휴무 ${formatDays(basicDayoffUsed)} / 기준 ${formatDays(baseAllowance)} · 잔여 ${formatDays(remaining)}`;
   return `${label} 사용 없음 · 잔여 ${formatDays(remaining)}`;
 }
 

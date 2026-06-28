@@ -98,16 +98,22 @@ function buildContext(result, daysInMonth) {
   const issueMap = new Map();
   for (const issue of result.mismatchRows || []) addIssue(issueMap, issue.employeeId, issue.date, issue.reason || issue.result);
   for (const summary of result.employeeSummaries || []) {
-    for (const event of summary.substituteEvents || []) {
-      if (event.source === "기본 휴무 초과") addIssue(issueMap, summary.employeeId, event.date, `기본 휴무 기준 ${daysText(summary.baseAllowance)} 초과분`);
+    for (const event of summary.baseExcessEvents || []) {
+      addIssue(issueMap, summary.employeeId, event.date, `기본 휴무 기준 ${daysText(summary.baseAllowance)} 초과분`);
     }
-    const combinedShortage = Number(summary.combinedShortage ?? Math.max(0,
-      Number(summary.baseExcess || 0) + Number(summary.explicitSubDayoffUsed || 0) + Number(summary.compensationNeeded || 0)
-      - Number(summary.availableSubstitute || 0) - Number(summary.availableCompensation || 0)
-    ));
+    const combinedAvailable = roundHalf(Number(summary.availableSubstitute || 0) + Number(summary.availableCompensation || 0));
+    const combinedUsed = roundHalf(Number(summary.explicitSubDayoffUsed || 0) + Number(summary.compensationLeaveUsed ?? summary.compensationNeeded ?? 0));
+    const combinedShortage = Number(summary.combinedShortage ?? Math.max(0, combinedUsed - combinedAvailable));
     if (combinedShortage > 0) {
-      const combinedEvents = [...(summary.substituteEvents || []), ...(summary.compensationEvents || [])];
-      for (const event of combinedEvents) addIssue(issueMap, summary.employeeId, event.date, `대체·보상 휴무 잔여 부족 · 총 ${daysText(combinedShortage)} 초과 사용`);
+      const combinedEvents = [...(summary.substituteEvents || []), ...(summary.compensationEvents || [])]
+        .sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
+      let running = 0;
+      for (const event of combinedEvents) {
+        running = roundHalf(running + Number(event.days || 0));
+        if (running > combinedAvailable) {
+          addIssue(issueMap, summary.employeeId, event.date, `대체·보상 휴무 잔여 부족 · 총 ${daysText(combinedShortage)} 초과 사용`);
+        }
+      }
     }
   }
 
@@ -716,13 +722,13 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
     const explicitSubstituteUsed = roundHalf(Number(summary.explicitSubDayoffUsed || 0));
     const compensationUsed = roundHalf(Number(summary.compensationLeaveUsed ?? summary.compensationNeeded ?? 0));
     const combinedLeaveUsed = roundHalf(explicitSubstituteUsed + compensationUsed);
-    const totalAdditionalNeed = roundHalf(displayedDayoffExcess + combinedLeaveUsed);
-    const combinedShortage = roundHalf(Math.max(0, totalAdditionalNeed - additionalAvailable));
+    // 기본 휴무 초과와 대체·보상 초과는 서로 합산하지 않습니다.
+    const combinedShortage = roundHalf(Math.max(0, combinedLeaveUsed - additionalAvailable));
 
     const noteParts = [];
     if (member.note) noteParts.push(member.note);
     if (plannedDayoffCount !== displayedDayoffCount) noteParts.push(`계획 휴무 ${plannedDayoffCount}일 / 최종 표시 휴무 ${displayedDayoffCount}일`);
-    if (displayedDayoffExcess > 0 && combinedShortage === 0) noteParts.push(`휴무 초과 ${compactNumber(displayedDayoffExcess)}일은 대체·보상 휴무로 충당`);
+    if (displayedDayoffExcess > 0) noteParts.push(`기본 휴무 ${compactNumber(displayedDayoffExcess)}일 초과`);
     for (let day = 1; day <= daysInMonth; day += 1) {
       if (daily[day]?.issues?.length) noteParts.push(`${monthNo}/${day} ${daily[day].issues.join("/")}`);
     }
@@ -740,7 +746,7 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
     setFormula(sheet, addr(4), `MAX(0,${addr(3)}-${addr(2)})`, displayedDayoffExcess);
     setValue(sheet, addr(5), additionalAvailable);
     setFormula(sheet, addr(6), `COUNTIF(${dailyRange},"대체휴일(1일)")+COUNTIF(${dailyRange},"대체휴무")+COUNTIF(${dailyRange},"보상휴가(1일)")+COUNTIF(${dailyRange},"보상휴가")+0.5*COUNTIF(${dailyRange},"대체휴일(0.5일)")+0.5*COUNTIF(${dailyRange},"보상휴가(0.5일)")`, combinedLeaveUsed);
-    setFormula(sheet, addr(7), `MAX(0,${addr(4)}+${addr(6)}-${addr(5)})`, combinedShortage);
+    setFormula(sheet, addr(7), `MAX(0,${addr(6)}-${addr(5)})`, combinedShortage);
     setValue(sheet, addr(8), clockCorrection);
     setValue(sheet, addr(9), educationCount);
     setValue(sheet, addr(10), halfCount);
@@ -759,7 +765,7 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
       let tone = "normal";
       if (offset === 2) tone = "dayoffAvailable";
       if (offset === 3) tone = "dayoffUsed";
-      if (offset === 4 && displayedDayoffExcess > 0) tone = combinedShortage > 0 ? "danger" : "covered";
+      if (offset === 4) tone = displayedDayoffExcess > 0 ? "danger" : "safe";
       if (offset === 5) tone = "extraAvailable";
       if (offset === 6) tone = combinedLeaveUsed > 0 ? "extraUsed" : "extraAvailable";
       if (offset === 7) tone = combinedShortage > 0 ? "danger" : "safe";
@@ -1313,19 +1319,11 @@ function copyRowStyle(sheet, sourceRow, targetRow, maxCol) {
 function applyIssueStyle(sheet, address, messages = []) {
   if (!sheet[address]) sheet[address] = { t: "s", v: "" };
   const base = sheet[address].s ? clone(sheet[address].s) : {};
-  const text = (messages || []).join(" ");
-  let fill = "FFFFE699";
-  if (text.includes("출근기록") || text.includes("미입력") || text.includes("잔여 부족") || text.includes("초과 사용")) {
-    fill = "FFF4CCCC";
-  } else if ((text.includes("휴무") || text.includes("휴가")) && text.includes("출근")) {
-    fill = "FFFCE4D6";
-  } else if (text.includes("인력·매장매칭") || text.includes("사번 없음")) {
-    fill = "FFE4DFEC";
-  }
+  // 계획·근태 상이, 미입력, 잔여 부족 등 확인이 필요한 일자는 한 가지 색으로 통일합니다.
   sheet[address].s = {
     ...base,
-    fill: { patternType: "solid", fgColor: { rgb: fill } },
-    font: { ...(base.font || {}), name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FF000000" } },
+    fill: { patternType: "solid", fgColor: { rgb: "FFF33E0D" } },
+    font: { ...(base.font || {}), name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FFFFFFFF" } },
     alignment: { ...(base.alignment || {}), horizontal: "center", vertical: "center", wrapText: true },
     border: thinBorder("FFB7C3D0"),
   };
@@ -1347,12 +1345,13 @@ function applyStatusStyle(sheet, address, value) {
   if (!sheet[address]) return;
   const text = String(value || "");
   let fill = null;
+  let fontColor = "FF000000";
   let bold = false;
   if (text === "출근") fill = "FFE2F0D9";
-  else if (text === "미입력") { fill = "FFF4CCCC"; bold = true; }
+  else if (text === "미입력") { fill = "FFF33E0D"; fontColor = "FFFFFFFF"; bold = true; }
   else if (text === "휴무") fill = "FFE7E6E6";
-  else if (text.includes("대체휴일")) fill = "FFE4DFEC";
-  else if (text.includes("보상휴가")) fill = "FFFCE4D6";
+  else if (text.includes("대체휴일") || text === "대체휴무") fill = "FFBFBFBF";
+  else if (text.includes("보상휴가")) fill = "FFFFFF00";
   else if (["연차", "공가", "휴가", "경조", "무급휴가"].includes(text)) fill = "FFDDEBF7";
   else if (["오전반차", "오후반차", "반일근무"].includes(text)) fill = "FFFFF2CC";
   else if (text === "교육") fill = "FFDDEBF7";
@@ -1361,7 +1360,7 @@ function applyStatusStyle(sheet, address, value) {
   sheet[address].s = {
     ...base,
     fill: { patternType: "solid", fgColor: { rgb: fill } },
-    font: { ...(base.font || {}), name: "맑은 고딕", sz: 10, bold, color: { rgb: "FF000000" } },
+    font: { ...(base.font || {}), name: "맑은 고딕", sz: 10, bold, color: { rgb: fontColor } },
   };
 }
 
@@ -1377,14 +1376,14 @@ function applySummaryMetricStyle(sheet, address, tone = "normal", leftAlign = fa
     dayoffUsed: { fill: "FFE7E6E6", font: "FF404040" },
     extraAvailable: { fill: "FFE4DFEC", font: "FF5F497A" },
     extraUsed: { fill: "FFFCE4D6", font: "FF9E480E" },
-    danger: { fill: "FFF4CCCC", font: "FF9C0006" },
+    danger: { fill: "FFF33E0D", font: "FFFFFFFF" },
     note: { fill: "FFFFF2CC", font: "FF7F6000" },
   };
   const selected = palette[tone] || palette.normal;
   sheet[address].s = {
     ...base,
     fill: { patternType: "solid", fgColor: { rgb: selected.fill } },
-    font: { ...(base.font || {}), name: "맑은 고딕", sz: 10, bold: tone === "danger", color: { rgb: "FF000000" } },
+    font: { ...(base.font || {}), name: "맑은 고딕", sz: 10, bold: tone === "danger", color: { rgb: selected.font } },
     alignment: { ...(base.alignment || {}), horizontal: leftAlign ? "left" : "center", vertical: "center", wrapText: true },
     border: thinBorder("FFD9E1E8"),
   };
@@ -1406,11 +1405,12 @@ function styleMainSheet(sheet, lastRow, daysInMonth, summaryStartCol0, summaryEn
   cols[13] = { wch: 13 };
   for (let i = 14; i < 45 && i < maxColCount; i += 1) cols[i] = { wch: i - 13 <= daysInMonth ? 10.5 : 3 };
   for (let i = summaryStartCol0; i <= summaryEndCol0; i += 1) cols[i] = { wch: 12 };
-  cols[summaryStartCol0 + 2] = { wch: 14 };
-  cols[summaryStartCol0 + 3] = { wch: 14 };
-  cols[summaryStartCol0 + 5] = { wch: 16 };
-  cols[summaryStartCol0 + 6] = { wch: 16 };
-  cols[summaryStartCol0 + 7] = { wch: 16 };
+  cols[summaryStartCol0 + 2] = { wch: 13.78 };
+  cols[summaryStartCol0 + 3] = { wch: 13.78 };
+  cols[summaryStartCol0 + 4] = { wch: 13.78 };
+  cols[summaryStartCol0 + 5] = { wch: 10.89 };
+  cols[summaryStartCol0 + 6] = { wch: 10.89 };
+  cols[summaryStartCol0 + 7] = { wch: 10.89 };
   cols[summaryEndCol0] = { wch: 46 };
   sheet["!cols"] = cols;
 
@@ -1418,7 +1418,7 @@ function styleMainSheet(sheet, lastRow, daysInMonth, summaryStartCol0, summaryEn
   sheet["!rows"][1] = { hpt: 27 };
   sheet["!rows"][2] = { hpt: 27 };
   sheet["!rows"][3] = { hpt: 27 };
-  sheet["!rows"][4] = { hpt: 24.8 };
+  sheet["!rows"][4] = { hpt: 33 };
   sheet["!rows"][5] = { hpt: 14.3 };
   for (let r = 6; r < lastRow; r += 1) sheet["!rows"][r] = { hpt: 15.3 };
 
@@ -1434,7 +1434,7 @@ function styleMainSheet(sheet, lastRow, daysInMonth, summaryStartCol0, summaryEn
   });
   styleCellRange(sheet, 2, 1, 3, 9, {
     fill: { patternType: "solid", fgColor: { rgb: "FFFFFFFF" } },
-    font: { name: "맑은 고딕", sz: 16, bold: true, color: { rgb: "FF0000FF" } },
+    font: { name: "맑은 고딕", sz: 15, bold: true, color: { rgb: "FF0000FF" } },
     alignment: { horizontal: "left", vertical: "center", wrapText: true },
   });
 

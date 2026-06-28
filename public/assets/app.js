@@ -1050,7 +1050,9 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       source: "기본 휴무 초과",
       planStatus: "휴무",
     }));
-    const substituteEvents = [...explicitSubstituteEvents, ...baseExcessEvents].sort((a, b) => a.date.localeCompare(b.date));
+    // 기본 휴무 초과는 대체휴무 사용과 별개로 관리합니다.
+    // 대체휴무 잔여는 근무계획에 실제로 "대체휴일"로 등록한 일자만 차감합니다.
+    const substituteEvents = [...explicitSubstituteEvents].sort((a, b) => a.date.localeCompare(b.date));
 
     for (let day = 1; day <= lastDay; day += 1) {
       const planStatus = normalizePlanCode(person.plans[day]);
@@ -1114,7 +1116,7 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
     const explicitSubDayoffUsed = roundHalf(explicitSubstituteEvents.reduce((sum, event) => sum + event.days, 0));
     const compensationLeaveUsed = roundHalf(compensationEvents.reduce((sum, event) => sum + event.days, 0));
     const baseExcess = roundHalf(Math.max(0, basicDayoffUsed - baseAllowance));
-    const substituteNeeded = roundHalf(baseExcess + explicitSubDayoffUsed);
+    const substituteNeeded = explicitSubDayoffUsed;
     const compensationNeeded = compensationLeaveUsed;
     const annualLeaveUsed = roundHalf(annualLeaveEvents.reduce((sum, event) => sum + event.days, 0));
     const preview = calculatePreviewLedger({
@@ -1126,7 +1128,7 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       ledger,
     });
     const combinedAvailable = roundHalf(Number(preview.availableSubstitute || 0) + Number(preview.availableCompensation || 0));
-    const combinedLeaveUsed = roundHalf(baseExcess + explicitSubDayoffUsed + compensationLeaveUsed);
+    const combinedLeaveUsed = roundHalf(explicitSubDayoffUsed + compensationLeaveUsed);
     const combinedShortage = roundHalf(Math.max(0, combinedLeaveUsed - combinedAvailable));
     const combinedRemaining = roundHalf(Math.max(0, combinedAvailable - combinedLeaveUsed));
     const cumulativeAnnualLeave = roundHalf(Number(ledger.annualLeaveBefore[person.employeeId] || 0) + annualLeaveUsed);
@@ -1135,6 +1137,7 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       basicDayoffUsed,
       explicitSubDayoffUsed,
       baseExcess,
+      baseExcessEvents,
       substituteNeeded,
       remainingSubstitute: preview.remainingSubstitute,
       expiredSubstitute: preview.expiredSubstitute,
@@ -1158,6 +1161,7 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       explicitSubDayoffUsed,
       compensationLeaveUsed,
       baseExcess,
+      baseExcessEvents,
       substituteNeeded,
       compensationNeeded,
       annualLeaveUsed,
@@ -1535,18 +1539,14 @@ function annualLeaveValue(planCode) {
 }
 
 function buildDayoffJudgment({ baseAllowance, basicDayoffUsed, explicitSubDayoffUsed, baseExcess, substituteNeeded, remainingSubstitute, expiredSubstitute, shortage }) {
-  if (shortage > 0) return `대체휴무 ${formatDays(shortage)} 초과 사용`;
-  if (baseExcess > 0) {
-    const explicit = explicitSubDayoffUsed > 0 ? ` · 표기 대체휴무 ${formatDays(explicitSubDayoffUsed)} 사용` : "";
-    const expired = expiredSubstitute > 0 ? ` · ${formatDays(expiredSubstitute)} 만료` : "";
-    return `휴무 개수 초과 ${formatDays(baseExcess)} · 대체휴무 여분 활용${explicit} · 잔여 ${formatDays(remainingSubstitute)}${expired}`;
-  }
-  if (substituteNeeded > 0) {
-    const expired = expiredSubstitute > 0 ? ` · ${formatDays(expiredSubstitute)} 만료` : "";
-    return `대체휴무 ${formatDays(substituteNeeded)} 사용 · 잔여 ${formatDays(remainingSubstitute)}${expired}`;
-  }
-  if (expiredSubstitute > 0) return `기본 휴무 정상 · 미사용 대체휴무 ${formatDays(expiredSubstitute)} 만료`;
-  return `정상 · 기본 휴무 ${formatDays(basicDayoffUsed)} / 기준 ${formatDays(baseAllowance)} · 잔여 ${formatDays(remainingSubstitute)}`;
+  const parts = [];
+  if (baseExcess > 0) parts.push(`휴무 개수 초과 ${formatDays(baseExcess)}`);
+  else parts.push(`기본 휴무 ${formatDays(basicDayoffUsed)} / 기준 ${formatDays(baseAllowance)}`);
+  if (shortage > 0) parts.push(`대체휴무 ${formatDays(shortage)} 초과 사용`);
+  else if (substituteNeeded > 0) parts.push(`대체휴무 ${formatDays(substituteNeeded)} 사용 · 잔여 ${formatDays(remainingSubstitute)}`);
+  else parts.push(`대체휴무 사용 없음 · 잔여 ${formatDays(remainingSubstitute)}`);
+  if (expiredSubstitute > 0) parts.push(`${formatDays(expiredSubstitute)} 만료`);
+  return parts.join(" · ");
 }
 
 function buildCompensationJudgment({ compensationNeeded, remainingCompensation, expiredCompensation, compensationShortage }) {
@@ -1882,10 +1882,8 @@ function appendCorrectedPlanSheet(workbook, result) {
     addPlanExportIssue(issueMap, issue.employeeId, issue.date, issue.reason || issue.result);
   }
   for (const summary of result.employeeSummaries) {
-    for (const event of summary.substituteEvents || []) {
-      if (event.source === "기본 휴무 초과") {
-        addPlanExportIssue(issueMap, summary.employeeId, event.date, `기본 휴무 기준 ${formatDays(summary.baseAllowance)} 초과분`);
-      }
+    for (const event of summary.baseExcessEvents || []) {
+      addPlanExportIssue(issueMap, summary.employeeId, event.date, `기본 휴무 기준 ${formatDays(summary.baseAllowance)} 초과분`);
     }
     if (Number(summary.shortage || 0) > 0) {
       for (const event of summary.substituteEvents || []) {
@@ -2386,13 +2384,13 @@ function applyServerSummaries(serverRows) {
       expiredCompensation: roundHalf(row.expired_compensation),
       compensationShortage: roundHalf(row.compensation_shortage),
       combinedAvailable: roundHalf(Number(row.available_substitute || 0) + Number(row.available_compensation || 0)),
-      combinedLeaveUsed: roundHalf(Number(row.base_excess || 0) + Number(row.explicit_sub_dayoff_used || 0) + Number(row.compensation_needed || 0)),
+      combinedLeaveUsed: roundHalf(Number(row.explicit_sub_dayoff_used || 0) + Number(row.compensation_needed || 0)),
       combinedRemaining: roundHalf(Math.max(0,
         Number(row.available_substitute || 0) + Number(row.available_compensation || 0)
-        - Number(row.base_excess || 0) - Number(row.explicit_sub_dayoff_used || 0) - Number(row.compensation_needed || 0)
+        - Number(row.explicit_sub_dayoff_used || 0) - Number(row.compensation_needed || 0)
       )),
       combinedShortage: roundHalf(Math.max(0,
-        Number(row.base_excess || 0) + Number(row.explicit_sub_dayoff_used || 0) + Number(row.compensation_needed || 0)
+        Number(row.explicit_sub_dayoff_used || 0) + Number(row.compensation_needed || 0)
         - Number(row.available_substitute || 0) - Number(row.available_compensation || 0)
       )),
       currentAnnualLeave: roundHalf(row.current_annual_leave),
