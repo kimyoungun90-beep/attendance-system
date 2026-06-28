@@ -112,19 +112,22 @@ function buildContext(result, daysInMonth) {
     for (const event of summary.baseExcessEvents || []) {
       addIssue(issueMap, summary.employeeId, event.date, `기본 휴무 기준 ${daysText(summary.baseAllowance)} 초과분`);
     }
-    const combinedAvailable = roundHalf(Number(summary.availableSubstitute || 0) + Number(summary.availableCompensation || 0));
-    const combinedUsed = roundHalf(Number(summary.substituteNeeded ?? summary.explicitSubDayoffUsed ?? 0) + Number(summary.compensationLeaveUsed ?? summary.compensationNeeded ?? 0));
-    const combinedShortage = Number(summary.combinedShortage ?? Math.max(0, combinedUsed - combinedAvailable));
-    if (combinedShortage > 0) {
-      const combinedEvents = [...(summary.substituteEvents || []), ...(summary.compensationEvents || [])]
-        .sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
-      let running = 0;
-      for (const event of combinedEvents) {
-        running = roundHalf(running + Number(event.days || 0));
-        if (running > combinedAvailable) {
-          addIssue(issueMap, summary.employeeId, event.date, `대체·보상 휴무 잔여 부족 · 총 ${daysText(combinedShortage)} 초과 사용`);
-        }
-      }
+    // 대체휴무와 보상휴가는 각각의 초과 발생일만 빨간색으로 표시합니다.
+    const substituteShortageDates = resolveLeaveShortageDates(
+      summary.substituteEvents || [],
+      Number(summary.shortage || 0),
+      summary.substituteShortageDates || [],
+    );
+    for (const date of substituteShortageDates) {
+      addIssue(issueMap, summary.employeeId, date, `대체휴무 잔여 부족 · 총 ${daysText(summary.shortage)} 초과 사용`);
+    }
+    const compensationShortageDates = resolveLeaveShortageDates(
+      summary.compensationEvents || [],
+      Number(summary.compensationShortage || 0),
+      summary.compensationShortageDates || [],
+    );
+    for (const date of compensationShortageDates) {
+      addIssue(issueMap, summary.employeeId, date, `보상휴가 잔여 부족 · 총 ${daysText(summary.compensationShortage)} 초과 사용`);
     }
   }
 
@@ -170,6 +173,12 @@ function buildContext(result, daysInMonth) {
   for (const person of people) {
     const daily = {};
     const summary = summaryById.get(person.employeeId) || {};
+    const substituteShortageDateSet = new Set(resolveLeaveShortageDates(
+      summary.substituteEvents || [], Number(summary.shortage || 0), summary.substituteShortageDates || [],
+    ));
+    const compensationShortageDateSet = new Set(resolveLeaveShortageDates(
+      summary.compensationEvents || [], Number(summary.compensationShortage || 0), summary.compensationShortageDates || [],
+    ));
     for (let day = 1; day <= daysInMonth; day += 1) {
       const date = `${result.targetMonth}-${String(day).padStart(2, "0")}`;
       const planStatus = normalizePlan(person.plan?.plans?.[day]);
@@ -187,6 +196,8 @@ function buildContext(result, daysInMonth) {
         attendance: finalAttendance,
         evidence,
         display: evidence ? "출근" : dailyDisplay(planStatus, finalAttendance),
+        substituteShortage: substituteShortageDateSet.has(date),
+        compensationShortage: compensationShortageDateSet.has(date),
         // 근무 계획의 단순 미입력은 O로 해소하지만, 휴무·연차 등 계획 상이는 유지합니다.
         issues: evidenceResolvesMissing ? [] : [...new Set(issues)],
       };
@@ -195,6 +206,23 @@ function buildContext(result, daysInMonth) {
   }
 
   return { workforce, workforceById, planById, attendanceByKey, summaryById, issueMap, people, dailyByKey };
+}
+
+function resolveLeaveShortageDates(events = [], shortage = 0, recordedDates = []) {
+  const explicit = [...new Set((recordedDates || []).map(String).filter(Boolean))].sort();
+  if (explicit.length || Number(shortage || 0) <= 0) return explicit;
+  // 구버전 결과에는 초과 일자 배열이 없으므로, 날짜순 사용분의 마지막 초과 수량부터 역산합니다.
+  let remaining = roundHalf(Number(shortage || 0));
+  const dates = new Set();
+  const ordered = [...(events || [])]
+    .filter((event) => event?.date && Number(event.days || 0) > 0)
+    .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  for (const event of ordered) {
+    if (remaining <= 0) break;
+    dates.add(String(event.date));
+    remaining = roundHalf(remaining - Number(event.days || 0));
+  }
+  return [...dates].sort();
 }
 
 
@@ -732,7 +760,9 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
 function buildPlanAttendanceMatchSheet(workbook, result, ctx, year, monthNo) {
   const regionOrder = ["서울", "경인", "충청", "경북", "경남", "전라"];
   const evidenceSet = new Set((result.evidenceOverrides || []).map(String));
-  const rows = (result.mismatchRows || []).map((row) => {
+  const rows = (result.mismatchRows || [])
+    .filter((row) => row.issueType !== "missing_plan")
+    .map((row) => {
     const member = findMember(ctx, row.employeeId, row.store) || {};
     const evidenceKey = `${normalizeId(row.employeeId)}|${row.date}`;
     const evidenced = Boolean(row.evidenced || evidenceSet.has(evidenceKey));
@@ -1208,6 +1238,8 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
         if (!String(item?.display || "").includes("미입력")) applyIssueStyle(sheet, address, item.issues);
         issueCount += 1;
       }
+      // 대체휴무·보상휴가의 실제 초과 사용일은 일반 경고색보다 진한 빨간색을 우선 적용합니다.
+      if (item?.substituteShortage || item?.compensationShortage) applyLeaveShortageStyle(sheet, address);
       // 증빙 O는 계획 상이 여부와 무관하게 상담사근태 셀을 최종 확정색으로 표시합니다.
       if (item?.evidence) applyEvidenceWorkStyle(sheet, address);
       if (NON_WORK_CODES.has(item?.planStatus) && item?.attendance?.hasClockIn) clockCorrection += 1;
@@ -1885,8 +1917,8 @@ function applyStatusStyle(sheet, address, value) {
   else if (text === "출ㆍ계 미입력") { fill = "FFC00000"; fontColor = "FFFFFFFF"; bold = true; }
   else if (text === "미입력") { fill = "FFF33E0D"; fontColor = "FFFFFFFF"; bold = true; }
   else if (text === "휴무") fill = "FFE7E6E6";
-  else if (text.includes("대체휴일") || text === "대체휴무") fill = "FFBFBFBF";
-  else if (text.includes("보상휴가")) fill = "FFFFFF00";
+  else if (text.includes("대체휴일") || text === "대체휴무") { fill = "FFA9D08E"; fontColor = "FF000000"; }
+  else if (text.includes("보상휴가")) { fill = "FF548235"; fontColor = "FFFFFFFF"; bold = true; }
   else if (["연차", "공가", "휴가", "경조", "무급휴가"].includes(text)) fill = "FFDDEBF7";
   else if (["오전반차", "오후반차", "반일근무"].includes(text)) fill = "FFFFF2CC";
   else if (text === "교육") fill = "FFDDEBF7";
@@ -1896,6 +1928,18 @@ function applyStatusStyle(sheet, address, value) {
     ...base,
     fill: { patternType: "solid", fgColor: { rgb: fill } },
     font: { ...(base.font || {}), name: "맑은 고딕", sz: text.includes("미입력") ? 8 : 10, bold, color: { rgb: fontColor } },
+  };
+}
+
+function applyLeaveShortageStyle(sheet, address) {
+  if (!sheet[address]) return;
+  const base = sheet[address].s ? clone(sheet[address].s) : {};
+  sheet[address].s = {
+    ...base,
+    fill: { patternType: "solid", fgColor: { rgb: "FFC00000" } },
+    font: { ...(base.font || {}), name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FFFFFFFF" } },
+    alignment: { ...(base.alignment || {}), horizontal: "center", vertical: "center", wrapText: true },
+    border: thinBorder("FFB7C3D0"),
   };
 }
 
@@ -2195,7 +2239,7 @@ function extendRefForAddress(sheet, address) {
 
 async function applyLiveEvidenceConditionalFormatting(buffer, result) {
   // v24의 문자열 직접 삽입 방식은 일부 Excel 환경에서 sheet3.xml 복구 경고를 만들 수 있었습니다.
-  // v26은 XML DOM 검증을 유지하고, Excel 기본 DXF(bgColor) 방식으로 채우기를 생성합니다.
+  // v27은 XML DOM 검증을 유지하고, Excel 기본 DXF(bgColor) 방식으로 채우기를 생성합니다.
   if (typeof JSZip === "undefined" || typeof DOMParser === "undefined" || typeof XMLSerializer === "undefined") return buffer;
   try {
     const zip = await JSZip.loadAsync(buffer);

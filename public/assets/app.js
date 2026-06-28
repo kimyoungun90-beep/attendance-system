@@ -902,24 +902,13 @@ function applyEvidenceOverrides(result, evidenceKeys = []) {
   // 휴무·연차 등인데 실제 출근한 건은 계획 상이이므로 유지합니다.
   result.unexpectedRows = (result.unexpectedRows || []).map(markEvidence);
   result.mismatchRows = (result.mismatchRows || []).flatMap((row) => {
+    // 계획이 비어 있어도 실제 출근 또는 증빙 출근이 확인되면 정상 출근으로 인정하여 상이 목록에서도 제외합니다.
+    if (row.issueType === "missing_plan" && (row.evidenced || row.actualIn || row.changedIn || row.actualStatus)) return [];
     if (!hasEvidence(row)) return [row];
     // 근무계획이 있는 단순 출근 미입력은 증빙 O로 완전히 해소합니다.
     if (row.issueType === "missing_clock_in") return [];
-    // 계획과 출근이 모두 없던 건은 증빙으로 출근만 해소되므로 계획 미입력 검토로 전환합니다.
-    if (row.issueType === "missing_plan_and_clock") {
-      return [{
-        ...row,
-        issueType: "missing_plan",
-        missingType: "계획 미입력",
-        actualStatus: "출근",
-        clockStatus: "증빙",
-        result: "검토 필요",
-        reason: "근무계획은 미입력이나 출근증빙이 있어 출근으로 인정 · 근무계획 확인 필요",
-        evidenced: true,
-      }];
-    }
-    // 계획 미입력은 출근이 확인되어도 계획 누락 자체가 남으므로 계획&근태 상이에 유지합니다.
-    if (row.issueType === "missing_plan") return [{ ...row, evidenced: true }];
+    // 계획과 출근이 모두 없던 건도 증빙 O가 들어오면 실제 출근으로 확정하고 상이 목록에서 제외합니다.
+    if (row.issueType === "missing_plan_and_clock") return [];
     return [{ ...row, evidenced: true }];
   });
   result.missingPeople = uniquePeople(result.missingRows);
@@ -1266,20 +1255,9 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       let hasPrimaryIssue = false;
 
       if (planStatus === "공백" && attendanceValue.hasClockIn) {
-        // 계획은 비어 있어도 실제 출근이 확인되면 출근은 정상 인정합니다.
-        // 다만 계획 누락 자체는 계획&근태 상이 인원에서만 검토 대상으로 남깁니다.
-        addMismatch(makeMismatchRow({
-          issueType: "missing_plan",
-          missingType: "계획 미입력",
-          route,
-          person,
-          date,
-          dateObject,
-          planStatus,
-          attendanceValue,
-          result: "검토 필요",
-          reason: "근무계획은 미입력이나 실제 출근기록이 있어 출근으로 인정 · 근무계획 확인 필요",
-        }));
+        // 계획이 비어 있어도 실제 출근시간·변경 출근시간·실제근태 출근이 확인되면 정상 출근으로 인정합니다.
+        // 출근 미등록, 계획&근태 상이, 전체 요약본, 매니저별 이상 근태에는 넣지 않습니다.
+        // 일반 불일치 비교도 건너뛰도록 처리 완료 상태로 표시합니다.
         hasPrimaryIssue = true;
       } else if (planStatus === "공백" && !attendanceValue.hasClockIn) {
         const row = makeIssueRow({
@@ -1436,11 +1414,13 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       remainingSubstitute: preview.remainingSubstitute,
       expiredSubstitute: preview.expiredSubstitute,
       shortage: preview.shortage,
+      substituteShortageDates: preview.substituteShortageDates || [],
       availableCompensation: preview.availableCompensation,
       compensationApplied: preview.compensationApplied,
       remainingCompensation: preview.remainingCompensation,
       expiredCompensation: preview.expiredCompensation,
       compensationShortage: preview.compensationShortage,
+      compensationShortageDates: preview.compensationShortageDates || [],
       combinedAvailable,
       combinedLeaveUsed,
       combinedRemaining,
@@ -1592,11 +1572,13 @@ function calculatePreviewLedger({ employeeId, substituteEvents, compensationEven
     remainingSubstitute: pools.substitute.remaining,
     expiredSubstitute: pools.substitute.expired,
     shortage: pools.substitute.shortage,
+    substituteShortageDates: pools.substitute.shortageDates,
     availableCompensation: pools.compensation.available,
     compensationApplied: pools.compensation.applied,
     remainingCompensation: pools.compensation.remaining,
     expiredCompensation: pools.compensation.expired,
     compensationShortage: pools.compensation.shortage,
+    compensationShortageDates: pools.compensation.shortageDates,
   };
 }
 
@@ -1622,6 +1604,7 @@ function consumePreviewCombinedPools(lots, substituteEvents, compensationEvents,
   };
   const appliedByType = { substitute: 0, compensation: 0 };
   const shortageByOrigin = { substitute: 0, compensation: 0 };
+  const shortageDatesByOrigin = { substitute: new Set(), compensation: new Set() };
   const events = [
     ...(substituteEvents || []).map((event) => ({ ...event, originType: "substitute" })),
     ...(compensationEvents || []).map((event) => ({ ...event, originType: "compensation" })),
@@ -1647,7 +1630,9 @@ function consumePreviewCombinedPools(lots, substituteEvents, compensationEvents,
       need = roundHalf(need - used);
       appliedByType[lot.grantType] = roundHalf((appliedByType[lot.grantType] || 0) + used);
     }
-    shortageByOrigin[event.originType] = roundHalf((shortageByOrigin[event.originType] || 0) + Math.max(0, need));
+    const eventShortage = roundHalf(Math.max(0, need));
+    shortageByOrigin[event.originType] = roundHalf((shortageByOrigin[event.originType] || 0) + eventShortage);
+    if (eventShortage > 0) shortageDatesByOrigin[event.originType].add(String(event.date));
   }
 
   const resultFor = (grantType, shortage) => ({
@@ -1660,6 +1645,7 @@ function consumePreviewCombinedPools(lots, substituteEvents, compensationEvents,
       .filter((lot) => lot.grantType === grantType && lot.remaining > 0 && lot.validTo >= monthStart && lot.validTo < nextMonthStart)
       .reduce((sum, lot) => sum + lot.remaining, 0)),
     shortage: roundHalf(shortage),
+    shortageDates: [...shortageDatesByOrigin[grantType]].sort(),
   });
   return {
     substitute: resultFor("substitute", shortageByOrigin.substitute),
