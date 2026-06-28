@@ -360,6 +360,9 @@ async function initialize(db) {
     `CREATE INDEX IF NOT EXISTS idx_route_substitute_grants_period ON route_substitute_grants(route, grant_month, valid_to, valid_from)`,
     `CREATE INDEX IF NOT EXISTS idx_route_substitute_allocations_employee ON route_substitute_allocations(route, employee_id, month, grant_id)`,
     `CREATE INDEX IF NOT EXISTS idx_monthly_summaries_v3_route_month ON attendance_monthly_summaries_v3(route, month, employee_id)`,
+    `UPDATE attendance_leave_grants_v5
+       SET occurrence_date = COALESCE(NULLIF(criterion_date, ''), grant_month || '-01')
+       WHERE occurrence_date IS NULL OR TRIM(occurrence_date) = ''`,
     `CREATE INDEX IF NOT EXISTS idx_leave_grants_v5_route_month ON attendance_leave_grants_v5(route, grant_month, grant_type, grant_scope)`,
     `CREATE INDEX IF NOT EXISTS idx_leave_allocations_v5_employee ON attendance_leave_allocations_v5(route, grant_type, employee_id, month, grant_id)`,
     `CREATE INDEX IF NOT EXISTS idx_attendance_archive_files_route_month ON attendance_archive_files(route, month, created_at DESC)`,

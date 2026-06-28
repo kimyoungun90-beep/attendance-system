@@ -1,5 +1,5 @@
 import { json, requireAuth } from "../_lib/auth.js";
-import { normalizeEmployeeId, resolveEligibleEmployees } from "../_lib/leave-eligibility.js";
+import { normalizeEmployeeId, parseEmployeeIds, resolveEligibleEmployees } from "../_lib/leave-eligibility.js";
 import { ensureSchema } from "../_lib/schema.js";
 
 const VALID_ROUTES = new Set(["homeplus", "electroland"]);
@@ -63,8 +63,12 @@ export async function onRequestGet(context) {
 
   // 대상 월에 사용 가능한 모든 부여분을 직원별 lot로 바로 내려보냅니다.
   // grant_month가 7월이어도 사용 시작일이 5월이면 6월 분석에서 사용할 수 있습니다.
+  const grants = grantsResult.results || [];
   const lotsByEmployee = {};
-  for (const grant of grantsResult.results || []) {
+  for (const grant of grants) {
+    // 대상 월의 실제 출근자 부여는 현재 업로드한 근태를 기준으로 브라우저에서 판정합니다.
+    // 이미 저장돼 있던 같은 월 마감자료로 미리 배분하면 수정본 재분석 시 과거 출근자가 남을 수 있습니다.
+    if (grant.grant_month === month && grant.eligibility_mode === "worked_on_date") continue;
     const eligibility = resolveEligibleEmployees(grant, {
       workforceRows: workforceResult.results || [],
       annualRows: annualEmployeeResult.results || [],
@@ -78,7 +82,7 @@ export async function onRequestGet(context) {
         grantId: grant.id,
         grantType: grant.grant_type || "substitute",
         grantMonth: grant.grant_month,
-        occurrenceDate: grant.occurrence_date || "",
+        occurrenceDate: grant.occurrence_date || grant.criterion_date || "",
         grantedDays: roundHalf(grant.granted_days),
         remaining,
         validFrom: grant.valid_from,
@@ -100,8 +104,30 @@ export async function onRequestGet(context) {
     };
   }
 
-  // currentGrants는 기존 브라우저 이중 합산 방지를 위해 비웁니다.
-  return json({ lotsByEmployee, balances, annualLeaveBefore, currentGrants: [] });
+  const autoUseDates = [...new Set(grants
+    .filter((grant) => (grant.grant_type || "substitute") === "substitute")
+    .map((grant) => String(grant.occurrence_date || grant.criterion_date || ""))
+    .filter((date) => date >= monthStart && date <= monthEnd))].sort();
+
+  // 같은 월의 실제 출근자 부여는 현재 분석 중인 출근기록으로 판정할 수 있도록 원본 설정을 함께 내려보냅니다.
+  const currentGrants = grants
+    .filter((grant) => grant.grant_month === month && grant.eligibility_mode === "worked_on_date")
+    .map((grant) => ({
+      id: grant.id,
+      grantType: grant.grant_type || "substitute",
+      grantScope: grant.grant_scope || "route",
+      grantMonth: grant.grant_month,
+      occurrenceDate: grant.occurrence_date || grant.criterion_date || "",
+      grantedDays: roundHalf(grant.granted_days),
+      validFrom: grant.valid_from,
+      validTo: grant.valid_to,
+      eligibilityMode: grant.eligibility_mode || "worked_on_date",
+      criterionDate: grant.criterion_date || grant.occurrence_date || "",
+      employeeId: grant.employee_id || "",
+      excludedEmployeeIds: parseEmployeeIds(grant.excluded_employee_ids_json),
+    }));
+
+  return json({ lotsByEmployee, balances, annualLeaveBefore, currentGrants, autoUseDates });
 }
 
 function endOfMonth(monthText) {

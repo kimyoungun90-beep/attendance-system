@@ -35,3 +35,6 @@
 .secondary-heading{margin-top:28px;padding-top:22px;border-top:1px solid #e5eaf0}
 .compact-box{min-height:64px}
 @media(max-width:1100px){.annual-leave-layout{grid-template-columns:1fr}}
+
+/* v19 monthly closure comparison */
+.compare-panel{padding:24px;overflow:hidden}.compare-heading{align-items:flex-start}.compare-upload-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:8px}.compare-run{display:block;min-width:240px;margin:18px auto 0}.closure-compare-table{min-width:1120px}.closure-compare-table td:nth-child(7),.closure-compare-table td:nth-child(8){font-weight:800}.archive-actions{min-width:430px}.compare-panel .grant-summary{grid-template-columns:repeat(5,minmax(0,1fr))}@media(max-width:980px){.compare-upload-grid{grid-template-columns:1fr}.compare-panel .grant-summary{grid-template-columns:repeat(2,1fr)}}@media(max-width:700px){.compare-panel{padding:16px}.compare-panel .grant-summary{grid-template-columns:1fr}.archive-actions{min-width:220px}}

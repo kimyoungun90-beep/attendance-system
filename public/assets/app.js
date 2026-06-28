@@ -21,6 +21,9 @@ const state = {
   attendanceFile: null,
   annualFile: null,
   referenceFile: null,
+  closureBaseFile: null,
+  closureTargetFile: null,
+  closureComparison: null,
   result: null,
   priorLedger: emptyLedger(),
   backend: { available: false, configured: false, loggedIn: false, fileStorageConfigured: false, fileStorageMode: "d1" },
@@ -45,6 +48,8 @@ async function init() {
   setupDropzone("attendanceDropzone", "attendanceFile", setAttendanceFile);
   setupDropzone("annualDropzone", "annualFile", setAnnualFile);
   setupDropzone("referenceDropzone", "referenceFile", setReferenceFile);
+  setupDropzone("closureBaseDropzone", "closureBaseFile", setClosureBaseFile);
+  setupDropzone("closureTargetDropzone", "closureTargetFile", setClosureTargetFile);
   await checkBackend();
   syncRouteRuleHelp();
   if (state.backend.loggedIn) await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard()]);
@@ -70,6 +75,10 @@ function bindEvents() {
   $("#refreshArchiveButton").addEventListener("click", loadArchiveFiles);
   $("#archiveRouteFilter").addEventListener("change", loadArchiveFiles);
   $("#archiveMonthFilter").addEventListener("change", loadArchiveFiles);
+  $("#archiveFile").addEventListener("change", autoDetectArchiveKind);
+  $("#compareClosuresButton").addEventListener("click", analyzeClosureComparison);
+  $("#resetClosureCompare").addEventListener("click", resetClosureComparison);
+  $("#exportClosureCompare").addEventListener("click", exportClosureComparison);
   $("#workforceForm").addEventListener("submit", saveWorkforceFile);
   $("#refreshWorkforceButton").addEventListener("click", loadWorkforceUploads);
   $("#annualBaselineForm").addEventListener("submit", saveAnnualBaseline);
@@ -190,7 +199,21 @@ function setAnnualFile(file) {
 
 function setReferenceFile(file) {
   state.referenceFile = file;
-  $("#referenceFileName").textContent = file ? file.name : "증빙 O 입력 최종본 또는 비교 파일 선택";
+  $("#referenceFileName").textContent = file ? file.name : "증빙 O 입력 최종본 선택";
+}
+
+function setClosureBaseFile(file) {
+  state.closureBaseFile = file;
+  state.closureComparison = null;
+  $("#closureBaseFileName").textContent = file ? file.name : "기준 최종본을 선택하거나 끌어놓기";
+  resetClosureComparisonOutput();
+}
+
+function setClosureTargetFile(file) {
+  state.closureTargetFile = file;
+  state.closureComparison = null;
+  $("#closureTargetFileName").textContent = file ? file.name : "비교 최종본을 선택하거나 끌어놓기";
+  resetClosureComparisonOutput();
 }
 
 async function analyzeFiles() {
@@ -226,9 +249,9 @@ async function analyzeFiles() {
     state.priorLedger = await loadPriorLedger(route, targetMonth);
 
     const parsedReference = referenceWorkbook ? parseReferenceFinalWorkbook(referenceWorkbook) : null;
-    const result = compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, ledger: state.priorLedger });
-    appendWorkforceMatchingIssues(result, workforce, plan, route, targetMonth);
     const evidenceOverrides = parsedReference?.evidenceKeys || [];
+    const result = compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, ledger: state.priorLedger, evidenceKeys: evidenceOverrides });
+    appendWorkforceMatchingIssues(result, workforce, plan, route, targetMonth);
     applyEvidenceOverrides(result, evidenceOverrides);
     const parsedAnnual = annualWorkbook
       ? parseAnnualApplications(annualWorkbook, targetMonth)
@@ -287,6 +310,7 @@ async function loadPriorLedger(route, month) {
       lotsByEmployee: data.lotsByEmployee || {},
       annualLeaveBefore: data.annualLeaveBefore || {},
       currentGrants: data.currentGrants || [],
+      autoUseDates: data.autoUseDates || [],
     };
   } catch (error) {
     showToast(`${error.message}. 이번 분석은 저장된 이전 월 누적을 제외하고 계산합니다.`);
@@ -295,7 +319,7 @@ async function loadPriorLedger(route, month) {
 }
 
 function emptyLedger() {
-  return { lotsByEmployee: {}, annualLeaveBefore: {}, currentGrants: [] };
+  return { lotsByEmployee: {}, annualLeaveBefore: {}, currentGrants: [], autoUseDates: [] };
 }
 
 async function fileToWorkbookSheets(file) {
@@ -772,24 +796,42 @@ function parseReferenceFinalWorkbook(sheets) {
   };
 }
 
+function findEvidenceDateColumn(headers) {
+  return findHeaderIndex(headers, [
+    "발생일", "근무일자", "일자", "날짜", "근태수정필요일", "근태수정필요일자",
+    "근태수정일", "근태수정필요일", "수정필요일", "수정일자",
+  ]);
+}
+
+function findDateLikeColumn(matrix, startRow = 0) {
+  const sampleRows = (matrix || []).slice(startRow, startRow + 40);
+  const maxCols = Math.max(0, ...sampleRows.map((row) => row?.length || 0));
+  let best = { col: -1, count: 0 };
+  for (let col = 0; col < maxCols; col += 1) {
+    const count = sampleRows.reduce((sum, row) => sum + (parseReferenceFinalDate(row?.[col]) ? 1 : 0), 0);
+    if (count > best.count) best = { col, count };
+  }
+  return best.count >= 2 ? best.col : -1;
+}
+
 function parseEvidenceOverrides(sheets) {
   const evidenceSheet = (sheets || []).find((sheet) => /출근\s*미등록|증빙/.test(String(sheet.sheetName || "")));
   if (!evidenceSheet) return [];
   const matrix = evidenceSheet.matrix || [];
   const headerIndex = findFlexibleHeaderRow(matrix, (headers) => (
     findHeaderIndex(headers, ["사번", "사원번호"]) >= 0
-    && findHeaderIndex(headers, ["발생일", "근무일자", "일자", "날짜"]) >= 0
     && findHeaderIndex(headers, ["증빙여부(O입력)", "증빙여부", "출근증빙", "증빙"]) >= 0
   ));
   if (headerIndex < 0) return [];
   const headers = (matrix[headerIndex] || []).map(normalizeHeader);
   const employeeIdCol = findHeaderIndex(headers, ["사번", "사원번호"]);
-  const dateCol = findHeaderIndex(headers, ["발생일", "근무일자", "일자", "날짜"]);
+  let dateCol = findEvidenceDateColumn(headers);
   const evidenceCol = findHeaderIndex(headers, ["증빙여부(O입력)", "증빙여부", "출근증빙", "증빙"]);
+  if (dateCol < 0) dateCol = findDateLikeColumn(matrix, headerIndex + 1);
   const keys = new Set();
   for (const row of matrix.slice(headerIndex + 1)) {
     const employeeId = normalizeEmployeeId(row[employeeIdCol]);
-    const date = parseReferenceFinalDate(row[dateCol]);
+    const date = dateCol >= 0 ? parseReferenceFinalDate(row[dateCol]) : "";
     const mark = String(row[evidenceCol] ?? "").trim().toUpperCase().replace(/\s+/g, "");
     const approved = ["O", "0", "○", "ㅇ", "Y", "YES", "TRUE", "완료", "증빙완료"].includes(mark);
     if (approved && looksLikeEmployeeId(employeeId) && date) keys.add(`${employeeId}|${date}`);
@@ -1068,7 +1110,8 @@ function parsePlanHeaderDay(value, targetMonth) {
   return null;
 }
 
-function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, ledger }) {
+function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, ledger, evidenceKeys = [] }) {
+  const evidenceSet = new Set((evidenceKeys || []).map(String));
   const attendanceIds = new Set(attendance.rows.map((row) => row.employeeId));
   const planIds = new Set(plan.rows.map((row) => row.employeeId));
   const matchedIds = [...planIds].filter((id) => attendanceIds.has(id));
@@ -1103,7 +1146,8 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
     for (let day = 1; day <= daysInMonth; day += 1) {
       const date = `${targetMonth}-${String(day).padStart(2, "0")}`;
       const planCode = normalizePlanCode(person.plans[day]);
-      const attendanceValue = attendanceMap.get(`${person.employeeId}|${date}`) || emptyAttendanceValue();
+      const evidenceKey = `${normalizeEmployeeId(person.employeeId)}|${date}`;
+      const attendanceValue = withEvidenceAttendance(attendanceMap.get(`${person.employeeId}|${date}`) || emptyAttendanceValue(), evidenceSet.has(evidenceKey));
       const automaticDays = planCode === "휴무" && !attendanceValue.hasClockIn
         ? automaticSubstituteDays(ledger, person.employeeId, date)
         : 0;
@@ -1140,7 +1184,8 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       const planStatus = normalizePlanCode(person.plans[day]);
       const date = `${targetMonth}-${String(day).padStart(2, "0")}`;
       const dateObject = new Date(`${date}T00:00:00`);
-      const attendanceValue = attendanceMap.get(`${person.employeeId}|${date}`) || emptyAttendanceValue();
+      const evidenceKey = `${normalizeEmployeeId(person.employeeId)}|${date}`;
+      const attendanceValue = withEvidenceAttendance(attendanceMap.get(`${person.employeeId}|${date}`) || emptyAttendanceValue(), evidenceSet.has(evidenceKey));
       let hasPrimaryIssue = false;
 
       if (REQUIRED_CLOCK_PLANS.has(planStatus) && !attendanceValue.hasClockIn) {
@@ -1370,13 +1415,11 @@ function assembleResultCollections(base) {
 }
 
 function automaticSubstituteDays(ledger, employeeId, date) {
-  const normalizedId = normalizeEmployeeId(employeeId);
-  const lots = ledger?.lotsByEmployee?.[normalizedId] || ledger?.lotsByEmployee?.[employeeId] || [];
-  const availableOnDate = lots
-    .filter((lot) => lot.grantType === "substitute" && lot.occurrenceDate === date && Number(lot.remaining || 0) > 0)
-    .reduce((sum, lot) => sum + Math.min(Number(lot.remaining || 0), Number(lot.grantedDays || lot.remaining || 0)), 0);
-  // 같은 날짜에 부여 기록이 여러 개 있어도 하루 자동 사용은 최대 1일입니다.
-  return roundHalf(Math.min(1, availableOnDate));
+  // 자동 휴무 처리일은 “그날 새로 부여받은 직원”에게만 한정하지 않습니다.
+  // 같은 경로의 대체휴무 발생일이면, 계획이 휴무이고 출근시간이 없는 직원은
+  // 기존 보유 대체휴무에서 1일을 사용합니다. 잔여가 없으면 초과 사용으로 표시됩니다.
+  const dates = new Set((ledger?.autoUseDates || []).map(String));
+  return dates.has(date) ? 1 : 0;
 }
 
 function calculatePreviewLedger({ employeeId, substituteEvents, compensationEvents, workedDates, targetMonth, ledger }) {
@@ -1389,16 +1432,19 @@ function calculatePreviewLedger({ employeeId, substituteEvents, compensationEven
     remaining: roundHalf(lot.remaining),
   }));
 
+  const existingGrantIds = new Set(lots.map((lot) => String(lot.grantId || "")));
   for (const grant of ledger.currentGrants || []) {
-    if (grant.grantMonth !== targetMonth || !isCurrentGrantEligible(grant, employeeId, workedDates)) continue;
+    if (grant.grantMonth !== targetMonth || existingGrantIds.has(String(grant.id || "")) || !isCurrentGrantEligible(grant, employeeId, workedDates)) continue;
     lots.push({
       grantId: grant.id,
       grantType: grant.grantType || "substitute",
       grantMonth: grant.grantMonth,
+      occurrenceDate: grant.occurrenceDate || "",
       validFrom: grant.validFrom,
       validTo: grant.validTo,
       remaining: roundHalf(grant.grantedDays),
     });
+    existingGrantIds.add(String(grant.id || ""));
   }
 
   const pools = consumePreviewCombinedPools(lots, substituteEvents, compensationEvents, targetMonth);
@@ -1497,6 +1543,16 @@ function buildAttendanceMap(rows) {
     });
   }
   return map;
+}
+
+function withEvidenceAttendance(attendanceValue, evidenced) {
+  if (!evidenced) return attendanceValue;
+  return {
+    ...attendanceValue,
+    hasClockIn: true,
+    actualStatus: attendanceValue.actualStatus || "출근",
+    changedIn: attendanceValue.changedIn || attendanceValue.actualIn || "증빙",
+  };
 }
 
 function emptyAttendanceValue() {
@@ -2262,6 +2318,151 @@ async function saveClosure() {
   }
 }
 
+
+function resetClosureComparisonOutput() {
+  state.closureComparison = null;
+  const summary = $("#closureCompareSummary");
+  const wrap = $("#closureCompareTableWrap");
+  const body = $("#closureCompareTableBody");
+  if (summary) { summary.innerHTML = ""; summary.classList.add("hidden"); }
+  if (wrap) wrap.classList.add("hidden");
+  if (body) body.innerHTML = "";
+  if ($("#exportClosureCompare")) $("#exportClosureCompare").disabled = true;
+}
+
+function resetClosureComparison() {
+  state.closureBaseFile = null;
+  state.closureTargetFile = null;
+  $("#closureBaseFile").value = "";
+  $("#closureTargetFile").value = "";
+  $("#closureBaseFileName").textContent = "기준 최종본을 선택하거나 끌어놓기";
+  $("#closureTargetFileName").textContent = "비교 최종본을 선택하거나 끌어놓기";
+  resetClosureComparisonOutput();
+  $("#closureCompareNotice").textContent = "보관함의 결과·수정본에서 ‘기준본 A’ 또는 ‘비교본 B’를 눌러도 바로 선택할 수 있습니다.";
+}
+
+async function analyzeClosureComparison() {
+  const button = $("#compareClosuresButton");
+  try {
+    if (!state.closureBaseFile || !state.closureTargetFile) throw new Error("기준 마감본 A와 비교 마감본 B를 모두 선택해 주세요.");
+    button.disabled = true;
+    button.textContent = "두 파일 비교 중...";
+    const [baseSheets, targetSheets] = await Promise.all([
+      fileToWorkbookSheets(state.closureBaseFile),
+      fileToWorkbookSheets(state.closureTargetFile),
+    ]);
+    const base = parseReferenceFinalWorkbook(baseSheets);
+    const target = parseReferenceFinalWorkbook(targetSheets);
+    const comparison = compareTwoFinalWorkbooks(base, target);
+    state.closureComparison = {
+      ...comparison,
+      baseFileName: state.closureBaseFile.name,
+      targetFileName: state.closureTargetFile.name,
+    };
+    renderClosureComparison(state.closureComparison);
+    showToast(comparison.rows.length ? `월 마감 최종본 차이 ${comparison.rows.length}건을 찾았습니다.` : "두 월 마감 최종본이 모두 일치합니다.");
+  } catch (error) {
+    console.error(error);
+    showToast(error.message || "월 마감 최종본 비교 중 오류가 발생했습니다.");
+  } finally {
+    button.disabled = false;
+    button.textContent = "두 마감본 차이 찾기";
+  }
+}
+
+function compareTwoFinalWorkbooks(base, target) {
+  const rows = [];
+  const sameMonth = Boolean(base.month && target.month && base.month === target.month);
+  const keys = new Set([...base.values.keys(), ...target.values.keys()]);
+  for (const key of keys) {
+    const left = base.values.get(key);
+    const right = target.values.get(key);
+    const baseValue = normalizeFinalCompareValue(left?.value || "직원/일자 없음");
+    const targetValue = normalizeFinalCompareValue(right?.value || "직원/일자 없음");
+    if (baseValue === targetValue) continue;
+    const [employeeId, date] = key.split("|");
+    rows.push({
+      comparisonType: !left || !right ? "직원·일자 누락" : "근태 값 차이",
+      store: left?.store || right?.store || "",
+      employeeId,
+      name: left?.name || right?.name || "",
+      date: left?.date || right?.date || date || "",
+      baseValue,
+      targetValue,
+      result: !left ? "기준본 없음" : !right ? "비교본 없음" : "불일치",
+    });
+  }
+  rows.sort((a, b) => a.date.localeCompare(b.date) || a.store.localeCompare(b.store, "ko") || a.name.localeCompare(b.name, "ko"));
+  return {
+    sameMonth,
+    baseMonth: base.month || "확인 불가",
+    targetMonth: target.month || "확인 불가",
+    baseEmployeeCount: base.employeeCount || 0,
+    targetEmployeeCount: target.employeeCount || 0,
+    comparedCells: keys.size,
+    rows,
+  };
+}
+
+function renderClosureComparison(comparison) {
+  const summary = $("#closureCompareSummary");
+  const wrap = $("#closureCompareTableWrap");
+  const body = $("#closureCompareTableBody");
+  summary.classList.remove("hidden");
+  wrap.classList.remove("hidden");
+  summary.innerHTML = [
+    ["기준 월", comparison.baseMonth],
+    ["비교 월", comparison.targetMonth],
+    ["기준 인원", `${number(comparison.baseEmployeeCount)}명`],
+    ["비교 인원", `${number(comparison.targetEmployeeCount)}명`],
+    ["차이", `${number(comparison.rows.length)}건`],
+  ].map(([label, value]) => `<div class="summary-chip"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+  body.innerHTML = comparison.rows.length ? comparison.rows.map((row, index) => `<tr>
+    <td>${index + 1}</td>
+    <td>${escapeHtml(row.comparisonType)}</td>
+    <td>${escapeHtml(row.store)}</td>
+    <td>${escapeHtml(row.employeeId)}</td>
+    <td>${escapeHtml(row.name)}</td>
+    <td>${escapeHtml(row.date)}</td>
+    <td><span class="comparison-badge diff">${escapeHtml(row.baseValue)}</span></td>
+    <td><span class="comparison-badge diff">${escapeHtml(row.targetValue)}</span></td>
+    <td>${escapeHtml(row.result)}</td>
+  </tr>`).join("") : `<tr><td colspan="9" class="empty-cell">두 최종본의 사번·날짜별 근태 값이 모두 일치합니다.</td></tr>`;
+  $("#closureCompareNotice").innerHTML = comparison.sameMonth
+    ? `같은 월(${escapeHtml(comparison.baseMonth)}) 기준으로 ${number(comparison.comparedCells)}개 사번·날짜 셀을 비교했습니다.`
+    : `<strong>대상 월이 다릅니다.</strong> 기준본 ${escapeHtml(comparison.baseMonth)} / 비교본 ${escapeHtml(comparison.targetMonth)} · 월이 다른 파일은 날짜별 차이가 많이 발생할 수 있습니다.`;
+  $("#exportClosureCompare").disabled = false;
+}
+
+function exportClosureComparison() {
+  const comparison = state.closureComparison;
+  if (!comparison) return;
+  const rows = [
+    ["No", "구분", "점포", "사번", "이름", "날짜", "기준본 A", "비교본 B", "판정"],
+    ...comparison.rows.map((row, index) => [index + 1, row.comparisonType, row.store, row.employeeId, row.name, row.date, row.baseValue, row.targetValue, row.result]),
+  ];
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws["!views"] = [{ showGridLines: false }];
+  ws["!cols"] = [{ wch: 7 }, { wch: 15 }, { wch: 18 }, { wch: 13 }, { wch: 12 }, { wch: 13 }, { wch: 16 }, { wch: 16 }, { wch: 12 }];
+  for (let col = 0; col < rows[0].length; col += 1) {
+    const address = XLSX.utils.encode_cell({ r: 0, c: col });
+    if (ws[address]) ws[address].s = { fill: { patternType: "solid", fgColor: { rgb: "FF203764" } }, font: { name: "맑은 고딕", bold: true, color: { rgb: "FFFFFFFF" } }, alignment: { horizontal: "center", vertical: "center" } };
+  }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "월 마감 차이");
+  const month = comparison.baseMonth !== "확인 불가" ? comparison.baseMonth : "월미확인";
+  XLSX.writeFile(wb, `${month}_월마감_최종본_차이.xlsx`, { bookType: "xlsx", cellStyles: true });
+}
+
+function autoDetectArchiveKind() {
+  const file = $("#archiveFile")?.files?.[0];
+  if (!file) return;
+  const name = String(file.name || "").replace(/\s+/g, "");
+  if (/최종본|출퇴근현황|결과|공유용|수정본/.test(name)) $("#archiveKind").value = "result";
+  else if (/계획|스케줄/.test(name)) $("#archiveKind").value = "plan";
+  else if (/근태|출근/.test(name)) $("#archiveKind").value = "attendance";
+}
+
 async function saveArchiveFile(event) {
   event.preventDefault();
   if (!(state.backend.available && state.backend.configured && state.backend.loggedIn)) {
@@ -2358,7 +2559,8 @@ function renderArchiveFiles(items) {
   if (!body) return;
   renderArchiveSummary(items);
   body.innerHTML = items.length ? items.map((item) => {
-    const canLoad = item.file_kind === "plan" || item.file_kind === "attendance";
+    const canAnalyze = item.file_kind === "plan" || item.file_kind === "attendance";
+    const looksFinal = item.file_kind === "result" || /최종본|출퇴근현황|결과|공유용|수정본/.test(String(item.file_name || ""));
     return `<tr>
       <td>${escapeHtml(ROUTE_LABELS[item.route] || item.route)}</td>
       <td><strong>${escapeHtml(item.month)}</strong></td>
@@ -2370,13 +2572,16 @@ function renderArchiveFiles(items) {
       <td>${escapeHtml(formatStoredDate(item.created_at))}</td>
       <td class="action-cell archive-actions">
         <a class="btn secondary small" href="/api/archive-files/${encodeURIComponent(item.id)}">다운로드</a>
-        ${canLoad ? `<button class="btn secondary small archive-use" data-id="${escapeHtml(item.id)}" type="button">분석에 불러오기</button>` : ""}
+        ${canAnalyze && !looksFinal ? `<button class="btn secondary small archive-use" data-id="${escapeHtml(item.id)}" type="button">분석에 불러오기</button>` : ""}
+        ${looksFinal ? `<button class="btn secondary small archive-evidence" data-id="${escapeHtml(item.id)}" type="button">증빙 반영</button><button class="btn secondary small archive-compare" data-side="base" data-id="${escapeHtml(item.id)}" type="button">기준본 A</button><button class="btn secondary small archive-compare" data-side="target" data-id="${escapeHtml(item.id)}" type="button">비교본 B</button>` : ""}
         <button class="btn danger small archive-delete" data-id="${escapeHtml(item.id)}" type="button">삭제</button>
       </td>
     </tr>`;
   }).join("") : `<tr><td colspan="9" class="empty-cell">저장된 월 마감 파일이 없습니다.</td></tr>`;
 
-  $$(".archive-use").forEach((button) => button.addEventListener("click", () => useArchiveFile(button.dataset.id)));
+  $$(".archive-use").forEach((button) => button.addEventListener("click", () => useArchiveFile(button.dataset.id, "analyze")));
+  $$(".archive-evidence").forEach((button) => button.addEventListener("click", () => useArchiveFile(button.dataset.id, "evidence")));
+  $$(".archive-compare").forEach((button) => button.addEventListener("click", () => useArchiveFile(button.dataset.id, button.dataset.side)));
   $$(".archive-delete").forEach((button) => button.addEventListener("click", () => deleteArchiveFile(button.dataset.id)));
 }
 
@@ -2394,24 +2599,52 @@ function renderArchiveSummary(items) {
   ].map(([label, value]) => `<div class="summary-chip"><span>${label}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
 }
 
-async function useArchiveFile(id) {
+async function fetchArchiveFile(item) {
+  const response = await fetch(`/api/archive-files/${encodeURIComponent(item.id)}`, { cache: "no-store" });
+  if (!response.ok) {
+    const data = await readJsonResponse(response);
+    throw new Error(data.error || "보관 파일 불러오기 실패");
+  }
+  const blob = await response.blob();
+  return new File([blob], item.file_name, { type: item.content_type || blob.type || "application/octet-stream" });
+}
+
+async function useArchiveFile(id, mode = "analyze") {
   const item = state.archiveFiles.find((row) => row.id === id);
   if (!item) return;
   try {
-    const response = await fetch(`/api/archive-files/${encodeURIComponent(id)}`, { cache: "no-store" });
-    if (!response.ok) {
-      const data = await readJsonResponse(response);
-      throw new Error(data.error || "보관 파일 불러오기 실패");
+    const file = await fetchArchiveFile(item);
+    if (mode === "base" || mode === "target") {
+      if (mode === "base") setClosureBaseFile(file);
+      else setClosureTargetFile(file);
+      switchView("compare");
+      showToast(`${mode === "base" ? "기준 마감본 A" : "비교 마감본 B"}에 파일을 넣었습니다.`);
+      return;
     }
-    const blob = await response.blob();
-    const file = new File([blob], item.file_name, { type: item.content_type || blob.type || "application/octet-stream" });
+
+    const sheets = await fileToWorkbookSheets(file);
+    const isFinalWorkbook = sheets.some((sheet) => /상담사\s*근태/.test(sheet.sheetName))
+      && sheets.some((sheet) => /출근\s*미등록|전체\s*요약본|매니저별\s*이상/.test(sheet.sheetName));
+    if (mode === "evidence" || item.file_kind === "result" || isFinalWorkbook) {
+      setReferenceFile(file);
+      const routeInput = document.querySelector(`input[name="route"][value="${item.route}"]`);
+      if (routeInput) routeInput.checked = true;
+      $("#targetMonth").value = item.month;
+      syncCutoffWithMonth();
+      syncRouteRuleHelp();
+      switchView("checker");
+      showToast("결과·수정본을 증빙 반영 칸에 불러왔습니다. 계획표와 실제 근태표를 선택한 뒤 다시 분석해 주세요.");
+      return;
+    }
+
     const routeInput = document.querySelector(`input[name="route"][value="${item.route}"]`);
     if (routeInput) routeInput.checked = true;
     $("#targetMonth").value = item.month;
     syncCutoffWithMonth();
     syncRouteRuleHelp();
     if (item.file_kind === "plan") setPlanFile(file);
-    else setAttendanceFile(file);
+    else if (item.file_kind === "attendance") setAttendanceFile(file);
+    else throw new Error("이 파일은 계획표나 실제 근태표로 불러올 수 없습니다.");
     switchView("checker");
     showToast(`${archiveKindLabel(item.file_kind)}를 분석 화면에 불러왔습니다.`);
   } catch (error) {
@@ -3681,6 +3914,9 @@ function resetAll() {
   state.attendanceFile = null;
   state.annualFile = null;
   state.referenceFile = null;
+  state.closureBaseFile = null;
+  state.closureTargetFile = null;
+  state.closureComparison = null;
   state.result = null;
   state.priorLedger = emptyLedger();
   $("#planFile").value = "";

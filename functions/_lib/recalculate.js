@@ -41,6 +41,10 @@ export async function recalculateRoute(db, route) {
   const closures = closuresResult.results || [];
   const facts = factsResult.results || [];
   const grants = grantsResult.results || [];
+  const automaticSubstituteDates = new Set(grants
+    .filter((grant) => (grant.grant_type || "substitute") === "substitute")
+    .map((grant) => String(grant.occurrence_date || grant.criterion_date || ""))
+    .filter(Boolean));
   const workforceRows = workforceResult.results || [];
   const annualEmployeeRows = annualEmployeeResult.results || [];
 
@@ -118,12 +122,12 @@ export async function recalculateRoute(db, route) {
       const substituteEvents = legacyEvents
         .filter((event) => !String(event.planStatus || "").startsWith("보상휴가"))
         .filter((event) => String(event.source || "") !== "기본 휴무 초과")
-        // 발생일 자동 차감은 현재도 같은 발생일 부여 기록이 있을 때만 유지합니다.
-        // 관리자가 부여 기록을 삭제하거나 발생일을 바꾸면 과거의 자동 차감도 재계산에서 제거됩니다.
+        // 자동 휴무 차감은 해당 직원이 그날 새 부여 대상이었는지와 별개입니다.
+        // 경로에 등록된 대체휴무 발생일이면 기존 보유분을 사용하고, 잔여가 없으면 초과로 계산합니다.
         .filter((event) => {
           const automatic = Boolean(event?.automatic) || String(event?.source || "") === "발생일 지정 자동 대체휴무";
           if (!automatic) return true;
-          return lots.some((lot) => lot.grantType === "substitute" && lot.occurrenceDate === event.date);
+          return automaticSubstituteDates.has(String(event.date || ""));
         })
         .filter(validUsageEvent)
         .sort(eventSort);
