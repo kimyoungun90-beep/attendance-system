@@ -1,5 +1,5 @@
 import { json, requireAuth } from "../_lib/auth.js";
-import { normalizeEmployeeId, parseEmployeeIds, parseEvents, resolveEligibleEmployees } from "../_lib/leave-eligibility.js";
+import { normalizeEmployeeId, parseEmployeeIds, resolveEligibleEmployees, resolveOccurrenceFact } from "../_lib/leave-eligibility.js";
 import { ensureSchema } from "../_lib/schema.js";
 
 const VALID_ROUTES = new Set(["homeplus", "electroland"]);
@@ -91,13 +91,8 @@ export async function onRequestGet(context) {
         for (const fact of occurrenceFacts) {
           const employeeId = normalizeEmployeeId(fact.employee_id);
           if (!employeeId) continue;
-          const saved = parseEvents(fact.occurrence_substitute_dates_json)
-            .map((value) => typeof value === "string" ? value : value?.date)
-            .filter(Boolean);
-          const fallback = parseEvents(fact.worked_dates_json)
-            .map((value) => typeof value === "string" ? value : value?.date)
-            .filter(Boolean);
-          if ((saved.length ? saved : fallback).includes(occurrenceDate)) entitled.add(employeeId);
+          const decision = resolveOccurrenceFact(fact, occurrenceDate);
+          if (decision.entitled) entitled.add(employeeId);
         }
         eligibility = {
           ...baseEligibility,

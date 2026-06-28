@@ -1,4 +1,4 @@
-import { normalizeEmployeeId, parseEvents, resolveEligibleEmployees } from "./leave-eligibility.js";
+import { normalizeEmployeeId, parseEvents, resolveEligibleEmployees, resolveOccurrenceFact } from "./leave-eligibility.js";
 
 const VALID_ROUTES = new Set(["homeplus", "electroland"]);
 const VALID_GRANT_TYPES = new Set(["substitute", "compensation"]);
@@ -8,7 +8,7 @@ export async function recalculateRoute(db, route) {
 
   const [closuresResult, factsResult, grantsResult, workforceResult, annualEmployeeResult] = await Promise.all([
     db.prepare(`
-      SELECT id, company AS route, month
+      SELECT id, company AS route, month, cutoff_date
       FROM attendance_closures
       WHERE company = ?
       ORDER BY month ASC, created_at ASC
@@ -52,30 +52,14 @@ export async function recalculateRoute(db, route) {
     factsByClosure.get(fact.closure_id).push(fact);
   }
 
+  const closureByMonth = new Map(closures.map((closure) => [String(closure.month || ""), closure]));
   const factsByMonth = new Map();
-  const workedDatesByMonthEmployee = new Map();
-  const occurrenceSubstituteDatesByMonthEmployee = new Map();
+  const factByMonthEmployee = new Map();
   for (const fact of facts) {
     if (!factsByMonth.has(fact.month)) factsByMonth.set(fact.month, []);
     factsByMonth.get(fact.month).push(fact);
     const employeeId = normalizeEmployeeId(fact.employee_id);
-    if (employeeId) {
-      const key = `${fact.month}|${employeeId}`;
-      if (!workedDatesByMonthEmployee.has(key)) workedDatesByMonthEmployee.set(key, new Set());
-      const set = workedDatesByMonthEmployee.get(key);
-      for (const value of parseEvents(fact.worked_dates_json)) {
-        const date = typeof value === "string" ? value : value?.date;
-        if (date) set.add(String(date));
-      }
-      const entitlementKey = `${fact.month}|${employeeId}`;
-      if (!occurrenceSubstituteDatesByMonthEmployee.has(entitlementKey)) occurrenceSubstituteDatesByMonthEmployee.set(entitlementKey, new Set());
-      const entitlementSet = occurrenceSubstituteDatesByMonthEmployee.get(entitlementKey);
-      const savedEntitlements = parseEvents(fact.occurrence_substitute_dates_json)
-        .map((value) => typeof value === "string" ? value : value?.date)
-        .filter(Boolean);
-      // 구버전 월 마감에는 전용 필드가 없으므로 실제 출근일을 안전한 보조값으로 사용합니다.
-      for (const date of (savedEntitlements.length ? savedEntitlements : set)) entitlementSet.add(String(date));
-    }
+    if (employeeId) factByMonthEmployee.set(`${fact.month}|${employeeId}`, fact);
   }
 
   const lotsByEmployee = new Map();
@@ -94,6 +78,17 @@ export async function recalculateRoute(db, route) {
       factsByMonth,
     });
     for (const employeeId of eligibility.employeeIds) {
+      const occurrenceMonth = occurrenceDate.slice(0, 7);
+      const occurrenceClosure = closureByMonth.get(occurrenceMonth);
+      const finalized = Boolean(
+        settlementMode
+        && occurrenceClosure
+        && String(occurrenceClosure.cutoff_date || "") >= occurrenceDate
+      );
+      const occurrenceFact = finalized ? factByMonthEmployee.get(`${occurrenceMonth}|${employeeId}`) : null;
+      const finalDecision = occurrenceFact ? resolveOccurrenceFact(occurrenceFact, occurrenceDate) : null;
+      const grantedDays = roundHalf(grant.granted_days);
+
       if (!lotsByEmployee.has(employeeId)) lotsByEmployee.set(employeeId, []);
       lotsByEmployee.get(employeeId).push({
         grantId: grant.id,
@@ -103,7 +98,12 @@ export async function recalculateRoute(db, route) {
         settlementMode,
         validFrom: grant.valid_from,
         validTo: grant.valid_to,
-        remaining: roundHalf(grant.granted_days),
+        grantedDays,
+        finalized,
+        finalEntitled: finalDecision ? Boolean(finalDecision.entitled) : null,
+        finalRestEligible: finalDecision ? Boolean(finalDecision.restEligible) : false,
+        // 발생일 확정 후 미부여 대상이면 사용 시작월까지 소급하여 lot 전체를 제외합니다.
+        remaining: finalized && finalDecision && !finalDecision.entitled ? 0 : grantedDays,
       });
     }
   }
@@ -130,13 +130,19 @@ export async function recalculateRoute(db, route) {
       const monthStart = `${closure.month}-01`;
       const monthEnd = endOfMonth(closure.month);
       const nextMonthStart = startOfNextMonth(closure.month);
-      const occurrenceEntitlementDates = occurrenceSubstituteDatesByMonthEmployee.get(`${closure.month}|${employeeId}`) || new Set();
+      const hasDailySnapshot = parseEvents(fact.daily_statuses_json).length > 0;
+      let occurrenceRestDays = hasDailySnapshot ? 0 : roundHalf(fact.occurrence_rest_days);
+      const countedRestGrants = new Set();
       for (const lot of lots) {
         if (!lot.settlementMode || !lot.occurrenceDate || !lot.occurrenceDate.startsWith(closure.month)) continue;
-        // 발생일은 계획 우선 판정 결과를 사용합니다.
-        // 계획 근무자는 출근 미입력이어도 대체휴무를 유지하고, 휴무 계획자는 실제 출근했을 때만 유지합니다.
-        // 발생일 전에 이미 사용한 수량은 과거 마감 이력으로 유지하고 남은 수량만 종료합니다.
-        if (!occurrenceEntitlementDates.has(lot.occurrenceDate)) lot.remaining = 0;
+        // 발생일과 비교 기준일이 모두 지난 경우에만 최종 판정합니다.
+        // 미부여 대상은 사용 시작월까지 소급해 lot 전체를 제외하고,
+        // 계획 휴무·미출근자는 발생 월의 기본 휴무 가능 수량만 늘립니다.
+        if (!lot.finalized) continue;
+        if (lot.finalRestEligible && !countedRestGrants.has(lot.grantId)) {
+          occurrenceRestDays = roundHalf(occurrenceRestDays + Number(lot.grantedDays || 0));
+          countedRestGrants.add(lot.grantId);
+        }
       }
 
       const legacyEvents = parseEvents(fact.substitute_events_json);
@@ -168,9 +174,15 @@ export async function recalculateRoute(db, route) {
       const cumulativeAnnual = roundHalf((cumulativeAnnualByEmployee.get(employeeId) || 0) + currentAnnual);
       cumulativeAnnualByEmployee.set(employeeId, cumulativeAnnual);
 
-      const baseAllowance = roundHalf(fact.base_allowance);
+      const storedOccurrenceRestDays = roundHalf(fact.occurrence_rest_days);
+      const savedBaseAllowance = roundHalf(fact.base_allowance);
+      const storedRawAllowance = roundHalf(fact.base_allowance_raw);
+      const baseAllowanceRaw = storedRawAllowance > 0
+        ? storedRawAllowance
+        : roundHalf(Math.max(0, savedBaseAllowance - storedOccurrenceRestDays));
+      const baseAllowance = roundHalf(baseAllowanceRaw + occurrenceRestDays);
       const basicDayoffUsed = roundHalf(fact.basic_dayoff_used);
-      const baseExcess = roundHalf(fact.base_excess);
+      const baseExcess = roundHalf(Math.max(0, basicDayoffUsed - baseAllowance));
       const explicitSubDayoffUsed = roundHalf(substituteEvents
         .filter((event) => String(event.planStatus || "").startsWith("대체휴일"))
         .reduce((sum, event) => sum + Number(event.days || 0), 0));

@@ -162,8 +162,10 @@ export async function onRequestPost(context) {
        base_allowance, basic_dayoff_used, explicit_sub_dayoff_used, base_excess,
        substitute_needed, compensation_leave_used, compensation_needed,
        annual_leave_used, substitute_events_json, compensation_events_json,
-       annual_leave_events_json, worked_dates_json, occurrence_substitute_dates_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       annual_leave_events_json, worked_dates_json, occurrence_substitute_dates_json,
+       base_allowance_raw, occurrence_rest_days, occurrence_rest_allowances_json,
+       daily_statuses_json, evidence_dates_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       closureId,
       route,
@@ -183,7 +185,12 @@ export async function onRequestPost(context) {
       JSON.stringify(Array.isArray(row.compensationEvents) ? row.compensationEvents : []),
       JSON.stringify(Array.isArray(row.annualLeaveEvents) ? row.annualLeaveEvents : []),
       JSON.stringify(Array.isArray(row.workedDates) ? row.workedDates : []),
-      JSON.stringify(Array.isArray(row.occurrenceSubstituteDates) ? row.occurrenceSubstituteDates : [])
+      JSON.stringify(Array.isArray(row.occurrenceSubstituteDates) ? row.occurrenceSubstituteDates : []),
+      roundHalf(row.baseAllowanceRaw ?? row.baseAllowance),
+      roundHalf(row.occurrenceRestDays),
+      JSON.stringify(Array.isArray(row.occurrenceRestAllowances) ? row.occurrenceRestAllowances : []),
+      JSON.stringify(Array.isArray(row.dailyStatuses) ? row.dailyStatuses : []),
+      JSON.stringify(Array.isArray(row.evidenceDates) ? row.evidenceDates : [])
     ));
 
     await runBatch(context.env.DB, issueStatements);

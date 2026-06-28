@@ -1,5 +1,48 @@
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+const OCCURRENCE_WORK_PLANS = new Set([
+  "공백", "근무", "근무A", "근무B", "근무C", "교육", "오전반차", "오후반차",
+]);
+
+export function normalizeOccurrencePlanStatus(value) {
+  const raw = String(value ?? "").trim().replace(/\s+/g, "");
+  return !raw || raw === "546" ? "공백" : raw;
+}
+
+/**
+ * 월 마감에 저장된 일별 계획·근태 스냅샷으로 발생일 판정을 복원합니다.
+ * 신규 마감은 daily_statuses_json을 사용하고, 구버전 마감은 저장된 대상일/실제 출근일로 보조 판정합니다.
+ */
+export function resolveOccurrenceFact(fact, occurrenceDate) {
+  const dailyRows = parseEvents(fact?.daily_statuses_json);
+  const daily = dailyRows.find((row) => String(row?.date || "") === String(occurrenceDate || ""));
+  if (daily) {
+    const planStatus = normalizeOccurrencePlanStatus(daily.planStatus ?? daily.plan_status);
+    const hasClockIn = Boolean(daily.hasClockIn ?? daily.has_clock_in);
+    return {
+      hasDailyStatus: true,
+      planStatus,
+      hasClockIn,
+      entitled: OCCURRENCE_WORK_PLANS.has(planStatus) || hasClockIn,
+      restEligible: planStatus === "휴무" && !hasClockIn,
+    };
+  }
+
+  const saved = parseEvents(fact?.occurrence_substitute_dates_json)
+    .map((value) => typeof value === "string" ? value : value?.date)
+    .filter(Boolean);
+  const worked = parseEvents(fact?.worked_dates_json)
+    .map((value) => typeof value === "string" ? value : value?.date)
+    .filter(Boolean);
+  return {
+    hasDailyStatus: false,
+    planStatus: "",
+    hasClockIn: worked.includes(occurrenceDate),
+    entitled: (saved.length ? saved : worked).includes(occurrenceDate),
+    restEligible: false,
+  };
+}
+
 export function normalizeEmployeeId(value) {
   return String(value || "").trim().toUpperCase().replace(/\.0+$/, "").replace(/[\s\u00A0-]+/g, "").replace(/[^0-9A-Z가-힣]/g, "");
 }

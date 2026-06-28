@@ -1,5 +1,5 @@
 import { json, requireAuth } from "../_lib/auth.js";
-import { resolveEligibleEmployees, normalizeEmployeeId, parseEmployeeIds, parseEvents } from "../_lib/leave-eligibility.js";
+import { resolveEligibleEmployees, normalizeEmployeeId, parseEmployeeIds, resolveOccurrenceFact } from "../_lib/leave-eligibility.js";
 import { recalculateRoute } from "../_lib/recalculate.js";
 import { ensureSchema } from "../_lib/schema.js";
 
@@ -19,7 +19,10 @@ export async function onRequestGet(context) {
 
   const routeWhere = route ? " WHERE route = ?" : "";
   const routeBind = (statement) => route ? statement.bind(route) : statement;
-  const [grantsResult, factsResult, allocationsResult, workforceResult, annualResult] = await Promise.all([
+  const closureQuery = route
+    ? context.env.DB.prepare(`SELECT company AS route, month, cutoff_date FROM attendance_closures WHERE company = ?`).bind(route)
+    : context.env.DB.prepare(`SELECT company AS route, month, cutoff_date FROM attendance_closures`);
+  const [grantsResult, factsResult, allocationsResult, workforceResult, annualResult, closuresResult] = await Promise.all([
     routeBind(context.env.DB.prepare(`SELECT * FROM attendance_leave_grants_v5${routeWhere} ORDER BY grant_month DESC, created_at DESC`)).all(),
     routeBind(context.env.DB.prepare(`SELECT * FROM attendance_monthly_employee_facts${routeWhere}`)).all(),
     routeBind(context.env.DB.prepare(`
@@ -29,6 +32,7 @@ export async function onRequestGet(context) {
     `)).all(),
     routeBind(context.env.DB.prepare(`SELECT * FROM attendance_workforce_members${routeWhere} ORDER BY month, id`)).all(),
     routeBind(context.env.DB.prepare(`SELECT * FROM annual_leave_employees${routeWhere}`)).all(),
+    closureQuery.all(),
   ]);
 
   const grants = grantsResult.results || [];
@@ -42,6 +46,10 @@ export async function onRequestGet(context) {
   }
   const workforceByRoute = groupByRoute(workforceResult.results || []);
   const annualByRoute = groupByRoute(annualResult.results || []);
+  const closureCutoffByRouteMonth = new Map((closuresResult.results || []).map((row) => [
+    `${row.route}|${row.month}`,
+    String(row.cutoff_date || ""),
+  ]));
   const usedByGrant = new Map((allocationsResult.results || []).map((row) => [row.grant_id, roundHalf(row.used_days)]));
 
   const items = grants.map((grant) => {
@@ -62,18 +70,15 @@ export async function onRequestGet(context) {
     });
     let eligibility = baseEligibility;
     const occurrenceFacts = factsByMonth.get(occurrenceMonth) || [];
-    if (settlementMode && occurrenceFacts.length) {
+    const occurrenceFinalized = settlementMode
+      && closureCutoffByRouteMonth.get(`${grant.route}|${occurrenceMonth}`) >= occurrenceDate;
+    if (occurrenceFinalized && occurrenceFacts.length) {
       const entitled = new Set();
       for (const fact of occurrenceFacts) {
         const employeeId = normalizeEmployeeId(fact.employee_id);
         if (!employeeId) continue;
-        const saved = parseEvents(fact.occurrence_substitute_dates_json)
-          .map((value) => typeof value === "string" ? value : value?.date)
-          .filter(Boolean);
-        const fallback = parseEvents(fact.worked_dates_json)
-          .map((value) => typeof value === "string" ? value : value?.date)
-          .filter(Boolean);
-        if ((saved.length ? saved : fallback).includes(occurrenceDate)) entitled.add(employeeId);
+        const decision = resolveOccurrenceFact(fact, occurrenceDate);
+        if (decision.entitled) entitled.add(employeeId);
       }
       eligibility = {
         ...baseEligibility,
@@ -85,6 +90,7 @@ export async function onRequestGet(context) {
     return {
       ...grant,
       settlement_mode: settlementMode ? 1 : 0,
+      settlement_finalized: occurrenceFinalized ? 1 : 0,
       provisional_people: baseEligibility.employeeIds.length,
       eligible_people: eligibility.employeeIds.length,
       assigned_days: assignedDays,

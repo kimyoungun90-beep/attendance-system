@@ -799,7 +799,7 @@ function parseReferenceFinalWorkbook(sheets) {
 
 function findEvidenceDateColumn(headers) {
   return findHeaderIndex(headers, [
-    "발생일", "근무일자", "일자", "날짜", "근태수정필요일", "근태수정필요일자",
+    "발생일", "근무일자", "일자", "날짜", "근태수정발생일", "근태수정필요일", "근태수정필요일자",
     "근태수정일", "근태수정필요일", "수정필요일", "수정일자",
   ]);
 }
@@ -832,7 +832,7 @@ function parseEvidenceOverrides(sheets) {
     if (headerIndex < 0) {
       headerIndex = findFlexibleHeaderRow(matrix, (headers) => (
         findHeaderIndex(headers, ["제니엘사번", "사번", "사원번호"]) >= 0
-        && findHeaderIndex(headers, ["근태수정필요일", "근태수정필요일자", "발생일", "근무일자", "일자", "날짜"]) >= 0
+        && findHeaderIndex(headers, ["근태수정발생일", "근태수정필요일", "근태수정필요일자", "발생일", "근무일자", "일자", "날짜"]) >= 0
       ));
     }
     if (headerIndex < 0) continue;
@@ -865,9 +865,8 @@ function applyEvidenceOverrides(result, evidenceKeys = []) {
   result.evidenceOverrides = [...evidenceSet];
   if (!evidenceSet.size) return result;
 
-  // 출근 미등록 시트에 O가 입력된 사번+일자는 실제 출근으로 확정합니다.
-  // 보고용 목록에서만 숨기는 것이 아니라 월 마감의 실제 출근일에도 반영해,
-  // 이후 "특정일 실제 출근자만 부여" 기준에서도 정상 출근자로 인정합니다.
+  // K열 O는 해당 사번·일자의 실제 출근을 확정합니다.
+  // 다만 계획이 휴무·연차 등인데 출근한 건은 계획 상이이므로 계속 남겨야 합니다.
   const evidenceDatesByEmployee = new Map();
   for (const key of evidenceSet) {
     const separator = key.indexOf("|");
@@ -884,15 +883,23 @@ function applyEvidenceOverrides(result, evidenceKeys = []) {
       const dates = evidenceDatesByEmployee.get(normalizeEmployeeId(row.employeeId));
       if (!dates?.size) continue;
       row.workedDates = [...new Set([...(row.workedDates || []), ...dates])].sort();
+      row.evidenceDates = [...new Set([...(row.evidenceDates || []), ...dates])].sort();
+      row.dailyStatuses = (row.dailyStatuses || []).map((daily) => dates.has(String(daily.date || ""))
+        ? { ...daily, hasClockIn: true, actualStatus: "출근", evidenced: true }
+        : daily);
     }
   }
 
-  const notEvidenced = (row) => !evidenceSet.has(`${normalizeEmployeeId(row.employeeId)}|${row.date}`);
-  // K열 O는 해당 사번·일자의 최종 수정 완료 표시입니다.
-  // 상담사근태는 출근으로 바꾸고 모든 미해결 목록에서는 제거합니다.
-  result.missingRows = (result.missingRows || []).filter(notEvidenced);
-  result.unexpectedRows = (result.unexpectedRows || []).filter(notEvidenced);
-  result.mismatchRows = (result.mismatchRows || []).filter(notEvidenced);
+  const keyOf = (row) => `${normalizeEmployeeId(row.employeeId)}|${row.date}`;
+  const isResolvedMissing = (row) => evidenceSet.has(keyOf(row))
+    && (row.issueType === "missing_clock_in" || row.result === "근무인데 출근기록 없음");
+  const markEvidence = (row) => evidenceSet.has(keyOf(row)) ? { ...row, evidenced: true } : row;
+
+  // 단순 출근 미입력만 모든 미해결 목록에서 제거합니다.
+  result.missingRows = (result.missingRows || []).filter((row) => !isResolvedMissing(row)).map(markEvidence);
+  // 휴무·연차 등인데 출근한 건은 실제 출근으로 인정하되 계획 상이에는 유지합니다.
+  result.unexpectedRows = (result.unexpectedRows || []).map(markEvidence);
+  result.mismatchRows = (result.mismatchRows || []).filter((row) => !isResolvedMissing(row)).map(markEvidence);
   result.missingPeople = uniquePeople(result.missingRows);
   result.unexpectedPeople = uniquePeople(result.unexpectedRows);
   result.mismatchPeople = uniquePeople(result.mismatchRows);
@@ -1166,6 +1173,8 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
     const compensationEvents = [];
     const annualLeaveEvents = [];
     const workedDates = [];
+    const dailyStatuses = [];
+    const evidenceDates = [];
 
     for (let day = 1; day <= daysInMonth; day += 1) {
       const date = `${targetMonth}-${String(day).padStart(2, "0")}`;
@@ -1174,6 +1183,14 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       const attendanceValue = withEvidenceAttendance(attendanceMap.get(`${person.employeeId}|${date}`) || emptyAttendanceValue(), evidenceSet.has(evidenceKey));
       const occurrenceDays = settlementOccurrenceDays(ledger, person.employeeId, date, cutoffDate);
       const displayedStatus = finalDisplayValue(planCode, attendanceValue);
+      dailyStatuses.push({
+        date,
+        planStatus: planCode,
+        hasClockIn: Boolean(attendanceValue.hasClockIn),
+        actualStatus: attendanceValue.actualStatus || "",
+        evidenced: Boolean(attendanceValue.evidenced),
+      });
+      if (attendanceValue.evidenced) evidenceDates.push(date);
       // 발생일은 근무계획을 먼저 기준으로 선반영합니다.
       // 1) 계획이 근무 계열이면 출근기록이 없어도 대체휴무를 우선 부여합니다.
       // 2) 계획이 휴무이고 실제 출근하지 않았으면 기본 휴무 가능 수량만 늘립니다.
@@ -1316,6 +1333,7 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       store: person.store,
       employeeId: person.employeeId,
       name: person.name,
+      baseAllowanceRaw: baseAllowance,
       baseAllowance: personBaseAllowance,
       basicDayoffUsed,
       explicitSubDayoffUsed,
@@ -1332,6 +1350,8 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       compensationEvents,
       annualLeaveEvents,
       workedDates,
+      evidenceDates: [...new Set(evidenceDates)].sort(),
+      dailyStatuses,
       occurrenceSubstituteDates: [...new Set(occurrenceSubstituteDates)].sort(),
       duplicatePlanNote: person.duplicatePlanNote || "",
     };
@@ -1621,6 +1641,7 @@ function makeIssueRow({ issueType, route, person, date, dateObject, planStatus, 
     actualIn: attendanceValue.actualIn || "",
     changedIn: attendanceValue.changedIn || "",
     clockStatus: attendanceValue.hasClockIn ? (attendanceValue.changedIn || attendanceValue.actualIn) : "미기록",
+    evidenced: Boolean(attendanceValue.evidenced),
     result,
     reason,
     duplicatePlanNote: person.duplicatePlanNote || "",
@@ -1641,6 +1662,7 @@ function makeMismatchRow({ route, person, date, dateObject, planStatus, attendan
     actualIn: attendanceValue.actualIn || "",
     changedIn: attendanceValue.changedIn || "",
     clockStatus: attendanceValue.hasClockIn ? (attendanceValue.changedIn || attendanceValue.actualIn) : "미기록",
+    evidenced: Boolean(attendanceValue.evidenced),
     result,
     reason,
     duplicatePlanNote: person.duplicatePlanNote || "",
