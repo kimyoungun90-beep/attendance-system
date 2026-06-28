@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=26";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=29";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -1210,17 +1210,10 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
         evidenced: Boolean(attendanceValue.evidenced),
       });
       if (attendanceValue.evidenced) evidenceDates.push(date);
-      // 발생일은 근무계획을 먼저 기준으로 선반영합니다.
-      // 1) 계획이 근무 계열이면 출근기록이 없어도 대체휴무를 우선 부여합니다.
-      // 2) 계획이 휴무이고 실제 출근하지 않았으면 기본 휴무 가능 수량만 늘립니다.
-      // 3) 계획이 휴무여도 실제 출근했다면 기본 휴무 추가를 취소하고 대체휴무를 부여합니다.
+      // 발생일 대체휴무는 해당 날짜의 근무계획·실제 출근 여부와 무관하게 동일 부여합니다.
+      // 발생일 당일 포함 이전 입사자만 대상이며, 발생일 때문에 기본 휴무 가능 수량을 추가하지 않습니다.
       if (occurrenceDays > 0) {
-        const plannedWork = REQUIRED_CLOCK_PLANS.has(planCode);
-        if (plannedWork || attendanceValue.hasClockIn) {
-          occurrenceSubstituteDates.push(date);
-        } else if (planCode === "휴무") {
-          occurrenceRestAllowances.push({ date, days: occurrenceDays, source: "발생일 휴무 기본휴무 추가" });
-        }
+        occurrenceSubstituteDates.push(date);
       }
       // 휴무 사용량은 계획표 원본이 아니라 최종 일별 표시값을 기준으로 계산합니다.
       // 계획이 휴무여도 실제 출근기록이 있으면 출근으로 보며 휴무 사용에서 제외합니다.
@@ -1234,8 +1227,10 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       if (attendanceValue.hasClockIn) workedDates.push(date);
     }
 
-    const occurrenceRestDays = roundHalf(occurrenceRestAllowances.reduce((sum, event) => sum + Number(event.days || 0), 0));
-    const personBaseAllowance = roundHalf(baseAllowance + occurrenceRestDays);
+    // 기본 휴무는 경로별 월 기준을 전 직원에게 동일 적용합니다.
+    // 홈플러스는 월 6일, 전자랜드는 대상 월 토·일요일 개수이며 발생일에 따른 가산은 없습니다.
+    const occurrenceRestDays = 0;
+    const personBaseAllowance = roundHalf(baseAllowance);
     const baseExcessEvents = basicDayoffDates.slice(Math.max(0, Math.floor(personBaseAllowance))).map((date) => ({
       date,
       days: 1,
@@ -1243,7 +1238,7 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       planStatus: "휴무",
     }));
     // 기본 휴무 초과와 대체휴무 사용은 별도 관리합니다.
-    // 발생일에 쉰 직원은 기본 휴무 가능 수량만 늘고, 대체휴무 사용·차감은 발생하지 않습니다.
+    // 발생일의 출근·휴무 여부는 기본 휴무 기준과 대체휴무 부여 여부에 영향을 주지 않습니다.
     const substituteEvents = [...explicitSubstituteEvents].sort((a, b) => a.date.localeCompare(b.date));
 
     for (let day = 1; day <= lastDay; day += 1) {
@@ -1556,15 +1551,9 @@ function calculatePreviewLedger({ employeeId, substituteEvents, compensationEven
     existingGrantIds.add(String(grant.id || ""));
   }
 
-  const occurrenceEntitlementSet = new Set((occurrenceSubstituteDates || []).map(String));
-  const settledLots = lots.filter((lot) => {
-    if (!lot.settlementMode || !lot.occurrenceDate) return true;
-    if (!cutoffDate || lot.occurrenceDate > cutoffDate) return true; // 발생일 전에는 사용 시작일 기준으로 선반영
-    if (!lot.occurrenceDate.startsWith(targetMonth)) return true; // 과거 발생분은 서버 재계산 결과를 사용
-    // 발생일이 지난 현재 월은 실제 출근만 보는 것이 아니라 근무계획을 우선합니다.
-    // 계획 근무자는 미입력이어도 대체휴무를 유지하며, 휴무 계획자는 실제 출근했을 때만 대체휴무로 전환됩니다.
-    return occurrenceEntitlementSet.has(lot.occurrenceDate);
-  });
+  // 발생일 대체휴무는 계획·실제근태에 따라 회수하지 않습니다.
+  // 입사일·퇴사일·제외 사번 등 부여 대상 조건을 통과한 lot는 그대로 유지합니다.
+  const settledLots = lots;
   const pools = consumePreviewCombinedPools(settledLots, substituteEvents, compensationEvents, targetMonth);
   return {
     availableSubstitute: pools.substitute.available,
@@ -3076,7 +3065,7 @@ function renderGrants(items) {
     const typeLabel = item.grant_type === "compensation" ? "보상휴가" : "대체휴무";
     const scopeLabel = item.grant_scope === "employee" ? `사번별 · ${item.employee_id || "-"}` : "경로 일괄";
     const criterion = item.settlement_mode
-      ? `${item.occurrence_date || item.criterion_date} 계획 근무자 대체휴무 선부여 / 휴무자는 기본휴무 추가 / 휴무 중 출근자는 대체휴무 전환`
+      ? `${item.occurrence_date || item.criterion_date} 당일 포함 이전 입사자 전원 동일 부여 / 계획·출근 여부 무관 / 기본휴무 추가 없음`
       : item.eligibility_mode === "worked_on_date"
         ? `${item.criterion_date || item.occurrence_date} 실제 출근자`
         : item.grant_scope === "employee" ? "지정 사번" : `${item.eligibility_cutoff || item.occurrence_date || `${item.grant_month}-01`} 당일 포함 이전 입사자`;

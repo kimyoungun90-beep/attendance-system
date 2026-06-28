@@ -1,5 +1,5 @@
 import { json, requireAuth } from "../_lib/auth.js";
-import { normalizeEmployeeId, parseEmployeeIds, resolveEligibleEmployees, resolveOccurrenceFact } from "../_lib/leave-eligibility.js";
+import { normalizeEmployeeId, parseEmployeeIds, resolveEligibleEmployees } from "../_lib/leave-eligibility.js";
 import { ensureSchema } from "../_lib/schema.js";
 
 const VALID_ROUTES = new Set(["homeplus", "electroland"]);
@@ -81,25 +81,9 @@ export async function onRequestGet(context) {
       factsByMonth,
     });
 
-    let eligibility = baseEligibility;
-    // 발생일이 지난 뒤에는 월 마감에 저장된 "계획 우선 대체휴무 대상일"을 사용합니다.
-    // 구버전 월 마감은 해당 필드가 없으므로 실제 출근일을 보조값으로 사용합니다.
-    if (settlementMode && occurrenceMonth < month) {
-      const occurrenceFacts = factsByMonth.get(occurrenceMonth) || [];
-      if (occurrenceFacts.length) {
-        const entitled = new Set();
-        for (const fact of occurrenceFacts) {
-          const employeeId = normalizeEmployeeId(fact.employee_id);
-          if (!employeeId) continue;
-          const decision = resolveOccurrenceFact(fact, occurrenceDate);
-          if (decision.entitled) entitled.add(employeeId);
-        }
-        eligibility = {
-          ...baseEligibility,
-          employeeIds: baseEligibility.employeeIds.filter((employeeId) => entitled.has(normalizeEmployeeId(employeeId))),
-        };
-      }
-    }
+    // 발생일 이후에도 계획·출근 여부로 대체휴무 대상자를 다시 걸러내지 않습니다.
+    // 발생일 당일 포함 이전 입사자(퇴사·제외 조건 반영)에게 동일하게 부여합니다.
+    const eligibility = baseEligibility;
 
     if (settlementMode && occurrenceMonth === month) {
       settlementGrants.push({
@@ -146,7 +130,7 @@ export async function onRequestGet(context) {
     .map((grant) => String(grant.occurrence_date || grant.criterion_date || ""))
     .filter((date) => date >= monthStart && date <= monthEnd))].sort();
 
-  // 같은 월의 계획 우선 부여는 현재 분석 중인 근무계획과 출근기록으로 판정할 수 있도록 원본 설정을 함께 내려보냅니다.
+  // 같은 월 부여분도 계획·근태 판정 없이 대상자 전원에게 적용할 수 있도록 원본 설정을 함께 내려보냅니다.
   const currentGrants = grants
     .filter((grant) => String(grant.occurrence_date || grant.criterion_date || "").startsWith(month))
     .map((grant) => ({

@@ -1,8 +1,5 @@
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-const OCCURRENCE_WORK_PLANS = new Set([
-  "공백", "근무", "근무A", "근무B", "근무C", "교육", "오전반차", "오후반차",
-]);
 
 export function normalizeOccurrencePlanStatus(value) {
   const raw = String(value ?? "").trim().replace(/\s+/g, "");
@@ -16,29 +13,23 @@ export function normalizeOccurrencePlanStatus(value) {
 export function resolveOccurrenceFact(fact, occurrenceDate) {
   const dailyRows = parseEvents(fact?.daily_statuses_json);
   const daily = dailyRows.find((row) => String(row?.date || "") === String(occurrenceDate || ""));
-  if (daily) {
-    const planStatus = normalizeOccurrencePlanStatus(daily.planStatus ?? daily.plan_status);
-    const hasClockIn = Boolean(daily.hasClockIn ?? daily.has_clock_in);
-    return {
-      hasDailyStatus: true,
-      planStatus,
-      hasClockIn,
-      entitled: OCCURRENCE_WORK_PLANS.has(planStatus) || hasClockIn,
-      restEligible: planStatus === "휴무" && !hasClockIn,
-    };
-  }
+  const planStatus = daily
+    ? normalizeOccurrencePlanStatus(daily.planStatus ?? daily.plan_status)
+    : "";
+  const hasClockIn = daily
+    ? Boolean(daily.hasClockIn ?? daily.has_clock_in)
+    : parseEvents(fact?.worked_dates_json)
+      .map((value) => typeof value === "string" ? value : value?.date)
+      .filter(Boolean)
+      .includes(occurrenceDate);
 
-  const saved = parseEvents(fact?.occurrence_substitute_dates_json)
-    .map((value) => typeof value === "string" ? value : value?.date)
-    .filter(Boolean);
-  const worked = parseEvents(fact?.worked_dates_json)
-    .map((value) => typeof value === "string" ? value : value?.date)
-    .filter(Boolean);
+  // v29: 발생일의 계획·출근·휴무 상태는 대체휴무 부여와 기본휴무 수량을 바꾸지 않습니다.
+  // 실제 대상 여부는 resolveEligibleEmployees의 입사일·퇴사일·제외 사번 조건에서 결정합니다.
   return {
-    hasDailyStatus: false,
-    planStatus: "",
-    hasClockIn: worked.includes(occurrenceDate),
-    entitled: (saved.length ? saved : worked).includes(occurrenceDate),
+    hasDailyStatus: Boolean(daily),
+    planStatus,
+    hasClockIn,
+    entitled: true,
     restEligible: false,
   };
 }

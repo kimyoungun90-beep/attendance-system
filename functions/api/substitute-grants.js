@@ -1,5 +1,5 @@
 import { json, requireAuth } from "../_lib/auth.js";
-import { resolveEligibleEmployees, normalizeEmployeeId, parseEmployeeIds, resolveOccurrenceFact } from "../_lib/leave-eligibility.js";
+import { resolveEligibleEmployees, normalizeEmployeeId, parseEmployeeIds } from "../_lib/leave-eligibility.js";
 import { recalculateRoute } from "../_lib/recalculate.js";
 import { ensureSchema } from "../_lib/schema.js";
 
@@ -68,23 +68,10 @@ export async function onRequestGet(context) {
       annualRows: annualByRoute.get(grant.route) || [],
       factsByMonth,
     });
-    let eligibility = baseEligibility;
-    const occurrenceFacts = factsByMonth.get(occurrenceMonth) || [];
+    // 발생일이 마감된 뒤에도 계획·출근·휴무 여부로 부여 대상자를 변경하지 않습니다.
+    const eligibility = baseEligibility;
     const occurrenceFinalized = settlementMode
       && closureCutoffByRouteMonth.get(`${grant.route}|${occurrenceMonth}`) >= occurrenceDate;
-    if (occurrenceFinalized && occurrenceFacts.length) {
-      const entitled = new Set();
-      for (const fact of occurrenceFacts) {
-        const employeeId = normalizeEmployeeId(fact.employee_id);
-        if (!employeeId) continue;
-        const decision = resolveOccurrenceFact(fact, occurrenceDate);
-        if (decision.entitled) entitled.add(employeeId);
-      }
-      eligibility = {
-        ...baseEligibility,
-        employeeIds: baseEligibility.employeeIds.filter((employeeId) => entitled.has(normalizeEmployeeId(employeeId))),
-      };
-    }
     const usedDays = usedByGrant.get(grant.id) || 0;
     const assignedDays = roundHalf(roundHalf(grant.granted_days) * eligibility.employeeIds.length);
     return {

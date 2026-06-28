@@ -1,4 +1,4 @@
-import { normalizeEmployeeId, parseEvents, resolveEligibleEmployees, resolveOccurrenceFact } from "./leave-eligibility.js";
+import { normalizeEmployeeId, parseEvents, resolveEligibleEmployees } from "./leave-eligibility.js";
 
 const VALID_ROUTES = new Set(["homeplus", "electroland"]);
 const VALID_GRANT_TYPES = new Set(["substitute", "compensation"]);
@@ -70,8 +70,8 @@ export async function recalculateRoute(db, route) {
     const settlementMode = (grant.grant_type || "substitute") === "substitute"
       && (grant.grant_scope || "route") === "route"
       && /^\d{4}-\d{2}-\d{2}$/.test(occurrenceDate);
-    // 발생일 전 사용을 허용할 수 있도록 먼저 입사일 기준 대상자 전원에게 lot를 만듭니다.
-    // 발생 월이 지나면 아래 월별 처리에서 실제 출근자는 유지하고 휴무자는 남은 lot를 종료합니다.
+    // 발생일 전 사용 시작도 허용하며, 입사일 기준 대상자 전원에게 동일한 lot를 만듭니다.
+    // 발생일이 지난 뒤에도 계획·실제근태에 따라 부여분을 회수하거나 기본휴무로 전환하지 않습니다.
     const eligibility = resolveEligibleEmployees(settlementMode ? { ...grant, eligibility_mode: "all", criterion_date: null } : grant, {
       workforceRows,
       annualRows: annualEmployeeRows,
@@ -85,8 +85,6 @@ export async function recalculateRoute(db, route) {
         && occurrenceClosure
         && String(occurrenceClosure.cutoff_date || "") >= occurrenceDate
       );
-      const occurrenceFact = finalized ? factByMonthEmployee.get(`${occurrenceMonth}|${employeeId}`) : null;
-      const finalDecision = occurrenceFact ? resolveOccurrenceFact(occurrenceFact, occurrenceDate) : null;
       const grantedDays = roundHalf(grant.granted_days);
 
       if (!lotsByEmployee.has(employeeId)) lotsByEmployee.set(employeeId, []);
@@ -100,10 +98,10 @@ export async function recalculateRoute(db, route) {
         validTo: grant.valid_to,
         grantedDays,
         finalized,
-        finalEntitled: finalDecision ? Boolean(finalDecision.entitled) : null,
-        finalRestEligible: finalDecision ? Boolean(finalDecision.restEligible) : false,
-        // 발생일 확정 후 미부여 대상이면 사용 시작월까지 소급하여 lot 전체를 제외합니다.
-        remaining: finalized && finalDecision && !finalDecision.entitled ? 0 : grantedDays,
+        // 계획·출근·휴무 여부와 관계없이 대상자에게 부여분을 그대로 유지합니다.
+        finalEntitled: true,
+        finalRestEligible: false,
+        remaining: grantedDays,
       });
     }
   }
@@ -130,20 +128,9 @@ export async function recalculateRoute(db, route) {
       const monthStart = `${closure.month}-01`;
       const monthEnd = endOfMonth(closure.month);
       const nextMonthStart = startOfNextMonth(closure.month);
-      const hasDailySnapshot = parseEvents(fact.daily_statuses_json).length > 0;
-      let occurrenceRestDays = hasDailySnapshot ? 0 : roundHalf(fact.occurrence_rest_days);
-      const countedRestGrants = new Set();
-      for (const lot of lots) {
-        if (!lot.settlementMode || !lot.occurrenceDate || !lot.occurrenceDate.startsWith(closure.month)) continue;
-        // 발생일과 비교 기준일이 모두 지난 경우에만 최종 판정합니다.
-        // 미부여 대상은 사용 시작월까지 소급해 lot 전체를 제외하고,
-        // 계획 휴무·미출근자는 발생 월의 기본 휴무 가능 수량만 늘립니다.
-        if (!lot.finalized) continue;
-        if (lot.finalRestEligible && !countedRestGrants.has(lot.grantId)) {
-          occurrenceRestDays = roundHalf(occurrenceRestDays + Number(lot.grantedDays || 0));
-          countedRestGrants.add(lot.grantId);
-        }
-      }
+      // 발생일에 쉬었는지 출근했는지와 관계없이 기본 휴무 기준은 모든 직원에게 동일합니다.
+      // 기존 월 마감에 저장된 occurrence_rest_days 값도 재계산 시 더하지 않습니다.
+      const occurrenceRestDays = 0;
 
       const legacyEvents = parseEvents(fact.substitute_events_json);
       const compensationEvents = mergeEvents(
@@ -180,7 +167,7 @@ export async function recalculateRoute(db, route) {
       const baseAllowanceRaw = storedRawAllowance > 0
         ? storedRawAllowance
         : roundHalf(Math.max(0, savedBaseAllowance - storedOccurrenceRestDays));
-      const baseAllowance = roundHalf(baseAllowanceRaw + occurrenceRestDays);
+      const baseAllowance = roundHalf(baseAllowanceRaw);
       const basicDayoffUsed = roundHalf(fact.basic_dayoff_used);
       const baseExcess = roundHalf(Math.max(0, basicDayoffUsed - baseAllowance));
       const explicitSubDayoffUsed = roundHalf(substituteEvents
