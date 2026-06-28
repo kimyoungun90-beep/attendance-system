@@ -92,10 +92,10 @@ export async function onRequestPost(context) {
   const validFrom = String(body?.validFrom || "");
   const validTo = String(body?.validTo || "");
   const eligibilityMode = String(body?.eligibilityMode || "all");
-  const criterionDate = String(body?.criterionDate || "").trim();
   const employeeId = normalizeEmployeeId(body?.employeeId);
   const excludedEmployeeIds = normalizeEmployeeIdList(body?.excludedEmployeeIds);
   const editingId = String(body?.id || "").trim();
+  const occurrenceDates = normalizeOccurrenceDates(body?.occurrenceDates ?? body?.occurrenceDate, grantMonth);
 
   if (!body || !VALID_ROUTES.has(route)) return json({ error: "경로 구분이 올바르지 않습니다." }, 400);
   if (!VALID_TYPES.has(grantType)) return json({ error: "부여 구분을 확인해 주세요." }, 400);
@@ -104,54 +104,78 @@ export async function onRequestPost(context) {
   if (!/^\d{4}-\d{2}$/.test(grantMonth) || !(grantedDays > 0)) {
     return json({ error: "발생 월과 부여 일수를 확인해 주세요. 0.5일 단위로 입력할 수 있습니다." }, 400);
   }
+  if (!occurrenceDates.length || occurrenceDates.some((date) => !/^\d{4}-\d{2}-\d{2}$/.test(date) || !date.startsWith(grantMonth))) {
+    return json({ error: "발생일은 발생 월 안의 날짜로 입력해 주세요. 여러 날짜는 줄바꿈이나 쉼표로 구분할 수 있습니다." }, 400);
+  }
+  if (editingId && occurrenceDates.length !== 1) {
+    return json({ error: "기존 부여 기록 수정 시에는 발생일을 하나만 입력해 주세요." }, 400);
+  }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(validFrom) || !/^\d{4}-\d{2}-\d{2}$/.test(validTo) || validFrom > validTo) {
     return json({ error: "사용 시작일과 종료일을 확인해 주세요." }, 400);
   }
   if (grantScope === "employee" && !employeeId) {
     return json({ error: "사번별 부여는 대상 사번을 입력해야 합니다." }, 400);
   }
-  if (eligibilityMode === "worked_on_date") {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(criterionDate)) return json({ error: "실제 출근자만 부여하려면 출근 기준일을 입력해 주세요." }, 400);
-    if (!criterionDate.startsWith(grantMonth)) return json({ error: "출근 기준일은 발생 월 안의 날짜로 입력해 주세요." }, 400);
+
+  const explicitCriterionDate = String(body?.criterionDate || "").trim();
+  if (eligibilityMode === "worked_on_date" && explicitCriterionDate && !/^\d{4}-\d{2}-\d{2}$/.test(explicitCriterionDate)) {
+    return json({ error: "실제 출근 기준일을 날짜 형식으로 입력해 주세요." }, 400);
   }
 
   const existing = editingId
     ? await context.env.DB.prepare("SELECT id, route FROM attendance_leave_grants_v5 WHERE id = ?").bind(editingId).first()
     : null;
   if (editingId && !existing) return json({ error: "수정할 부여 기록을 찾지 못했습니다." }, 404);
-  const id = existing?.id || crypto.randomUUID();
 
-  const values = [
-    route,
-    grantType,
-    grantScope,
-    grantMonth,
-    grantedDays,
-    validFrom,
-    validTo,
-    eligibilityMode,
-    eligibilityMode === "worked_on_date" ? criterionDate : null,
-    grantScope === "employee" ? employeeId : null,
-    JSON.stringify(grantScope === "route" ? excludedEmployeeIds : []),
-    String(body.reason || "").trim(),
-    String(body.note || "").trim(),
-  ];
+  const saveOne = async (occurrenceDate, id) => {
+    const criterionDate = eligibilityMode === "worked_on_date" ? (occurrenceDates.length > 1 ? occurrenceDate : (explicitCriterionDate || occurrenceDate)) : null;
+    if (criterionDate && !criterionDate.startsWith(grantMonth)) {
+      throw new Error("실제 출근 기준일은 발생 월 안의 날짜로 입력해 주세요.");
+    }
+    const values = [
+      route,
+      grantType,
+      grantScope,
+      grantMonth,
+      occurrenceDate,
+      grantedDays,
+      validFrom,
+      validTo,
+      eligibilityMode,
+      criterionDate,
+      grantScope === "employee" ? employeeId : null,
+      JSON.stringify(grantScope === "route" ? excludedEmployeeIds : []),
+      String(body.reason || "").trim(),
+      String(body.note || "").trim(),
+    ];
+    if (existing) {
+      await context.env.DB.prepare(`
+        UPDATE attendance_leave_grants_v5
+        SET route = ?, grant_type = ?, grant_scope = ?, grant_month = ?, occurrence_date = ?, granted_days = ?,
+            valid_from = ?, valid_to = ?, eligibility_mode = ?, criterion_date = ?, employee_id = ?,
+            excluded_employee_ids_json = ?, reason = ?, note = ?, updated_at = datetime('now')
+        WHERE id = ?
+      `).bind(...values, id).run();
+    } else {
+      await context.env.DB.prepare(`
+        INSERT INTO attendance_leave_grants_v5
+        (id, route, grant_type, grant_scope, grant_month, occurrence_date, granted_days, valid_from, valid_to,
+         eligibility_mode, criterion_date, employee_id, excluded_employee_ids_json, reason, note)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(id, ...values).run();
+    }
+  };
 
+  const savedIds = [];
   if (existing) {
-    await context.env.DB.prepare(`
-      UPDATE attendance_leave_grants_v5
-      SET route = ?, grant_type = ?, grant_scope = ?, grant_month = ?, granted_days = ?,
-          valid_from = ?, valid_to = ?, eligibility_mode = ?, criterion_date = ?, employee_id = ?,
-          excluded_employee_ids_json = ?, reason = ?, note = ?, updated_at = datetime('now')
-      WHERE id = ?
-    `).bind(...values, id).run();
+    await saveOne(occurrenceDates[0], existing.id);
+    savedIds.push(existing.id);
   } else {
-    await context.env.DB.prepare(`
-      INSERT INTO attendance_leave_grants_v5
-      (id, route, grant_type, grant_scope, grant_month, granted_days, valid_from, valid_to,
-       eligibility_mode, criterion_date, employee_id, excluded_employee_ids_json, reason, note)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).bind(id, ...values).run();
+    for (const occurrenceDate of occurrenceDates) {
+      const id = crypto.randomUUID();
+      await saveOne(occurrenceDate, id);
+      savedIds.push(id);
+    }
   }
 
   const affectedRoutes = new Set([route]);
@@ -162,7 +186,7 @@ export async function onRequestPost(context) {
     affectedMonths += recalculated.affectedMonths;
   }
 
-  return json({ ok: true, id, replaced: Boolean(existing), affectedMonths }, 201);
+  return json({ ok: true, id: savedIds[0], ids: savedIds, createdCount: savedIds.length, replaced: Boolean(existing), affectedMonths }, 201);
 }
 
 function groupByRoute(rows) {
@@ -177,6 +201,13 @@ function groupByRoute(rows) {
 function normalizeEmployeeIdList(value) {
   const values = Array.isArray(value) ? value : String(value || "").split(/[\s,;]+/);
   return [...new Set(values.map(normalizeEmployeeId).filter(Boolean))];
+}
+
+
+function normalizeOccurrenceDates(value, grantMonth) {
+  const values = Array.isArray(value) ? value : String(value || "").split(/[\s,;]+/);
+  const normalized = [...new Set(values.map((item) => String(item || "").trim()).filter(Boolean))];
+  return normalized.length ? normalized : (grantMonth ? [`${grantMonth}-01`] : []);
 }
 
 function roundHalf(value) {

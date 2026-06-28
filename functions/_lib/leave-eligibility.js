@@ -25,7 +25,7 @@ export function parseEvents(value) {
 /**
  * 경로 일괄 부여의 대상자를 계산합니다.
  *
- * - all: 발생 월 1일보다 입사일이 빠른 직원
+ * - all: 발생일 당일을 포함하여 그날까지 입사한 직원
  * - worked_on_date: 발생 월 마감자료에서 기준일에 실제 출근한 직원
  * - employee: 지정 사번 1명
  *
@@ -40,7 +40,7 @@ export function resolveEligibleEmployees(grant, {
   const excluded = new Set(parseEmployeeIds(grant?.excluded_employee_ids_json));
   const grantScope = String(grant?.grant_scope || "route");
   const eligibilityMode = String(grant?.eligibility_mode || "all");
-  const cutoffDate = `${String(grant?.grant_month || "")}-01`;
+  const cutoffDate = firstValidDate(grant?.occurrence_date, grant?.criterion_date, `${String(grant?.grant_month || "")}-01`);
 
   if (grantScope === "employee") {
     const employeeId = normalizeEmployeeId(grant?.employee_id);
@@ -78,10 +78,10 @@ export function resolveEligibleEmployees(grant, {
       missingHireCount += 1;
       continue;
     }
-    // “5월 1일 이전 입사자”처럼 발생 월 1일 당일 입사자는 제외합니다.
-    if (hireDate >= cutoffDate) continue;
+    // 발생일 당일 입사자는 포함하고, 발생일 이후 입사자는 제외합니다.
+    if (hireDate > cutoffDate) continue;
     const terminationDate = firstValidDate(member.termination_date);
-    if (terminationDate && terminationDate < String(grant?.valid_from || cutoffDate)) continue;
+    if (terminationDate && terminationDate < cutoffDate) continue;
     employeeIds.push(employeeId);
   }
   employeeIds.sort();

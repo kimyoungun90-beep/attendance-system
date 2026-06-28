@@ -78,6 +78,7 @@ export async function onRequestGet(context) {
         grantId: grant.id,
         grantType: grant.grant_type || "substitute",
         grantMonth: grant.grant_month,
+        occurrenceDate: grant.occurrence_date || "",
         grantedDays: roundHalf(grant.granted_days),
         remaining,
         validFrom: grant.valid_from,

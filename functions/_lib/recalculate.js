@@ -79,6 +79,7 @@ export async function recalculateRoute(db, route) {
         grantId: grant.id,
         grantType: VALID_GRANT_TYPES.has(grant.grant_type) ? grant.grant_type : "substitute",
         grantMonth: grant.grant_month,
+        occurrenceDate: grant.occurrence_date || "",
         validFrom: grant.valid_from,
         validTo: grant.valid_to,
         remaining: roundHalf(grant.granted_days),
@@ -117,6 +118,13 @@ export async function recalculateRoute(db, route) {
       const substituteEvents = legacyEvents
         .filter((event) => !String(event.planStatus || "").startsWith("보상휴가"))
         .filter((event) => String(event.source || "") !== "기본 휴무 초과")
+        // 발생일 자동 차감은 현재도 같은 발생일 부여 기록이 있을 때만 유지합니다.
+        // 관리자가 부여 기록을 삭제하거나 발생일을 바꾸면 과거의 자동 차감도 재계산에서 제거됩니다.
+        .filter((event) => {
+          const automatic = Boolean(event?.automatic) || String(event?.source || "") === "발생일 지정 자동 대체휴무";
+          if (!automatic) return true;
+          return lots.some((lot) => lot.grantType === "substitute" && lot.occurrenceDate === event.date);
+        })
         .filter(validUsageEvent)
         .sort(eventSort);
 

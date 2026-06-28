@@ -72,8 +72,8 @@ export async function onRequestPost(context) {
     }, 413);
   }
 
-  const oldClosureFiles = replace && sourceType === "closure"
-    ? await findMatchingClosureFiles(context, route, month, fileKind)
+  const oldClosureFiles = replace
+    ? await findMatchingArchiveFiles(context, route, month, fileKind)
     : [];
 
   const id = crypto.randomUUID();
@@ -124,10 +124,10 @@ export async function onRequestPost(context) {
   return json({ ok: true, id, storageType, r2Configured: Boolean(context.env.FILES) }, 201);
 }
 
-async function findMatchingClosureFiles(context, route, month, fileKind) {
+async function findMatchingArchiveFiles(context, route, month, fileKind) {
   const old = await context.env.DB.prepare(`
     SELECT id, storage_type, object_key FROM attendance_archive_files
-    WHERE route = ? AND month = ? AND file_kind = ? AND source_type = 'closure'
+    WHERE route = ? AND month = ? AND file_kind = ?
   `).bind(route, month, fileKind).all();
   return old.results || [];
 }

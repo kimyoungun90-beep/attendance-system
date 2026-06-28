@@ -16,6 +16,10 @@ const FACT_COLUMNS = {
   worked_dates_json: "TEXT NOT NULL DEFAULT '[]'",
 };
 
+
+const GRANT_COLUMNS = {
+  occurrence_date: "TEXT",
+};
 const SUMMARY_COLUMNS = {
   compensation_needed: "REAL NOT NULL DEFAULT 0",
   available_compensation: "REAL NOT NULL DEFAULT 0",
@@ -342,6 +346,7 @@ async function initialize(db) {
 
   await ensureColumns(db, "attendance_monthly_employee_facts", FACT_COLUMNS);
   await ensureColumns(db, "attendance_monthly_summaries_v3", SUMMARY_COLUMNS);
+  await ensureColumns(db, "attendance_leave_grants_v5", GRANT_COLUMNS);
 
   await runStaticBatch(db, [
     `DELETE FROM attendance_closures

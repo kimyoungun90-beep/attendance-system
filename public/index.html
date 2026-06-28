@@ -5,14 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#123B72" />
   <title>전자랜드 · 홈플러스 근태 관리</title>
-  <link rel="stylesheet" href="./assets/styles.css?v=10" />
+  <link rel="stylesheet" href="./assets/styles.css?v=18" />
 </head>
 <body>
   <div class="app-shell">
     <header class="topbar">
       <div>
         <p class="eyebrow">ATTENDANCE MANAGEMENT</p>
-        <h1>전자랜드 · 홈플러스 근태 관리 <span class="version-tag">v17</span></h1>
+        <h1>전자랜드 · 홈플러스 근태 관리 <span class="version-tag">v18</span></h1>
       </div>
       <div class="topbar-actions">
         <span id="storageBadge" class="badge neutral">저장 방식 확인 중</span>
@@ -25,7 +25,7 @@
       <button class="tab active" data-view="checker" type="button">근태 종합 점검</button>
       <button class="tab" data-view="annualLeave" type="button">연차 누적 관리</button>
       <button class="tab" data-view="substitute" type="button">대체휴무·보상휴가 부여</button>
-      <button class="tab" data-view="system" type="button">시스템 수정</button>
+      <button class="tab" data-view="system" type="button">인력 매칭</button>
       <button class="tab" data-view="files" type="button">월 마감 파일 보관함</button>
       <button class="tab" data-view="history" type="button">월 마감 기록</button>
     </nav>
@@ -102,12 +102,12 @@
             </div>
 
             <div class="field-group optional-upload">
-              <label class="field-label">다른 작성자의 최종본 <span class="optional-label">선택</span></label>
+              <label class="field-label">증빙 반영·비교 최종본 <span class="optional-label">선택</span></label>
               <label class="dropzone compact-dropzone" id="referenceDropzone">
                 <input id="referenceFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
                 <span class="drop-icon">C</span>
-                <strong id="referenceFileName">비교할 최종본 파일 선택</strong>
-                <small>같은 월은 사번+날짜별 값, 다른 월은 시트 구조를 비교합니다.</small>
+                <strong id="referenceFileName">증빙 O 입력 최종본 또는 비교 파일 선택</strong>
+                <small>출근 미등록 시트에 O를 입력한 최종본은 증빙 출근으로 반영하고, 같은 월 파일은 사번+날짜별 값도 비교합니다.</small>
               </label>
             </div>
 
@@ -150,6 +150,7 @@
                   <div class="toolbar-actions">
                     <input id="searchInput" class="input search" type="search" placeholder="이름·사번·매장 검색" />
                     <select id="storeFilter" class="input compact"><option value="">전체 매장</option></select>
+                    <select id="managerFilter" class="input compact"><option value="">전체 매니저</option></select>
                     <button id="exportButton" class="btn secondary" type="button">최종본 양식 엑셀 저장</button>
                     <button id="saveClosureButton" class="btn primary" type="button">월 마감 교체 저장</button>
                   </div>
@@ -164,7 +165,7 @@
                   <button class="inner-tab" data-result-tab="shortage" type="button">대체·보상 초과 <b id="shortageTabCount">0</b></button>
                   <button class="inner-tab" data-result-tab="annual" type="button">연차 등록·누적 <b id="annualTabCount">0</b></button>
                   <button class="inner-tab" data-result-tab="annualCompare" type="button">연차 신청 대조 <b id="annualCompareTabCount">0</b></button>
-                  <button class="inner-tab" data-result-tab="managerRequests" type="button">매니저 수정요청 <b id="managerRequestTabCount">0</b></button>
+                  <button class="inner-tab" data-result-tab="managerRequests" type="button">매니저별 이상 근태 <b id="managerRequestTabCount">0</b></button>
                   <button class="inner-tab" data-result-tab="referenceCompare" type="button">최종본 비교 <b id="referenceCompareTabCount">0</b></button>
                 </div>
 
@@ -260,6 +261,11 @@
                 </div>
                 <div class="field-group"><label class="field-label" for="grantMonth">발생 월</label><input id="grantMonth" class="input" type="month" required /></div>
               </div>
+              <div class="field-group">
+                <label class="field-label" for="grantOccurrenceDates">발생일·자동 사용 지정일</label>
+                <textarea id="grantOccurrenceDates" class="textarea" rows="3" placeholder="예: 2026-06-03&#10;여러 날짜는 줄바꿈·쉼표로 입력"></textarea>
+                <p class="field-help">날짜별로 각각 부여 기록이 생성됩니다. 해당 날짜에 계획이 휴무이고 출근시간이 없으면 대체휴무 1일 사용으로 자동 인식합니다. 휴무 계획인데 출근기록이 있으면 사용하지 않고 계획·근태 상이로 남깁니다.</p>
+              </div>
               <div class="two-cols" id="grantAmountRow">
                 <div class="field-group"><label class="field-label" for="grantDays">1인당 부여 일수</label><input id="grantDays" class="input" type="number" min="0.5" step="0.5" value="1" required /></div>
                 <div class="field-group" id="grantEmployeeField"><label class="field-label" for="grantEmployeeId">대상 사번</label><input id="grantEmployeeId" class="input" placeholder="예: E254114" /></div>
@@ -271,10 +277,10 @@
               <div class="field-group" id="grantEligibilityField">
                 <label class="field-label" for="grantEligibility">경로 일괄 부여 대상</label>
                 <select id="grantEligibility" class="input">
-                  <option value="all">발생 월 1일 이전 입사자</option>
+                  <option value="all">발생일 당일 포함 이전 입사자</option>
                   <option value="worked_on_date">기준일에 실제 출근한 직원만</option>
                 </select>
-                <p class="field-help">기본값은 발생 월 1일 이전 입사자입니다. 예: 5월분은 5월 1일 이전, 6월분은 6월 1일 이전 입사자에게 부여됩니다. 실제 출근자 기준도 선택할 수 있습니다.</p>
+                <p class="field-help">기본값은 각 발생일 당일을 포함하여 그날까지 입사한 직원입니다. 예: 6월 3일 발생분은 6월 5일 입사자를 제외합니다. 실제 출근자 기준도 선택할 수 있습니다.</p>
               </div>
               <div class="field-group hidden" id="grantCriterionField"><label class="field-label" for="grantCriterionDate">실제 출근 기준일</label><input id="grantCriterionDate" class="input" type="date" /></div>
               <div class="field-group" id="grantExclusionField">
@@ -305,7 +311,7 @@
             <div id="grantSummary" class="grant-summary"></div>
             <div class="table-wrap">
               <table class="wide-table">
-                <thead><tr><th>경로</th><th>구분</th><th>부여 방식</th><th>발생 월</th><th>1인당</th><th>적용 인원</th><th>총 부여</th><th>사용</th><th>미사용</th><th>대상 기준</th><th>제외</th><th>사용기간</th><th>사유/메모</th><th>관리</th></tr></thead>
+                <thead><tr><th>경로</th><th>구분</th><th>부여 방식</th><th>발생 월</th><th>발생일</th><th>1인당</th><th>적용 인원</th><th>총 부여</th><th>사용</th><th>미사용</th><th>대상 기준</th><th>제외</th><th>사용기간</th><th>사유/메모</th><th>관리</th></tr></thead>
                 <tbody id="grantTableBody"></tbody>
               </table>
             </div>
@@ -317,7 +323,7 @@
         <div class="substitute-layout workforce-layout">
           <section class="panel form-panel">
             <div class="panel-heading">
-              <div><span class="step-label">SYSTEM SETTING</span><h2>월별 인력·매장매칭 등록</h2></div>
+              <div><span class="step-label">WORKFORCE MATCHING</span><h2>월별 인력·매장매칭 등록</h2></div>
             </div>
             <p class="muted">매월 받은 ‘인력 및 매장매칭(랜드,홈플)’ 엑셀을 등록합니다. 같은 월 파일을 다시 저장하면 기존 월 자료를 완전히 교체합니다.</p>
             <form id="workforceForm">
@@ -359,7 +365,7 @@
             <div class="panel-heading">
               <div><span class="step-label">FILE VAULT</span><h2>월 마감 파일 보관</h2></div>
             </div>
-            <p class="muted">계획표·근태표·수정본을 경로와 월별로 저장하고 다시 내려받을 수 있습니다. 월 마감 저장 시 사용한 계획표와 근태표도 자동 보관됩니다.</p>
+            <p class="muted">계획표·근태표·수정본을 경로와 월별로 저장하고 다시 내려받을 수 있습니다. 같은 경로·같은 월·같은 파일 구분을 다시 올리면 기존 보관 파일을 교체합니다.</p>
             <div id="fileStorageNotice" class="alert success file-storage-notice">파일 저장소 상태를 확인 중입니다.</div>
             <form id="archiveForm">
               <div class="field-group">
@@ -421,6 +427,6 @@
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
-  <script type="module" src="./assets/app.js?v=10"></script>
+  <script type="module" src="./assets/app.js?v=18"></script>
 </body>
 </html>

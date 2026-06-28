@@ -43,6 +43,7 @@ export async function buildFinalTemplateWorkbook(result) {
   buildDayoffSubstituteSheet(workbook, result, context, year, monthNo);
   buildAnnualComparisonSheet(workbook, result, year, monthNo);
   buildIssueSummarySheet(workbook, result, context, year, monthNo);
+  buildManagerRequestSheet(workbook, result, year, monthNo);
   buildAnnualLedgerSheet(workbook, result, context, year, monthNo);
   fillPlanSheet(workbook.Sheets["근무 계획"], result, context, daysInMonth);
   fillAttendanceRawSheet(workbook.Sheets["근태 RAW"], result);
@@ -53,6 +54,7 @@ export async function buildFinalTemplateWorkbook(result) {
     "출근 미등록",
     "휴무 초과자",
     "전체 요약본",
+    "매니저별 이상 근태",
     "해당 월 연차 등록 현황 및 일자",
     "연차 누적 현황",
     "근무 계획",
@@ -95,6 +97,7 @@ function buildContext(result, daysInMonth) {
   const planById = groupBy(result.plan?.rows || [], (row) => normalizeId(row.employeeId));
   const attendanceByKey = buildAttendanceMap(result.attendance?.rows || []);
   const summaryById = new Map((result.employeeSummaries || []).map((row) => [normalizeId(row.employeeId), row]));
+  const evidenceSet = new Set((result.evidenceOverrides || []).map(String));
   const issueMap = new Map();
   for (const issue of result.mismatchRows || []) addIssue(issueMap, issue.employeeId, issue.date, issue.reason || issue.result);
   for (const summary of result.employeeSummaries || []) {
@@ -102,7 +105,7 @@ function buildContext(result, daysInMonth) {
       addIssue(issueMap, summary.employeeId, event.date, `기본 휴무 기준 ${daysText(summary.baseAllowance)} 초과분`);
     }
     const combinedAvailable = roundHalf(Number(summary.availableSubstitute || 0) + Number(summary.availableCompensation || 0));
-    const combinedUsed = roundHalf(Number(summary.explicitSubDayoffUsed || 0) + Number(summary.compensationLeaveUsed ?? summary.compensationNeeded ?? 0));
+    const combinedUsed = roundHalf(Number(summary.substituteNeeded ?? summary.explicitSubDayoffUsed ?? 0) + Number(summary.compensationLeaveUsed ?? summary.compensationNeeded ?? 0));
     const combinedShortage = Number(summary.combinedShortage ?? Math.max(0, combinedUsed - combinedAvailable));
     if (combinedShortage > 0) {
       const combinedEvents = [...(summary.substituteEvents || []), ...(summary.compensationEvents || [])]
@@ -158,17 +161,27 @@ function buildContext(result, daysInMonth) {
   const dailyByKey = new Map();
   for (const person of people) {
     const daily = {};
+    const summary = summaryById.get(person.employeeId) || {};
+    const automaticSubstituteDates = new Set((summary.substituteEvents || [])
+      .filter((event) => Boolean(event?.automatic) || String(event?.source || "") === "발생일 지정 자동 대체휴무")
+      .map((event) => String(event.date || ""))
+      .filter(Boolean));
     for (let day = 1; day <= daysInMonth; day += 1) {
       const date = `${result.targetMonth}-${String(day).padStart(2, "0")}`;
       const planStatus = normalizePlan(person.plan?.plans?.[day]);
       const attendance = attendanceByKey.get(`${person.employeeId}|${date}`) || emptyAttendance();
+      const evidenceKey = `${person.employeeId}|${date}`;
+      const evidence = evidenceSet.has(evidenceKey);
+      const automaticSubstituteDayoff = automaticSubstituteDates.has(date) && planStatus === "휴무" && !attendance.hasClockIn;
       const issues = issueMap.get(`${person.employeeId}|${day}`) || [];
       daily[day] = {
         date,
         planStatus,
         attendance,
-        display: dailyDisplay(planStatus, attendance),
-        issues: [...new Set(issues)],
+        evidence,
+        automaticSubstituteDayoff,
+        display: evidence ? "출근" : automaticSubstituteDayoff ? "휴무" : dailyDisplay(planStatus, attendance),
+        issues: evidence ? [] : [...new Set(issues)],
       };
     }
     dailyByKey.set(person.key, daily);
@@ -228,7 +241,7 @@ function buildIssueSummarySheet(workbook, result, ctx, year, monthNo) {
     const group = ensureGroup(summary.employeeId, summary);
     if (!group) continue;
     const combinedShortage = Number(summary.combinedShortage ?? Math.max(0,
-      Number(summary.baseExcess || 0) + Number(summary.explicitSubDayoffUsed || 0) + Number(summary.compensationNeeded || 0)
+      Number(summary.substituteNeeded ?? summary.explicitSubDayoffUsed ?? 0) + Number(summary.compensationNeeded || 0)
       - Number(summary.availableSubstitute || 0) - Number(summary.availableCompensation || 0)
     ));
     if (combinedShortage > 0) {
@@ -395,7 +408,7 @@ function styleSummarySheet(sheet, lastRow) {
 function buildManagerRequestSheet(workbook, result, year, monthNo) {
   const rows = result.managerRequests || [];
   const matrix = [
-    [`${year}년 ${monthNo}월 매니저 공유용 수정요청`],
+    [`${year}년 ${monthNo}월 매니저별 상담사 이상 근태`],
     ["복사용 수정요청 멘트를 그대로 전달할 수 있으며, 근태·계획·연차 신청 불일치가 함께 반영됩니다."],
     [],
     ["지역장", "매니저", "지역", "매장명", "이름", "사번", "문제 건수", "문제 요약", "복사용 수정요청 멘트", "전달상태"],
@@ -417,8 +430,8 @@ function buildManagerRequestSheet(workbook, result, year, monthNo) {
   sheet["!rows"] = [{ hpt: 30 }, { hpt: 24 }, { hpt: 8 }, { hpt: 30 }];
   styleSimpleReportSheet(sheet, matrix.length, 10, [7, 8]);
   for (let r = 4; r < matrix.length; r += 1) sheet["!rows"][r] = { hpt: 48 };
-  workbook.Sheets["매니저 공유용"] = sheet;
-  if (!workbook.SheetNames.includes("매니저 공유용")) workbook.SheetNames.push("매니저 공유용");
+  workbook.Sheets["매니저별 이상 근태"] = sheet;
+  if (!workbook.SheetNames.includes("매니저별 이상 근태")) workbook.SheetNames.push("매니저별 이상 근태");
 }
 
 function buildAnnualComparisonSheet(workbook, result, year, monthNo) {
@@ -695,6 +708,7 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
         setValue(sheet, address, item?.display || "");
       }
       applyStatusStyle(sheet, address, item?.display || "");
+      if (item?.evidence) applyEvidenceWorkStyle(sheet, address);
       if (item?.issues?.length) {
         applyIssueStyle(sheet, address, item.issues);
         issueCount += 1;
@@ -715,13 +729,16 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
     const unpaidCount = planValues.filter((value) => value === "무급휴가").length;
     const familyCount = planValues.filter((value) => value === "경조").length;
     const evidenceNeeded = (result.missingRows || []).some((item) => normalizeId(item.employeeId) === person.employeeId);
+    const evidenceCompleted = Object.values(daily).some((item) => Boolean(item?.evidence));
 
     const baseAllowance = roundHalf(Number(summary.baseAllowance || 0));
     const additionalAvailable = roundHalf(Number(summary.availableSubstitute || 0) + Number(summary.availableCompensation || 0));
     const displayedDayoffExcess = roundHalf(Math.max(0, displayedDayoffCount - baseAllowance));
     const explicitSubstituteUsed = roundHalf(Number(summary.explicitSubDayoffUsed || 0));
+    const autoSubstituteUsed = roundHalf(Number(summary.autoSubstituteUsed || 0));
+    const totalSubstituteUsed = roundHalf(Number(summary.substituteNeeded ?? (explicitSubstituteUsed + autoSubstituteUsed)));
     const compensationUsed = roundHalf(Number(summary.compensationLeaveUsed ?? summary.compensationNeeded ?? 0));
-    const combinedLeaveUsed = roundHalf(explicitSubstituteUsed + compensationUsed);
+    const combinedLeaveUsed = roundHalf(totalSubstituteUsed + compensationUsed);
     // 기본 휴무 초과와 대체·보상 초과는 서로 합산하지 않습니다.
     const combinedShortage = roundHalf(Math.max(0, combinedLeaveUsed - additionalAvailable));
 
@@ -729,6 +746,8 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
     if (member.note) noteParts.push(member.note);
     if (plannedDayoffCount !== displayedDayoffCount) noteParts.push(`계획 휴무 ${plannedDayoffCount}일 / 최종 표시 휴무 ${displayedDayoffCount}일`);
     if (displayedDayoffExcess > 0) noteParts.push(`기본 휴무 ${compactNumber(displayedDayoffExcess)}일 초과`);
+    const autoDates = (summary.substituteEvents || []).filter((event) => event.automatic).map((event) => String(event.date || "").slice(5).replace("-", "/"));
+    if (autoDates.length) noteParts.push(`지정일 자동 대체휴무 ${autoDates.join(", ")} · ${compactNumber(autoSubstituteUsed)}일`);
     for (let day = 1; day <= daysInMonth; day += 1) {
       if (daily[day]?.issues?.length) noteParts.push(`${monthNo}/${day} ${daily[day].issues.join("/")}`);
     }
@@ -745,7 +764,7 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
     setFormula(sheet, addr(3), `COUNTIF(${dailyRange},"휴무")`, displayedDayoffCount);
     setFormula(sheet, addr(4), `MAX(0,${addr(3)}-${addr(2)})`, displayedDayoffExcess);
     setValue(sheet, addr(5), additionalAvailable);
-    setFormula(sheet, addr(6), `COUNTIF(${dailyRange},"대체휴일(1일)")+COUNTIF(${dailyRange},"대체휴무")+COUNTIF(${dailyRange},"보상휴가(1일)")+COUNTIF(${dailyRange},"보상휴가")+0.5*COUNTIF(${dailyRange},"대체휴일(0.5일)")+0.5*COUNTIF(${dailyRange},"보상휴가(0.5일)")`, combinedLeaveUsed);
+    setFormula(sheet, addr(6), `COUNTIF(${dailyRange},"대체휴일(1일)")+COUNTIF(${dailyRange},"대체휴무")+COUNTIF(${dailyRange},"보상휴가(1일)")+COUNTIF(${dailyRange},"보상휴가")+0.5*COUNTIF(${dailyRange},"대체휴일(0.5일)")+0.5*COUNTIF(${dailyRange},"보상휴가(0.5일)")+${compactNumber(autoSubstituteUsed)}`, combinedLeaveUsed);
     setFormula(sheet, addr(7), `MAX(0,${addr(6)}-${addr(5)})`, combinedShortage);
     setValue(sheet, addr(8), clockCorrection);
     setValue(sheet, addr(9), educationCount);
@@ -757,7 +776,7 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
     setValue(sheet, addr(15), daysInMonth);
     setValue(sheet, addr(16), roundHalf(Number(summary.annualMissingApplication || 0)));
     setValue(sheet, addr(17), roundHalf(Number(summary.annualApproved ?? summary.currentAnnualLeave ?? 0)));
-    setValue(sheet, addr(18), evidenceNeeded ? "O" : "");
+    setValue(sheet, addr(18), evidenceCompleted ? "완료" : evidenceNeeded ? "필요" : "");
     setValue(sheet, addr(19), "");
     setValue(sheet, addr(20), [...new Set(noteParts)].join(" · "));
 
@@ -1361,6 +1380,18 @@ function applyStatusStyle(sheet, address, value) {
     ...base,
     fill: { patternType: "solid", fgColor: { rgb: fill } },
     font: { ...(base.font || {}), name: "맑은 고딕", sz: 10, bold, color: { rgb: fontColor } },
+  };
+}
+
+function applyEvidenceWorkStyle(sheet, address) {
+  if (!sheet[address]) return;
+  const base = sheet[address].s ? clone(sheet[address].s) : {};
+  sheet[address].s = {
+    ...base,
+    fill: { patternType: "solid", fgColor: { rgb: "FFA9D08E" } },
+    font: { ...(base.font || {}), name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FF000000" } },
+    alignment: { ...(base.alignment || {}), horizontal: "center", vertical: "center", wrapText: true },
+    border: thinBorder("FFB7C3D0"),
   };
 }
 

@@ -55,6 +55,7 @@ function bindEvents() {
   $("#resetButton").addEventListener("click", resetAll);
   $("#searchInput").addEventListener("input", () => { state.currentPage = 1; renderActiveTable(); });
   $("#storeFilter").addEventListener("change", () => { state.currentPage = 1; renderActiveTable(); });
+  $("#managerFilter").addEventListener("change", () => { state.currentPage = 1; renderActiveTable(); });
   $("#exportButton").addEventListener("click", exportResults);
   $("#saveClosureButton").addEventListener("click", saveClosure);
   $("#refreshHistoryButton").addEventListener("click", loadHistory);
@@ -125,6 +126,7 @@ function syncGrantDates() {
   const [year, monthNumber] = month.split("-").map(Number);
   $("#grantValidFrom").value = `${month}-01`;
   $("#grantValidTo").value = toISODate(new Date(year, monthNumber + 1, 0));
+  if (!text($("#grantEditingId")?.value)) $("#grantOccurrenceDates").value = `${month}-01`;
 }
 
 function syncGrantFormVisibility() {
@@ -140,7 +142,8 @@ function syncGrantFormVisibility() {
     $("#grantCriterionDate").value = "";
   } else if (eligibility === "worked_on_date" && !$("#grantCriterionDate").value) {
     const month = $("#grantMonth").value;
-    if (month) $("#grantCriterionDate").value = `${month}-01`;
+    const occurrenceDate = parseDateInput($("#grantOccurrenceDates")?.value || "")[0];
+    if (occurrenceDate || month) $("#grantCriterionDate").value = occurrenceDate || `${month}-01`;
   }
 }
 
@@ -187,7 +190,7 @@ function setAnnualFile(file) {
 
 function setReferenceFile(file) {
   state.referenceFile = file;
-  $("#referenceFileName").textContent = file ? file.name : "비교할 최종본 파일 선택";
+  $("#referenceFileName").textContent = file ? file.name : "증빙 O 입력 최종본 또는 비교 파일 선택";
 }
 
 async function analyzeFiles() {
@@ -217,13 +220,16 @@ async function analyzeFiles() {
       state.referenceFile ? fileToWorkbookSheets(state.referenceFile) : Promise.resolve(null),
       fetchAnnualLeaveDashboard(route, targetMonth, cutoffDate),
     ]);
-    if (!workforce?.members?.length) throw new Error(`${targetMonth} ${ROUTE_LABELS[route]} 경로의 인력·매장매칭 파일이 없습니다. 시스템 수정에서 먼저 등록해 주세요.`);
+    if (!workforce?.members?.length) throw new Error(`${targetMonth} ${ROUTE_LABELS[route]} 경로의 인력·매장매칭 파일이 없습니다. 인력 매칭에서 먼저 등록해 주세요.`);
     const plan = parsePlan(planWorkbook, targetMonth);
     const attendance = parseAttendance(attendanceWorkbook, targetMonth);
     state.priorLedger = await loadPriorLedger(route, targetMonth);
 
+    const parsedReference = referenceWorkbook ? parseReferenceFinalWorkbook(referenceWorkbook) : null;
     const result = compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, ledger: state.priorLedger });
     appendWorkforceMatchingIssues(result, workforce, plan, route, targetMonth);
+    const evidenceOverrides = parsedReference?.evidenceKeys || [];
+    applyEvidenceOverrides(result, evidenceOverrides);
     const parsedAnnual = annualWorkbook
       ? parseAnnualApplications(annualWorkbook, targetMonth)
       : annualApplicationsToParsed(annualLedger?.applications || [], targetMonth);
@@ -231,8 +237,8 @@ async function analyzeFiles() {
       ? compareAnnualApplications(parsedAnnual, plan, targetMonth, cutoffDate, workforce)
       : emptyAnnualComparison();
     mergeAnnualLeaveLedger(result, annualLedger, annualComparison);
-    const referenceComparison = referenceWorkbook
-      ? compareReferenceFinal(parseReferenceFinalWorkbook(referenceWorkbook), result, targetMonth, cutoffDate, workforce)
+    const referenceComparison = parsedReference
+      ? compareReferenceFinal(parsedReference, result, targetMonth, cutoffDate, workforce)
       : emptyReferenceComparison();
     const managerRequests = buildManagerRequests(result, annualComparison, workforce, targetMonth);
     state.result = {
@@ -250,6 +256,7 @@ async function analyzeFiles() {
       annualLedger: annualLedger || null,
       annualApplications: parsedAnnual?.rows || [],
       referenceComparison,
+      evidenceOverrides,
       managerRequests,
       analyzedAt: new Date().toISOString(),
       workforce,
@@ -760,8 +767,71 @@ function parseReferenceFinalWorkbook(sheets) {
     dateRowIndex,
     values,
     employeeCount: employees.size,
+    evidenceKeys: parseEvidenceOverrides(normalizedSheets),
     sheetNames: normalizedSheets.map((sheet) => sheet.sheetName),
   };
+}
+
+function parseEvidenceOverrides(sheets) {
+  const evidenceSheet = (sheets || []).find((sheet) => /출근\s*미등록|증빙/.test(String(sheet.sheetName || "")));
+  if (!evidenceSheet) return [];
+  const matrix = evidenceSheet.matrix || [];
+  const headerIndex = findFlexibleHeaderRow(matrix, (headers) => (
+    findHeaderIndex(headers, ["사번", "사원번호"]) >= 0
+    && findHeaderIndex(headers, ["발생일", "근무일자", "일자", "날짜"]) >= 0
+    && findHeaderIndex(headers, ["증빙여부(O입력)", "증빙여부", "출근증빙", "증빙"]) >= 0
+  ));
+  if (headerIndex < 0) return [];
+  const headers = (matrix[headerIndex] || []).map(normalizeHeader);
+  const employeeIdCol = findHeaderIndex(headers, ["사번", "사원번호"]);
+  const dateCol = findHeaderIndex(headers, ["발생일", "근무일자", "일자", "날짜"]);
+  const evidenceCol = findHeaderIndex(headers, ["증빙여부(O입력)", "증빙여부", "출근증빙", "증빙"]);
+  const keys = new Set();
+  for (const row of matrix.slice(headerIndex + 1)) {
+    const employeeId = normalizeEmployeeId(row[employeeIdCol]);
+    const date = parseReferenceFinalDate(row[dateCol]);
+    const mark = String(row[evidenceCol] ?? "").trim().toUpperCase().replace(/\s+/g, "");
+    const approved = ["O", "0", "○", "ㅇ", "Y", "YES", "TRUE", "완료", "증빙완료"].includes(mark);
+    if (approved && looksLikeEmployeeId(employeeId) && date) keys.add(`${employeeId}|${date}`);
+  }
+  return [...keys];
+}
+
+function applyEvidenceOverrides(result, evidenceKeys = []) {
+  const evidenceSet = new Set((evidenceKeys || []).map(String));
+  result.evidenceOverrides = [...evidenceSet];
+  if (!evidenceSet.size) return result;
+
+  // 출근 미등록 시트에 O가 입력된 사번+일자는 실제 출근으로 확정합니다.
+  // 보고용 목록에서만 숨기는 것이 아니라 월 마감의 실제 출근일에도 반영해,
+  // 이후 "특정일 실제 출근자만 부여" 기준에서도 정상 출근자로 인정합니다.
+  const evidenceDatesByEmployee = new Map();
+  for (const key of evidenceSet) {
+    const separator = key.indexOf("|");
+    if (separator < 0) continue;
+    const employeeId = normalizeEmployeeId(key.slice(0, separator));
+    const date = key.slice(separator + 1);
+    if (!employeeId || !/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+    if (!evidenceDatesByEmployee.has(employeeId)) evidenceDatesByEmployee.set(employeeId, new Set());
+    evidenceDatesByEmployee.get(employeeId).add(date);
+  }
+
+  for (const collection of [result.employeeFacts || [], result.employeeSummaries || []]) {
+    for (const row of collection) {
+      const dates = evidenceDatesByEmployee.get(normalizeEmployeeId(row.employeeId));
+      if (!dates?.size) continue;
+      row.workedDates = [...new Set([...(row.workedDates || []), ...dates])].sort();
+    }
+  }
+
+  result.missingRows = (result.missingRows || []).filter((row) => !evidenceSet.has(`${normalizeEmployeeId(row.employeeId)}|${row.date}`));
+  result.mismatchRows = (result.mismatchRows || []).filter((row) => {
+    const key = `${normalizeEmployeeId(row.employeeId)}|${row.date}`;
+    return !(evidenceSet.has(key) && row.result === "근무인데 출근기록 없음");
+  });
+  result.missingPeople = uniquePeople(result.missingRows);
+  result.mismatchPeople = uniquePeople(result.mismatchRows);
+  return result;
 }
 
 function finalDisplayValue(planStatus, attendanceValue) {
@@ -781,7 +851,7 @@ function normalizeFinalCompareValue(value) {
 function compareReferenceFinal(reference, result, targetMonth, cutoffDate, workforce) {
   const rows = [];
   if (reference.month && reference.month !== targetMonth) {
-    const currentNames = ["상담사근태", "계획&근태 상이 인원", "출근 미등록", "휴무 초과자", "전체 요약본", "해당 월 연차 등록 현황 및 일자", "연차 누적 현황", "근무 계획", "근태 RAW"];
+    const currentNames = ["상담사근태", "계획&근태 상이 인원", "출근 미등록", "휴무 초과자", "전체 요약본", "매니저별 이상 근태", "해당 월 연차 등록 현황 및 일자", "연차 누적 현황", "근무 계획", "근태 RAW"];
     const normalizeName = (name) => String(name).replace(/^\d+월/, "O월");
     const currentSet = new Set(currentNames.map(normalizeName));
     const referenceSet = new Set(reference.sheetNames.map(normalizeName));
@@ -825,17 +895,19 @@ function compareReferenceFinal(reference, result, targetMonth, cutoffDate, workf
   const attendanceMap = buildAttendanceMap(result.attendance.rows || []);
   const cutoffDay = Number(String(cutoffDate || `${targetMonth}-31`).slice(-2)) || 31;
   const generated = new Map();
+  const evidenceSet = new Set(result.evidenceOverrides || []);
   for (const person of selectedPlans) {
     for (let day = 1; day <= cutoffDay; day += 1) {
       const date = `${targetMonth}-${String(day).padStart(2, "0")}`;
+      const key = `${normalizeEmployeeId(person.employeeId)}|${date}`;
       const planStatus = normalizePlanCode(person.plans?.[day]);
       const attendanceValue = attendanceMap.get(`${person.employeeId}|${date}`) || emptyAttendanceValue();
-      generated.set(`${person.employeeId}|${date}`, {
+      generated.set(key, {
         employeeId: person.employeeId,
         name: person.name,
         store: person.store,
         date,
-        value: finalDisplayValue(planStatus, attendanceValue),
+        value: evidenceSet.has(key) ? "출근" : finalDisplayValue(planStatus, attendanceValue),
       });
     }
   }
@@ -1023,6 +1095,7 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
   for (const person of selectedPlans) {
     const basicDayoffDates = [];
     const explicitSubstituteEvents = [];
+    const autoSubstituteEvents = [];
     const compensationEvents = [];
     const annualLeaveEvents = [];
     const workedDates = [];
@@ -1031,12 +1104,20 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       const date = `${targetMonth}-${String(day).padStart(2, "0")}`;
       const planCode = normalizePlanCode(person.plans[day]);
       const attendanceValue = attendanceMap.get(`${person.employeeId}|${date}`) || emptyAttendanceValue();
-      const displayedStatus = finalDisplayValue(planCode, attendanceValue);
+      const automaticDays = planCode === "휴무" && !attendanceValue.hasClockIn
+        ? automaticSubstituteDays(ledger, person.employeeId, date)
+        : 0;
+      // 지정 발생일은 계획이 휴무이고 출근시간이 없으면 실제 근태 열의 표기보다
+      // "휴무"를 우선합니다. 따라서 휴무 1일로 세면서 대체휴무도 동시에 1일 차감합니다.
+      const displayedStatus = automaticDays > 0 ? "휴무" : finalDisplayValue(planCode, attendanceValue);
       // 휴무 사용량은 계획표 원본이 아니라 최종 일별 표시값을 기준으로 계산합니다.
       // 계획이 휴무여도 실제 출근기록이 있으면 출근으로 보며 휴무 사용에서 제외합니다.
       if (displayedStatus === "휴무") basicDayoffDates.push(date);
       const substituteDays = substitutePlanValue(displayedStatus);
       if (substituteDays > 0) explicitSubstituteEvents.push({ date, days: substituteDays, source: "표기 대체휴무", planStatus: displayedStatus });
+      if (automaticDays > 0 && substituteDays <= 0) {
+        autoSubstituteEvents.push({ date, days: automaticDays, source: "발생일 지정 자동 대체휴무", planStatus: "휴무", automatic: true });
+      }
       const compensationDays = compensationPlanValue(displayedStatus);
       if (compensationDays > 0) compensationEvents.push({ date, days: compensationDays, source: "표기 보상휴가", planStatus: displayedStatus });
       const annualDays = annualLeaveValue(planCode);
@@ -1052,7 +1133,8 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
     }));
     // 기본 휴무 초과는 대체휴무 사용과 별개로 관리합니다.
     // 대체휴무 잔여는 근무계획에 실제로 "대체휴일"로 등록한 일자만 차감합니다.
-    const substituteEvents = [...explicitSubstituteEvents].sort((a, b) => a.date.localeCompare(b.date));
+    const substituteEvents = [...explicitSubstituteEvents, ...autoSubstituteEvents].sort((a, b) => a.date.localeCompare(b.date));
+    const autoSubstituteDateSet = new Set(autoSubstituteEvents.map((event) => event.date));
 
     for (let day = 1; day <= lastDay; day += 1) {
       const planStatus = normalizePlanCode(person.plans[day]);
@@ -1095,7 +1177,10 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
         hasPrimaryIssue = true;
       }
 
-      if (!hasPrimaryIssue) {
+      // 지정 발생일에 휴무 계획 + 출근시간 없음이면 실제로 쉰 것으로 확정합니다.
+      // 실제 근태 열에 다른 값이 남아 있어도 이 경우에는 계획 상이로 올리지 않습니다.
+      const isAutomaticSubstituteDayoff = autoSubstituteDateSet.has(date) && planStatus === "휴무" && !attendanceValue.hasClockIn;
+      if (!hasPrimaryIssue && !isAutomaticSubstituteDayoff) {
         const mismatch = evaluateMismatch(planStatus, attendanceValue, attendance.hasActualStatusColumn);
         if (mismatch) {
           addMismatch(makeMismatchRow({
@@ -1114,9 +1199,10 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
 
     const basicDayoffUsed = roundHalf(basicDayoffDates.length);
     const explicitSubDayoffUsed = roundHalf(explicitSubstituteEvents.reduce((sum, event) => sum + event.days, 0));
+    const autoSubstituteUsed = roundHalf(autoSubstituteEvents.reduce((sum, event) => sum + event.days, 0));
     const compensationLeaveUsed = roundHalf(compensationEvents.reduce((sum, event) => sum + event.days, 0));
     const baseExcess = roundHalf(Math.max(0, basicDayoffUsed - baseAllowance));
-    const substituteNeeded = explicitSubDayoffUsed;
+    const substituteNeeded = roundHalf(explicitSubDayoffUsed + autoSubstituteUsed);
     const compensationNeeded = compensationLeaveUsed;
     const annualLeaveUsed = roundHalf(annualLeaveEvents.reduce((sum, event) => sum + event.days, 0));
     const preview = calculatePreviewLedger({
@@ -1128,7 +1214,7 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       ledger,
     });
     const combinedAvailable = roundHalf(Number(preview.availableSubstitute || 0) + Number(preview.availableCompensation || 0));
-    const combinedLeaveUsed = roundHalf(explicitSubDayoffUsed + compensationLeaveUsed);
+    const combinedLeaveUsed = roundHalf(substituteNeeded + compensationLeaveUsed);
     const combinedShortage = roundHalf(Math.max(0, combinedLeaveUsed - combinedAvailable));
     const combinedRemaining = roundHalf(Math.max(0, combinedAvailable - combinedLeaveUsed));
     const cumulativeAnnualLeave = roundHalf(Number(ledger.annualLeaveBefore[person.employeeId] || 0) + annualLeaveUsed);
@@ -1159,6 +1245,7 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       baseAllowance,
       basicDayoffUsed,
       explicitSubDayoffUsed,
+      autoSubstituteUsed,
       compensationLeaveUsed,
       baseExcess,
       baseExcessEvents,
@@ -1280,6 +1367,16 @@ function assembleResultCollections(base) {
     compensationShortagePeople: base.employeeSummaries.filter((row) => row.compensationShortage > 0).length,
     annualLeavePeople: base.employeeSummaries.filter((row) => row.currentAnnualLeave > 0).length,
   };
+}
+
+function automaticSubstituteDays(ledger, employeeId, date) {
+  const normalizedId = normalizeEmployeeId(employeeId);
+  const lots = ledger?.lotsByEmployee?.[normalizedId] || ledger?.lotsByEmployee?.[employeeId] || [];
+  const availableOnDate = lots
+    .filter((lot) => lot.grantType === "substitute" && lot.occurrenceDate === date && Number(lot.remaining || 0) > 0)
+    .reduce((sum, lot) => sum + Math.min(Number(lot.remaining || 0), Number(lot.grantedDays || lot.remaining || 0)), 0);
+  // 같은 날짜에 부여 기록이 여러 개 있어도 하루 자동 사용은 최대 1일입니다.
+  return roundHalf(Math.min(1, availableOnDate));
 }
 
 function calculatePreviewLedger({ employeeId, substituteEvents, compensationEvents, workedDates, targetMonth, ledger }) {
@@ -1586,7 +1683,10 @@ function renderResult() {
 
   const stores = [...new Set(result.employeeSummaries.map((row) => row.store).filter(Boolean))].sort();
   $("#storeFilter").innerHTML = `<option value="">전체 매장</option>${stores.map((store) => `<option>${escapeHtml(store)}</option>`).join("")}`;
+  const managers = [...new Set((result.managerRequests || []).map((row) => row.manager).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ko"));
+  $("#managerFilter").innerHTML = `<option value="">전체 매니저</option>${managers.map((manager) => `<option>${escapeHtml(manager)}</option>`).join("")}`;
   $("#searchInput").value = "";
+  $("#managerFilter").value = "";
   switchResultTab("missing");
 }
 
@@ -1790,9 +1890,11 @@ function renderCombinedJudgment(row) {
 function filterRows(rows) {
   const query = $("#searchInput").value.trim().toLowerCase();
   const store = $("#storeFilter").value;
+  const manager = $("#managerFilter")?.value || "";
   return rows.filter((row) => {
     const haystack = Object.values(row).map((value) => typeof value === "object" ? JSON.stringify(value) : String(value ?? "")).join(" ").toLowerCase();
-    return (!query || haystack.includes(query)) && (!store || row.store === store);
+    const managerMatch = !manager || state.activeResultTab !== "managerRequests" || row.manager === manager;
+    return (!query || haystack.includes(query)) && (!store || row.store === store) && managerMatch;
   });
 }
 
@@ -2142,7 +2244,7 @@ async function saveClosure() {
       })] : []),
       ...(state.referenceFile ? [uploadArchiveFile({
         file: state.referenceFile, route: result.route, month: result.targetMonth, fileKind: "other",
-        note: "다른 작성자 최종본 비교 원본", sourceType: "closure", closureId: data.id, replace: false,
+        note: "증빙 O 반영·최종본 비교 원본", sourceType: "closure", closureId: data.id, replace: false,
       })] : []),
     ]);
     await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard()]);
@@ -2183,12 +2285,12 @@ async function saveArchiveFile(event) {
       fileKind: $("#archiveKind").value,
       note: text($("#archiveNote").value),
       sourceType: "manual",
-      replace: false,
+      replace: true,
     });
     $("#archiveFile").value = "";
     $("#archiveNote").value = "";
     await loadArchiveFiles();
-    showToast("월 마감 파일을 보관했습니다.");
+    showToast("같은 경로·같은 월·같은 구분의 기존 파일을 교체하여 보관했습니다.");
   } catch (error) {
     showToast(error.message || "파일 보관 중 오류가 발생했습니다.");
   } finally {
@@ -2384,13 +2486,13 @@ function applyServerSummaries(serverRows) {
       expiredCompensation: roundHalf(row.expired_compensation),
       compensationShortage: roundHalf(row.compensation_shortage),
       combinedAvailable: roundHalf(Number(row.available_substitute || 0) + Number(row.available_compensation || 0)),
-      combinedLeaveUsed: roundHalf(Number(row.explicit_sub_dayoff_used || 0) + Number(row.compensation_needed || 0)),
+      combinedLeaveUsed: roundHalf(Number(row.substitute_needed || 0) + Number(row.compensation_needed || 0)),
       combinedRemaining: roundHalf(Math.max(0,
         Number(row.available_substitute || 0) + Number(row.available_compensation || 0)
-        - Number(row.explicit_sub_dayoff_used || 0) - Number(row.compensation_needed || 0)
+        - Number(row.substitute_needed || 0) - Number(row.compensation_needed || 0)
       )),
       combinedShortage: roundHalf(Math.max(0,
-        Number(row.explicit_sub_dayoff_used || 0) + Number(row.compensation_needed || 0)
+        Number(row.substitute_needed || 0) + Number(row.compensation_needed || 0)
         - Number(row.available_substitute || 0) - Number(row.available_compensation || 0)
       )),
       currentAnnualLeave: roundHalf(row.current_annual_leave),
@@ -2487,6 +2589,7 @@ async function saveGrant(event) {
     grantType: $("#grantType").value,
     grantScope: $("#grantScope").value,
     grantMonth: $("#grantMonth").value,
+    occurrenceDates: parseDateInput($("#grantOccurrenceDates").value),
     grantedDays: Number($("#grantDays").value),
     validFrom: $("#grantValidFrom").value,
     validTo: $("#grantValidTo").value,
@@ -2497,8 +2600,16 @@ async function saveGrant(event) {
     reason: text($("#grantReason").value),
     note: text($("#grantNote").value),
   };
-  if (!payload.grantMonth || !(payload.grantedDays > 0) || !payload.validFrom || !payload.validTo) {
-    showToast("발생 월·부여 일수·사용기간을 확인해 주세요.");
+  if (!payload.grantMonth || !payload.occurrenceDates.length || !(payload.grantedDays > 0) || !payload.validFrom || !payload.validTo) {
+    showToast("발생 월·발생일·부여 일수·사용기간을 확인해 주세요.");
+    return;
+  }
+  if (payload.occurrenceDates.some((date) => !/^\d{4}-\d{2}-\d{2}$/.test(date) || !date.startsWith(payload.grantMonth))) {
+    showToast("발생일은 발생 월 안의 날짜로 입력해 주세요.");
+    return;
+  }
+  if (payload.id && payload.occurrenceDates.length !== 1) {
+    showToast("기존 부여 기록 수정 시 발생일은 하나만 입력해 주세요.");
     return;
   }
   if (payload.validFrom > payload.validTo) {
@@ -2532,7 +2643,7 @@ async function saveGrant(event) {
     if (!response.ok) throw new Error(data.error || "휴가 부여 저장 실패");
     resetGrantForm();
     await Promise.all([loadGrants(), loadHistory()]);
-    showToast(`${data.replaced ? "기존 부여 설정을 수정" : "새 부여 설정을 저장"}하고 ${data.affectedMonths || 0}개 월의 대체휴무·보상휴가를 다시 계산했습니다.`);
+    showToast(`${data.replaced ? "기존 부여 설정을 수정" : `발생일 ${data.createdCount || 1}건을 저장`}하고 ${data.affectedMonths || 0}개 월의 대체휴무·보상휴가를 다시 계산했습니다.`);
   } catch (error) {
     showToast(error.message);
   } finally {
@@ -2544,7 +2655,7 @@ async function saveGrant(event) {
 async function loadGrants() {
   if (!(state.backend.available && state.backend.configured && state.backend.loggedIn)) {
     state.grants = [];
-    $("#grantTableBody").innerHTML = `<tr><td colspan="14" class="empty-cell">관리자 로그인 후 조회할 수 있습니다.</td></tr>`;
+    $("#grantTableBody").innerHTML = `<tr><td colspan="15" class="empty-cell">관리자 로그인 후 조회할 수 있습니다.</td></tr>`;
     renderGrantSummary([]);
     return;
   }
@@ -2577,13 +2688,14 @@ function renderGrants(items) {
     const typeLabel = item.grant_type === "compensation" ? "보상휴가" : "대체휴무";
     const scopeLabel = item.grant_scope === "employee" ? `사번별 · ${item.employee_id || "-"}` : "경로 일괄";
     const criterion = item.eligibility_mode === "worked_on_date"
-      ? `${item.criterion_date} 실제 출근자`
-      : item.grant_scope === "employee" ? "지정 사번" : `${item.eligibility_cutoff || `${item.grant_month}-01`} 이전 입사자`;
+      ? `${item.criterion_date || item.occurrence_date} 실제 출근자`
+      : item.grant_scope === "employee" ? "지정 사번" : `${item.eligibility_cutoff || item.occurrence_date || `${item.grant_month}-01`} 당일 포함 이전 입사자`;
     return `<tr>
       <td>${escapeHtml(ROUTE_LABELS[item.route] || item.route)}</td>
       <td><span class="${item.grant_type === "compensation" ? "warning-pill" : "plan-pill"}">${escapeHtml(typeLabel)}</span></td>
       <td>${escapeHtml(scopeLabel)}</td>
       <td><strong>${escapeHtml(item.grant_month)}</strong></td>
+      <td><strong>${escapeHtml(item.occurrence_date || `${item.grant_month}-01`)}</strong></td>
       <td>${formatDays(item.granted_days)}</td>
       <td>${number(item.eligible_people || 0)}명</td>
       <td>${formatDays(item.assigned_days)}</td>
@@ -2595,7 +2707,7 @@ function renderGrants(items) {
       <td class="message-cell">${escapeHtml([item.reason, item.note].filter(Boolean).join(" · "))}</td>
       <td class="action-cell"><button class="btn secondary small grant-edit" data-id="${escapeHtml(item.id)}" type="button">수정</button><button class="btn danger small grant-delete" data-id="${escapeHtml(item.id)}" type="button">삭제</button></td>
     </tr>`;
-  }).join("") : `<tr><td colspan="14" class="empty-cell">등록된 대체휴무·보상휴가 부여 내역이 없습니다.</td></tr>`;
+  }).join("") : `<tr><td colspan="15" class="empty-cell">등록된 대체휴무·보상휴가 부여 내역이 없습니다.</td></tr>`;
 
   $$(".grant-edit").forEach((button) => button.addEventListener("click", () => editGrant(button.dataset.id)));
   $$(".grant-delete").forEach((button) => button.addEventListener("click", () => deleteGrant(button.dataset.id)));
@@ -2623,6 +2735,7 @@ function editGrant(id) {
   $("#grantType").value = item.grant_type || "substitute";
   $("#grantScope").value = item.grant_scope || "route";
   $("#grantMonth").value = item.grant_month;
+  $("#grantOccurrenceDates").value = item.occurrence_date || `${item.grant_month}-01`;
   $("#grantDays").value = Number(item.granted_days || 0);
   $("#grantEmployeeId").value = item.employee_id || "";
   $("#grantValidFrom").value = item.valid_from;
@@ -2642,6 +2755,7 @@ function resetGrantForm() {
   $("#grantEditingId").value = "";
   $("#grantType").value = "substitute";
   $("#grantScope").value = "route";
+  $("#grantOccurrenceDates").value = $("#grantMonth").value ? `${$("#grantMonth").value}-01` : "";
   $("#grantDays").value = "1";
   $("#grantEmployeeId").value = "";
   $("#grantEligibility").value = "all";
@@ -2666,6 +2780,10 @@ async function deleteGrant(id) {
   } catch (error) {
     showToast(error.message);
   }
+}
+
+function parseDateInput(value) {
+  return [...new Set(String(value || "").split(/[\s,;]+/).map((item) => item.trim()).filter(Boolean))];
 }
 
 function parseEmployeeIdInput(value) {
@@ -2986,7 +3104,7 @@ function updateWorkforceStatus() {
   const item = state.workforceUploads.find((row) => row.month === month);
   if (!item) {
     target.className = "alert warning matching-status";
-    target.textContent = `${month || "대상 월"} 인력·매장매칭이 등록되지 않았습니다. 시스템 수정에서 먼저 저장해 주세요.`;
+    target.textContent = `${month || "대상 월"} 인력·매장매칭이 등록되지 않았습니다. 인력 매칭에서 먼저 저장해 주세요.`;
     return;
   }
   const count = route === "homeplus" ? item.homeplus_count : item.electroland_count;
