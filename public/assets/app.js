@@ -1818,7 +1818,7 @@ async function exportResults() {
     button.disabled = true;
     button.textContent = "최종본 양식 생성 중...";
     const workbook = await buildFinalTemplateWorkbook(state.result);
-    XLSX.writeFile(workbook, `${state.result.targetMonth.replace("-", "년 ")}월_${state.result.routeLabel}_출퇴근현황_최종본.xlsx`, { cellStyles: true });
+    XLSX.writeFile(workbook, `${state.result.targetMonth.replace("-", "년 ")}월_${state.result.routeLabel}_출퇴근현황_최종본.xlsx`, { cellStyles: true, showGridLines: false });
     showToast("기존 최종본 양식으로 엑셀을 생성했습니다.");
   } catch (error) {
     console.error(error);
@@ -3305,7 +3305,7 @@ function exportAnnualLeaveDashboard() {
   wsR["!cols"]=[{wch:12},{wch:13},{wch:13},{wch:11},{wch:11},{wch:22},{wch:13},{wch:10},{wch:9},{wch:27}];
   styleRange(wsR,`A1:J${Math.max(1,reminders.length+1)}`,bodyStyle); styleRange(wsR,"A1:J1",headerStyle); styleRange(wsR,`A2:J${reminders.length+1}`,centerStyle);
   XLSX.utils.book_append_sheet(wb,wsR,"촉진 대상");
-  XLSX.writeFile(wb,`${routeLabel}_연차누적현황_${asOf}.xlsx`,{bookType:"xlsx",cellStyles:true,compression:true});
+  XLSX.writeFile(wb,`${routeLabel}_연차누적현황_${asOf}.xlsx`,{bookType:"xlsx",cellStyles:true,compression:true,showGridLines:false});
   showToast("보고용 연차 누적현황 엑셀을 저장했습니다.");
 }
 

@@ -4,6 +4,20 @@ const NON_WORK_CODES = new Set([
   "대체휴일(1일)", "대체휴일(0.5일)", "보상휴가(1일)", "보상휴가(0.5일)",
 ]);
 
+const KOREAN_PUBLIC_HOLIDAYS = {
+  2026: new Set([
+    "2026-01-01",
+    "2026-02-16", "2026-02-17", "2026-02-18",
+    "2026-03-01", "2026-03-02",
+    "2026-05-05", "2026-05-24", "2026-05-25",
+    "2026-06-03", "2026-06-06",
+    "2026-08-15", "2026-08-17",
+    "2026-09-24", "2026-09-25", "2026-09-26",
+    "2026-10-03", "2026-10-05", "2026-10-09",
+    "2026-12-25",
+  ]),
+};
+
 export async function buildFinalTemplateWorkbook(result) {
   const response = await fetch("./assets/attendance-final-template.xlsx", { cache: "no-store" });
   if (!response.ok) throw new Error("최종본 엑셀 양식 파일을 불러오지 못했습니다.");
@@ -58,7 +72,7 @@ export async function buildFinalTemplateWorkbook(result) {
 
 export async function buildFinalTemplateFile(result) {
   const workbook = await buildFinalTemplateWorkbook(result);
-  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "array", cellStyles: true, bookVBA: true });
+  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "array", cellStyles: true, bookVBA: true, showGridLines: false });
   const monthText = String(result.targetMonth || "").replace("-", "년 ") + "월";
   return new File([buffer], `${monthText}_${result.routeLabel}_출퇴근현황_최종본.xlsx`, {
     type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -600,14 +614,15 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
   const maxColCount = Math.max(64, summaryEndCol0 + 1);
   const lastCol0 = maxColCount - 1;
 
-  removeMergesIntersecting(sheet, 1, 1, 3, lastCol0);
+  removeMergesIntersecting(sheet, 1, 1, 5, lastCol0);
   clearValues(sheet, 2, 2, 4, maxColCount);
-  addMerge(sheet, 1, 1, 1, lastCol0);
-  addMerge(sheet, 2, 1, 2, lastCol0);
-  addMerge(sheet, 3, 1, 3, lastCol0);
-  setValue(sheet, "B2", `■ ${year}년 ${monthNo}월 ${result.routeLabel} 출퇴근현황  |  대상 ${ctx.people.length}명  |  ${daysInMonth}일  |  평일 ${countWeekdays(year, monthNo)}일  |  주말 ${countWeekendDays(year, monthNo)}일`);
-  setValue(sheet, "B3", "※ ‘출근 미등록’ 시트의 ‘증빙여부’에 O를 입력하면 해당 직원·날짜의 ‘미입력’이 ‘출근’으로 자동 반영됩니다.");
-  setValue(sheet, "B4", "※ 휴무와 대체·보상휴가는 별도 집계합니다. 휴무 초과+대체·보상 등록이 대체·보상 가능 개수를 넘는 경우에만 ‘대체+보상 초과’가 빨간색으로 표시됩니다.");
+  addMerge(sheet, 1, 1, 1, 9); // B2:J2
+  addMerge(sheet, 2, 1, 2, 9); // B3:J3
+  addMerge(sheet, 3, 1, 3, 9); // B4:J4
+  addMerge(sheet, 4, 13, 5, 13); // N5:N6
+  setValue(sheet, "B2", `■${year}년 ${monthNo}월 출퇴근 현황`);
+  setValue(sheet, "B3", '- 휴무 → "출근" or "연차" 수정 시, 출근 증빙자료 및 제모스 해당일자 연차신청 필수');
+  setValue(sheet, "B4", '- "연차미신청"으로 수정된 날짜는 모두 제모스에 연차신청 가이드 바랍니다.');
   setValue(sheet, "N5", `${monthNo}월1일 \n근무계획\n일치확인`);
 
   for (let day = 1; day <= 31; day += 1) {
@@ -636,6 +651,8 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
   const startRow = 7;
   const lastTemplateRow = 168;
   clearValues(sheet, startRow, 2, lastTemplateRow, maxColCount);
+  const seenEmployeeRows = new Map();
+  const storeMoveRows = [];
   let row = startRow;
   for (const person of ctx.people) {
     copyRowStyle(sheet, 7, row, maxColCount);
@@ -648,6 +665,9 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
       person.name, member.hireDate, member.groupHireDate, member.note,
     ];
     values.forEach((value, index) => setValue(sheet, XLSX.utils.encode_cell({ r: row - 1, c: index + 1 }), value));
+    const priorEmployeeRowCount = seenEmployeeRows.get(person.employeeId) || 0;
+    if (priorEmployeeRowCount > 0) storeMoveRows.push(row);
+    seenEmployeeRows.set(person.employeeId, priorEmployeeRowCount + 1);
 
     setValue(sheet, `N${row}`, daily[1]?.planStatus === "공백" ? "" : daily[1]?.planStatus || "");
     let clockCorrection = 0;
@@ -748,7 +768,15 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
     row += 1;
   }
   setRef(sheet, Math.max(lastTemplateRow, row - 1), maxColCount);
-  styleMainSheet(sheet, Math.max(startRow, row - 1), daysInMonth, summaryStartCol0, summaryEndCol0, maxColCount);
+  styleMainSheet(sheet, Math.max(startRow, row - 1), daysInMonth, summaryStartCol0, summaryEndCol0, maxColCount, year, monthNo);
+  for (const moveRow of storeMoveRows) {
+    styleCellRange(sheet, moveRow - 1, 8, moveRow - 1, 9, {
+      fill: { patternType: "solid", fgColor: { rgb: "FFF4CCCC" } },
+      font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FFFF0000" } },
+      alignment: { horizontal: "center", vertical: "center", wrapText: true },
+      border: thinBorder("FFD9E1E8"),
+    });
+  }
 }
 
 function buildAnnualLedgerSheet(workbook, result, ctx, year, monthNo) {
@@ -1286,21 +1314,17 @@ function applyIssueStyle(sheet, address, messages = []) {
   const base = sheet[address].s ? clone(sheet[address].s) : {};
   const text = (messages || []).join(" ");
   let fill = "FFFFE699";
-  let fontColor = "FF7F6000";
   if (text.includes("출근기록") || text.includes("미입력") || text.includes("잔여 부족") || text.includes("초과 사용")) {
     fill = "FFF4CCCC";
-    fontColor = "FF9C0006";
   } else if ((text.includes("휴무") || text.includes("휴가")) && text.includes("출근")) {
     fill = "FFFCE4D6";
-    fontColor = "FF9E480E";
   } else if (text.includes("인력·매장매칭") || text.includes("사번 없음")) {
     fill = "FFE4DFEC";
-    fontColor = "FF5F497A";
   }
   sheet[address].s = {
     ...base,
     fill: { patternType: "solid", fgColor: { rgb: fill } },
-    font: { ...(base.font || {}), bold: true, color: { rgb: fontColor } },
+    font: { ...(base.font || {}), name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FF000000" } },
     alignment: { ...(base.alignment || {}), horizontal: "center", vertical: "center", wrapText: true },
     border: thinBorder("FFB7C3D0"),
   };
@@ -1312,7 +1336,7 @@ function applyNeutralDayStyle(sheet, address) {
   sheet[address].s = {
     ...base,
     fill: { patternType: "solid", fgColor: { rgb: "FFFFFFFF" } },
-    font: { ...(base.font || {}), name: "맑은 고딕", sz: 9, bold: false, color: { rgb: "FF222222" } },
+    font: { ...(base.font || {}), name: "맑은 고딕", sz: 10, bold: false, color: { rgb: "FF000000" } },
     alignment: { ...(base.alignment || {}), horizontal: "center", vertical: "center", wrapText: true },
     border: thinBorder("FFD9E1E8"),
   };
@@ -1322,22 +1346,21 @@ function applyStatusStyle(sheet, address, value) {
   if (!sheet[address]) return;
   const text = String(value || "");
   let fill = null;
-  let fontColor = "FF222222";
   let bold = false;
   if (text === "출근") fill = "FFE2F0D9";
-  else if (text === "미입력") { fill = "FFF4CCCC"; fontColor = "FF9C0006"; bold = true; }
+  else if (text === "미입력") { fill = "FFF4CCCC"; bold = true; }
   else if (text === "휴무") fill = "FFE7E6E6";
-  else if (text.includes("대체휴일")) { fill = "FFE4DFEC"; fontColor = "FF5F497A"; }
-  else if (text.includes("보상휴가")) { fill = "FFFCE4D6"; fontColor = "FF9E480E"; }
-  else if (["연차", "공가", "휴가", "경조", "무급휴가"].includes(text)) { fill = "FFDDEBF7"; fontColor = "FF1F4E78"; }
-  else if (["오전반차", "오후반차", "반일근무"].includes(text)) { fill = "FFFFF2CC"; fontColor = "FF7F6000"; }
-  else if (text === "교육") { fill = "FFDDEBF7"; fontColor = "FF1F4E78"; }
+  else if (text.includes("대체휴일")) fill = "FFE4DFEC";
+  else if (text.includes("보상휴가")) fill = "FFFCE4D6";
+  else if (["연차", "공가", "휴가", "경조", "무급휴가"].includes(text)) fill = "FFDDEBF7";
+  else if (["오전반차", "오후반차", "반일근무"].includes(text)) fill = "FFFFF2CC";
+  else if (text === "교육") fill = "FFDDEBF7";
   if (!fill) return;
   const base = sheet[address].s ? clone(sheet[address].s) : {};
   sheet[address].s = {
     ...base,
     fill: { patternType: "solid", fgColor: { rgb: fill } },
-    font: { ...(base.font || {}), name: "맑은 고딕", sz: 9, bold, color: { rgb: fontColor } },
+    font: { ...(base.font || {}), name: "맑은 고딕", sz: 10, bold, color: { rgb: "FF000000" } },
   };
 }
 
@@ -1360,13 +1383,13 @@ function applySummaryMetricStyle(sheet, address, tone = "normal", leftAlign = fa
   sheet[address].s = {
     ...base,
     fill: { patternType: "solid", fgColor: { rgb: selected.fill } },
-    font: { ...(base.font || {}), name: "맑은 고딕", sz: 9, bold: tone === "danger", color: { rgb: selected.font } },
+    font: { ...(base.font || {}), name: "맑은 고딕", sz: 10, bold: tone === "danger", color: { rgb: "FF000000" } },
     alignment: { ...(base.alignment || {}), horizontal: leftAlign ? "left" : "center", vertical: "center", wrapText: true },
     border: thinBorder("FFD9E1E8"),
   };
 }
 
-function styleMainSheet(sheet, lastRow, daysInMonth, summaryStartCol0, summaryEndCol0, maxColCount) {
+function styleMainSheet(sheet, lastRow, daysInMonth, summaryStartCol0, summaryEndCol0, maxColCount, year, monthNo) {
   const endCol = XLSX.utils.encode_col(maxColCount - 1);
   sheet["!autofilter"] = { ref: `B6:${endCol}${lastRow}` };
   const cols = Array.from({ length: maxColCount }, () => ({ wch: 10 }));
@@ -1388,56 +1411,99 @@ function styleMainSheet(sheet, lastRow, daysInMonth, summaryStartCol0, summaryEn
   cols[summaryStartCol0 + 7] = { wch: 16 };
   cols[summaryEndCol0] = { wch: 46 };
   sheet["!cols"] = cols;
+
   sheet["!rows"] = sheet["!rows"] || [];
   sheet["!rows"][1] = { hpt: 27 };
-  sheet["!rows"][2] = { hpt: 21 };
-  sheet["!rows"][3] = { hpt: 21 };
-  sheet["!rows"][4] = { hpt: 38 };
-  sheet["!rows"][5] = { hpt: 26 };
-  for (let r = 6; r < lastRow; r += 1) sheet["!rows"][r] = { hpt: 24 };
+  sheet["!rows"][2] = { hpt: 27 };
+  sheet["!rows"][3] = { hpt: 27 };
+  sheet["!rows"][4] = { hpt: 24.8 };
+  sheet["!rows"][5] = { hpt: 14.3 };
+  for (let r = 6; r < lastRow; r += 1) sheet["!rows"][r] = { hpt: 15.3 };
 
-  styleCellRange(sheet, 1, 1, 1, maxColCount - 1, {
-    fill: { patternType: "solid", fgColor: { rgb: "FF173F73" } },
-    font: { name: "맑은 고딕", sz: 15, bold: true, color: { rgb: "FFFFFFFF" } },
+  styleCellRange(sheet, 1, 1, 3, maxColCount - 1, {
+    fill: { patternType: "solid", fgColor: { rgb: "FFFFFFFF" } },
+    font: { name: "맑은 고딕", sz: 10, color: { rgb: "FF000000" } },
     alignment: { horizontal: "left", vertical: "center" },
   });
-  styleCellRange(sheet, 2, 1, 3, maxColCount - 1, {
-    fill: { patternType: "solid", fgColor: { rgb: "FFEAF2F8" } },
-    font: { name: "맑은 고딕", sz: 10, color: { rgb: "FF234E70" } },
+  styleCellRange(sheet, 1, 1, 1, 9, {
+    fill: { patternType: "solid", fgColor: { rgb: "FFFFFFFF" } },
+    font: { name: "맑은 고딕", sz: 18, bold: true, color: { rgb: "FF000000" } },
+    alignment: { horizontal: "left", vertical: "center" },
+  });
+  styleCellRange(sheet, 2, 1, 3, 9, {
+    fill: { patternType: "solid", fgColor: { rgb: "FFFFFFFF" } },
+    font: { name: "맑은 고딕", sz: 16, bold: true, color: { rgb: "FF0000FF" } },
     alignment: { horizontal: "left", vertical: "center", wrapText: true },
   });
-  styleCellRange(sheet, 4, 1, 4, maxColCount - 1, {
-    fill: { patternType: "solid", fgColor: { rgb: "FF1F4E78" } },
-    font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: "FFFFFFFF" } },
+
+  const navyHeader = {
+    fill: { patternType: "solid", fgColor: { rgb: "FF203764" } },
+    font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FFFFFFFF" } },
     alignment: { horizontal: "center", vertical: "center", wrapText: true },
     border: thinBorder("FFFFFFFF"),
-  });
-  styleCellRange(sheet, 5, 1, 5, maxColCount - 1, {
-    fill: { patternType: "solid", fgColor: { rgb: "FFD9EAF7" } },
-    font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: "FF123B72" } },
+  };
+  styleCellRange(sheet, 4, 1, 4, 12, navyHeader); // B5:M5
+  styleCellRange(sheet, 5, 1, 5, 12, navyHeader); // B6:M6
+  styleCellRange(sheet, 4, summaryStartCol0, 5, maxColCount - 1, navyHeader);
+
+  styleCellRange(sheet, 4, 13, lastRow - 1, 13, {
+    fill: { patternType: "solid", fgColor: { rgb: "FFFFF2CC" } },
+    font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FF000000" } },
     alignment: { horizontal: "center", vertical: "center", wrapText: true },
-    border: thinBorder("FF9FBAD0"),
+    border: thinBorder("FFD9E1E8"),
   });
-  // 휴무 집계(AU~AW)와 대체·보상 집계(AX~AZ)를 색상으로 구분합니다.
+
+  const firstDayCol0 = 14;
+  const lastDayCol0 = firstDayCol0 + daysInMonth - 1;
+  styleCellRange(sheet, 4, firstDayCol0, 4, lastDayCol0, {
+    fill: { patternType: "solid", fgColor: { rgb: "FFD9E1F2" } },
+    font: { name: "맑은 고딕", sz: 10, bold: false, color: { rgb: "FF000000" } },
+    alignment: { horizontal: "center", vertical: "center", wrapText: true },
+    border: thinBorder("FFB4C7DC"),
+  });
+  styleCellRange(sheet, 5, firstDayCol0, 5, lastDayCol0, navyHeader);
+
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    const date = new Date(year, monthNo - 1, day);
+    if (!isKoreanWeekendOrHoliday(date)) continue;
+    for (const row0 of [4, 5]) {
+      const address = XLSX.utils.encode_cell({ r: row0, c: firstDayCol0 + day - 1 });
+      if (!sheet[address]) continue;
+      const base = sheet[address].s ? clone(sheet[address].s) : {};
+      sheet[address].s = {
+        ...base,
+        font: { ...(base.font || {}), name: "맑은 고딕", sz: 10, bold: Boolean(base.font?.bold), color: { rgb: "FFFF0000" } },
+      };
+    }
+  }
+
+  // 휴무 집계와 대체·보상 집계의 제목 색을 구분합니다.
   styleCellRange(sheet, 4, summaryStartCol0 + 2, 4, summaryStartCol0 + 4, {
     fill: { patternType: "solid", fgColor: { rgb: "FF5B9BD5" } },
-    font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: "FFFFFFFF" } },
+    font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FFFFFFFF" } },
     alignment: { horizontal: "center", vertical: "center", wrapText: true },
     border: thinBorder("FFFFFFFF"),
   });
   styleCellRange(sheet, 4, summaryStartCol0 + 5, 4, summaryStartCol0 + 7, {
     fill: { patternType: "solid", fgColor: { rgb: "FF8064A2" } },
-    font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: "FFFFFFFF" } },
+    font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FFFFFFFF" } },
     alignment: { horizontal: "center", vertical: "center", wrapText: true },
     border: thinBorder("FFFFFFFF"),
   });
-  styleCellRange(sheet, 6, 1, lastRow - 1, 13, {
-    font: { name: "맑은 고딕", sz: 9, color: { rgb: "FF222222" } },
+
+  styleCellRange(sheet, 6, 1, lastRow - 1, 12, {
+    font: { name: "맑은 고딕", sz: 10, color: { rgb: "FF000000" } },
     alignment: { vertical: "center", wrapText: true },
+    border: thinBorder("FFD9E1E8"),
+  }, true);
+  styleCellRange(sheet, 6, 9, lastRow - 1, 9, {
+    fill: { patternType: "solid", fgColor: { rgb: "FFFFFF00" } },
+    font: { name: "맑은 고딕", sz: 10, color: { rgb: "FF000000" } },
+    alignment: { horizontal: "center", vertical: "center", wrapText: true },
     border: thinBorder("FFD9E1E8"),
   });
   styleCellRange(sheet, 6, summaryStartCol0, lastRow - 1, summaryEndCol0, {
-    font: { name: "맑은 고딕", sz: 9, color: { rgb: "FF222222" } },
+    font: { name: "맑은 고딕", sz: 10, color: { rgb: "FF000000" } },
     alignment: { horizontal: "center", vertical: "center", wrapText: true },
     border: thinBorder("FFD9E1E8"),
   }, true);
@@ -1445,10 +1511,20 @@ function styleMainSheet(sheet, lastRow, daysInMonth, summaryStartCol0, summaryEn
     const address = XLSX.utils.encode_cell({ r, c: summaryEndCol0 });
     if (sheet[address]) sheet[address].s = {
       ...(sheet[address].s || {}),
+      font: { ...((sheet[address].s || {}).font || {}), name: "맑은 고딕", sz: 10, color: { rgb: "FF000000" } },
       alignment: { horizontal: "left", vertical: "center", wrapText: true },
       border: thinBorder("FFD9E1E8"),
     };
   }
+}
+
+function isKoreanWeekendOrHoliday(date) {
+  const day = date.getDay();
+  if (day === 0 || day === 6) return true;
+  const year = date.getFullYear();
+  const key = `${year}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  const fixedHoliday = new Set(["01-01", "03-01", "05-05", "06-06", "08-15", "10-03", "10-09", "12-25"]);
+  return Boolean(KOREAN_PUBLIC_HOLIDAYS[year]?.has(key) || fixedHoliday.has(key.slice(5)));
 }
 
 function stylePlanSheet(sheet, lastRow, maxCol, dayColumns) {
