@@ -1030,14 +1030,17 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
     for (let day = 1; day <= daysInMonth; day += 1) {
       const date = `${targetMonth}-${String(day).padStart(2, "0")}`;
       const planCode = normalizePlanCode(person.plans[day]);
-      if (planCode === "휴무") basicDayoffDates.push(date);
-      const substituteDays = substitutePlanValue(planCode);
-      if (substituteDays > 0) explicitSubstituteEvents.push({ date, days: substituteDays, source: "표기 대체휴무", planStatus: planCode });
-      const compensationDays = compensationPlanValue(planCode);
-      if (compensationDays > 0) compensationEvents.push({ date, days: compensationDays, source: "표기 보상휴가", planStatus: planCode });
+      const attendanceValue = attendanceMap.get(`${person.employeeId}|${date}`) || emptyAttendanceValue();
+      const displayedStatus = finalDisplayValue(planCode, attendanceValue);
+      // 휴무 사용량은 계획표 원본이 아니라 최종 일별 표시값을 기준으로 계산합니다.
+      // 계획이 휴무여도 실제 출근기록이 있으면 출근으로 보며 휴무 사용에서 제외합니다.
+      if (displayedStatus === "휴무") basicDayoffDates.push(date);
+      const substituteDays = substitutePlanValue(displayedStatus);
+      if (substituteDays > 0) explicitSubstituteEvents.push({ date, days: substituteDays, source: "표기 대체휴무", planStatus: displayedStatus });
+      const compensationDays = compensationPlanValue(displayedStatus);
+      if (compensationDays > 0) compensationEvents.push({ date, days: compensationDays, source: "표기 보상휴가", planStatus: displayedStatus });
       const annualDays = annualLeaveValue(planCode);
       if (annualDays > 0) annualLeaveEvents.push({ date, days: annualDays, planStatus: planCode });
-      const attendanceValue = attendanceMap.get(`${person.employeeId}|${date}`) || emptyAttendanceValue();
       if (attendanceValue.hasClockIn) workedDates.push(date);
     }
 
@@ -1122,6 +1125,10 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       targetMonth,
       ledger,
     });
+    const combinedAvailable = roundHalf(Number(preview.availableSubstitute || 0) + Number(preview.availableCompensation || 0));
+    const combinedLeaveUsed = roundHalf(baseExcess + explicitSubDayoffUsed + compensationLeaveUsed);
+    const combinedShortage = roundHalf(Math.max(0, combinedLeaveUsed - combinedAvailable));
+    const combinedRemaining = roundHalf(Math.max(0, combinedAvailable - combinedLeaveUsed));
     const cumulativeAnnualLeave = roundHalf(Number(ledger.annualLeaveBefore[person.employeeId] || 0) + annualLeaveUsed);
     const judgment = buildDayoffJudgment({
       baseAllowance,
@@ -1173,6 +1180,10 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       remainingCompensation: preview.remainingCompensation,
       expiredCompensation: preview.expiredCompensation,
       compensationShortage: preview.compensationShortage,
+      combinedAvailable,
+      combinedLeaveUsed,
+      combinedRemaining,
+      combinedShortage,
       currentAnnualLeave: annualLeaveUsed,
       cumulativeAnnualLeave,
       judgment,
@@ -2347,6 +2358,16 @@ function applyServerSummaries(serverRows) {
       remainingCompensation: roundHalf(row.remaining_compensation),
       expiredCompensation: roundHalf(row.expired_compensation),
       compensationShortage: roundHalf(row.compensation_shortage),
+      combinedAvailable: roundHalf(Number(row.available_substitute || 0) + Number(row.available_compensation || 0)),
+      combinedLeaveUsed: roundHalf(Number(row.base_excess || 0) + Number(row.explicit_sub_dayoff_used || 0) + Number(row.compensation_needed || 0)),
+      combinedRemaining: roundHalf(Math.max(0,
+        Number(row.available_substitute || 0) + Number(row.available_compensation || 0)
+        - Number(row.base_excess || 0) - Number(row.explicit_sub_dayoff_used || 0) - Number(row.compensation_needed || 0)
+      )),
+      combinedShortage: roundHalf(Math.max(0,
+        Number(row.base_excess || 0) + Number(row.explicit_sub_dayoff_used || 0) + Number(row.compensation_needed || 0)
+        - Number(row.available_substitute || 0) - Number(row.available_compensation || 0)
+      )),
       currentAnnualLeave: roundHalf(row.current_annual_leave),
       cumulativeAnnualLeave: roundHalf(row.cumulative_annual_leave),
       judgment: row.judgment || "",
