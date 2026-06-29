@@ -23,14 +23,14 @@ export function resolveOccurrenceFact(fact, occurrenceDate) {
       .filter(Boolean)
       .includes(occurrenceDate);
 
-  // v29: 발생일의 계획·출근·휴무 상태는 대체휴무 부여와 기본휴무 수량을 바꾸지 않습니다.
-  // 실제 대상 여부는 resolveEligibleEmployees의 입사일·퇴사일·제외 사번 조건에서 결정합니다.
+  // 대체휴무는 이 판정과 무관하게 동일 부여합니다.
+  // 보상휴가는 실제 출근이면 부여, 미출근이면 해당 월 기본휴무 +1 분기에 사용합니다.
   return {
     hasDailyStatus: Boolean(daily),
     planStatus,
     hasClockIn,
-    entitled: true,
-    restEligible: false,
+    entitled: hasClockIn,
+    restEligible: !hasClockIn,
   };
 }
 

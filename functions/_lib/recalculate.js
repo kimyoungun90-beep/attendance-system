@@ -1,4 +1,4 @@
-import { normalizeEmployeeId, parseEvents, resolveEligibleEmployees } from "./leave-eligibility.js";
+import { normalizeEmployeeId, parseEvents, resolveEligibleEmployees, resolveOccurrenceFact } from "./leave-eligibility.js";
 
 const VALID_ROUTES = new Set(["homeplus", "electroland"]);
 const VALID_GRANT_TYPES = new Set(["substitute", "compensation"]);
@@ -63,34 +63,62 @@ export async function recalculateRoute(db, route) {
   }
 
   const lotsByEmployee = new Map();
+  const compensationRestByMonthEmployee = new Map();
   // 부여분은 월 마감자료가 아니라 인력·매장매칭의 입사일을 기준으로 직원별 lot를 만듭니다.
   // 예: 5월 발생분은 5월 1일 이전 입사자, 6월 발생분은 6월 1일 이전 입사자입니다.
   for (const grant of grants) {
     const occurrenceDate = String(grant.occurrence_date || grant.criterion_date || "");
-    const settlementMode = (grant.grant_type || "substitute") === "substitute"
-      && (grant.grant_scope || "route") === "route"
-      && /^\d{4}-\d{2}-\d{2}$/.test(occurrenceDate);
-    // 발생일 전 사용 시작도 허용하며, 입사일 기준 대상자 전원에게 동일한 lot를 만듭니다.
-    // 발생일이 지난 뒤에도 계획·실제근태에 따라 부여분을 회수하거나 기본휴무로 전환하지 않습니다.
-    const eligibility = resolveEligibleEmployees(settlementMode ? { ...grant, eligibility_mode: "all", criterion_date: null } : grant, {
+    const occurrenceMonth = occurrenceDate.slice(0, 7);
+    const grantType = VALID_GRANT_TYPES.has(grant.grant_type) ? grant.grant_type : "substitute";
+    const settlementMode = (grant.grant_scope || "route") === "route"
+      && /^\d{4}-\d{2}-\d{2}$/.test(occurrenceDate)
+      && ["substitute", "compensation"].includes(grantType);
+    const baseGrant = settlementMode
+      ? { ...grant, eligibility_mode: "all", criterion_date: null }
+      : grant;
+    const baseEligibility = resolveEligibleEmployees(baseGrant, {
       workforceRows,
       annualRows: annualEmployeeRows,
       factsByMonth,
     });
-    for (const employeeId of eligibility.employeeIds) {
-      const occurrenceMonth = occurrenceDate.slice(0, 7);
-      const occurrenceClosure = closureByMonth.get(occurrenceMonth);
-      const finalized = Boolean(
-        settlementMode
-        && occurrenceClosure
-        && String(occurrenceClosure.cutoff_date || "") >= occurrenceDate
-      );
-      const grantedDays = roundHalf(grant.granted_days);
+    const occurrenceClosure = closureByMonth.get(occurrenceMonth);
+    const finalized = Boolean(
+      settlementMode
+      && occurrenceClosure
+      && String(occurrenceClosure.cutoff_date || "") >= occurrenceDate
+    );
 
+    for (const employeeId of baseEligibility.employeeIds) {
+      let entitled = true;
+      let restEligible = false;
+      if (settlementMode && grantType === "compensation") {
+        const occurrenceFact = factByMonthEmployee.get(`${occurrenceMonth}|${normalizeEmployeeId(employeeId)}`);
+        if (!finalized || !occurrenceFact) {
+          entitled = false;
+        } else {
+          const resolved = resolveOccurrenceFact(occurrenceFact, occurrenceDate);
+          entitled = Boolean(resolved.hasClockIn);
+          restEligible = !resolved.hasClockIn;
+        }
+      }
+
+      if (restEligible) {
+        const key = `${occurrenceMonth}|${normalizeEmployeeId(employeeId)}`;
+        if (!compensationRestByMonthEmployee.has(key)) compensationRestByMonthEmployee.set(key, []);
+        compensationRestByMonthEmployee.get(key).push({
+          date: occurrenceDate,
+          days: 1,
+          source: "보상휴가 발생일 미출근 기본휴무 추가",
+          grantId: grant.id,
+        });
+      }
+      if (!entitled) continue;
+
+      const grantedDays = roundHalf(grant.granted_days);
       if (!lotsByEmployee.has(employeeId)) lotsByEmployee.set(employeeId, []);
       lotsByEmployee.get(employeeId).push({
         grantId: grant.id,
-        grantType: VALID_GRANT_TYPES.has(grant.grant_type) ? grant.grant_type : "substitute",
+        grantType,
         grantMonth: grant.grant_month,
         occurrenceDate,
         settlementMode,
@@ -98,9 +126,8 @@ export async function recalculateRoute(db, route) {
         validTo: grant.valid_to,
         grantedDays,
         finalized,
-        // 계획·출근·휴무 여부와 관계없이 대상자에게 부여분을 그대로 유지합니다.
         finalEntitled: true,
-        finalRestEligible: false,
+        finalRestEligible: restEligible,
         remaining: grantedDays,
       });
     }
@@ -128,9 +155,10 @@ export async function recalculateRoute(db, route) {
       const monthStart = `${closure.month}-01`;
       const monthEnd = endOfMonth(closure.month);
       const nextMonthStart = startOfNextMonth(closure.month);
-      // 발생일에 쉬었는지 출근했는지와 관계없이 기본 휴무 기준은 모든 직원에게 동일합니다.
-      // 기존 월 마감에 저장된 occurrence_rest_days 값도 재계산 시 더하지 않습니다.
-      const occurrenceRestDays = 0;
+      // 대체휴무는 기본 휴무를 가감하지 않습니다.
+      // 보상휴가 발생일 미출근자는 발생일 1건당 기본 휴무를 1일 추가합니다.
+      const occurrenceRestAllowances = compensationRestByMonthEmployee.get(`${closure.month}|${employeeId}`) || [];
+      const occurrenceRestDays = roundHalf(occurrenceRestAllowances.reduce((sum, row) => sum + Number(row.days || 0), 0));
 
       const legacyEvents = parseEvents(fact.substitute_events_json);
       const compensationEvents = mergeEvents(
@@ -167,7 +195,7 @@ export async function recalculateRoute(db, route) {
       const baseAllowanceRaw = storedRawAllowance > 0
         ? storedRawAllowance
         : roundHalf(Math.max(0, savedBaseAllowance - storedOccurrenceRestDays));
-      const baseAllowance = roundHalf(baseAllowanceRaw);
+      const baseAllowance = roundHalf(baseAllowanceRaw + occurrenceRestDays);
       const basicDayoffUsed = roundHalf(fact.basic_dayoff_used);
       const baseExcess = roundHalf(Math.max(0, basicDayoffUsed - baseAllowance));
       const explicitSubDayoffUsed = roundHalf(substituteEvents

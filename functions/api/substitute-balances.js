@@ -1,5 +1,5 @@
 import { json, requireAuth } from "../_lib/auth.js";
-import { normalizeEmployeeId, parseEmployeeIds, resolveEligibleEmployees } from "../_lib/leave-eligibility.js";
+import { normalizeEmployeeId, parseEmployeeIds, resolveEligibleEmployees, resolveOccurrenceFact } from "../_lib/leave-eligibility.js";
 import { ensureSchema } from "../_lib/schema.js";
 
 const VALID_ROUTES = new Set(["homeplus", "electroland"]);
@@ -18,7 +18,7 @@ export async function onRequestGet(context) {
 
   const monthStart = `${month}-01`;
   const monthEnd = endOfMonth(month);
-  const [grantsResult, factsResult, allocationsResult, annualUsageResult, workforceResult, annualEmployeeResult] = await Promise.all([
+  const [grantsResult, factsResult, allocationsResult, annualUsageResult, workforceResult, annualEmployeeResult, closuresResult] = await Promise.all([
     context.env.DB.prepare(`
       SELECT * FROM attendance_leave_grants_v5
       WHERE route = ? AND valid_from <= ? AND valid_to >= ?
@@ -49,6 +49,9 @@ export async function onRequestGet(context) {
       SELECT * FROM annual_leave_employees
       WHERE route = ?
     `).bind(route).all(),
+    context.env.DB.prepare(`
+      SELECT month, cutoff_date FROM attendance_closures WHERE company = ?
+    `).bind(route).all(),
   ]);
 
   const factsByMonth = new Map();
@@ -56,6 +59,13 @@ export async function onRequestGet(context) {
     if (!factsByMonth.has(fact.month)) factsByMonth.set(fact.month, []);
     factsByMonth.get(fact.month).push(fact);
   }
+  const factByMonthEmployee = new Map();
+  for (const fact of factsResult.results || []) {
+    const employeeId = normalizeEmployeeId(fact.employee_id);
+    if (employeeId) factByMonthEmployee.set(`${fact.month}|${employeeId}`, fact);
+  }
+  const closureCutoffByMonth = new Map((closuresResult.results || []).map((row) => [String(row.month || ""), String(row.cutoff_date || "")]));
+
   const usedMap = new Map((allocationsResult.results || []).map((row) => [
     `${row.grant_id}|${normalizeEmployeeId(row.employee_id)}`,
     roundHalf(row.used_days),
@@ -69,9 +79,10 @@ export async function onRequestGet(context) {
   for (const grant of grants) {
     const occurrenceDate = String(grant.occurrence_date || grant.criterion_date || "");
     const occurrenceMonth = occurrenceDate.slice(0, 7);
-    const settlementMode = (grant.grant_type || "substitute") === "substitute"
-      && (grant.grant_scope || "route") === "route"
-      && /^\d{4}-\d{2}-\d{2}$/.test(occurrenceDate);
+    const grantType = grant.grant_type || "substitute";
+    const settlementMode = (grant.grant_scope || "route") === "route"
+      && /^\d{4}-\d{2}-\d{2}$/.test(occurrenceDate)
+      && ["substitute", "compensation"].includes(grantType);
     const baseGrant = settlementMode
       ? { ...grant, eligibility_mode: "all", criterion_date: null }
       : grant;
@@ -81,13 +92,25 @@ export async function onRequestGet(context) {
       factsByMonth,
     });
 
-    // 발생일 이후에도 계획·출근 여부로 대체휴무 대상자를 다시 걸러내지 않습니다.
-    // 발생일 당일 포함 이전 입사자(퇴사·제외 조건 반영)에게 동일하게 부여합니다.
-    const eligibility = baseEligibility;
+    // 대체휴무는 발생일 근태와 무관하게 동일 부여합니다.
+    // 보상휴가는 발생일이 마감된 뒤 실제 출근자만 lot를 만들고, 미출근자는 기본휴무 +1 대상이 됩니다.
+    const finalized = closureCutoffByMonth.get(occurrenceMonth) >= occurrenceDate;
+    const eligibility = settlementMode && grantType === "compensation"
+      ? {
+          ...baseEligibility,
+          employeeIds: finalized
+            ? baseEligibility.employeeIds.filter((employeeId) => {
+                const fact = factByMonthEmployee.get(`${occurrenceMonth}|${normalizeEmployeeId(employeeId)}`);
+                return fact ? resolveOccurrenceFact(fact, occurrenceDate).hasClockIn : false;
+              })
+            : [],
+        }
+      : baseEligibility;
 
     if (settlementMode && occurrenceMonth === month) {
       settlementGrants.push({
         id: grant.id,
+        grantType,
         occurrenceDate,
         grantedDays: roundHalf(grant.granted_days),
         eligibleEmployeeIds: baseEligibility.employeeIds,
@@ -139,7 +162,7 @@ export async function onRequestGet(context) {
       grantScope: grant.grant_scope || "route",
       grantMonth: grant.grant_month,
       occurrenceDate: grant.occurrence_date || grant.criterion_date || "",
-      settlementMode: (grant.grant_type || "substitute") === "substitute" && (grant.grant_scope || "route") === "route",
+      settlementMode: ["substitute", "compensation"].includes(grant.grant_type || "substitute") && (grant.grant_scope || "route") === "route",
       grantedDays: roundHalf(grant.granted_days),
       validFrom: grant.valid_from,
       validTo: grant.valid_to,

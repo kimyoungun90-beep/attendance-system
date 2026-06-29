@@ -1,5 +1,5 @@
 import { json, requireAuth } from "../_lib/auth.js";
-import { resolveEligibleEmployees, normalizeEmployeeId, parseEmployeeIds } from "../_lib/leave-eligibility.js";
+import { resolveEligibleEmployees, resolveOccurrenceFact, normalizeEmployeeId, parseEmployeeIds } from "../_lib/leave-eligibility.js";
 import { recalculateRoute } from "../_lib/recalculate.js";
 import { ensureSchema } from "../_lib/schema.js";
 
@@ -44,6 +44,11 @@ export async function onRequestGet(context) {
     if (!factsByRouteMonth.has(key)) factsByRouteMonth.set(key, []);
     factsByRouteMonth.get(key).push(fact);
   }
+  const factByRouteMonthEmployee = new Map();
+  for (const fact of factsResult.results || []) {
+    const employeeId = normalizeEmployeeId(fact.employee_id);
+    if (employeeId) factByRouteMonthEmployee.set(`${fact.route}|${fact.month}|${employeeId}`, fact);
+  }
   const workforceByRoute = groupByRoute(workforceResult.results || []);
   const annualByRoute = groupByRoute(annualResult.results || []);
   const closureCutoffByRouteMonth = new Map((closuresResult.results || []).map((row) => [
@@ -60,18 +65,29 @@ export async function onRequestGet(context) {
     }
     const occurrenceDate = String(grant.occurrence_date || grant.criterion_date || "");
     const occurrenceMonth = occurrenceDate.slice(0, 7);
-    const settlementMode = (grant.grant_type || "substitute") === "substitute"
-      && (grant.grant_scope || "route") === "route"
-      && /^\d{4}-\d{2}-\d{2}$/.test(occurrenceDate);
+    const grantType = grant.grant_type || "substitute";
+    const settlementMode = (grant.grant_scope || "route") === "route"
+      && /^\d{4}-\d{2}-\d{2}$/.test(occurrenceDate)
+      && ["substitute", "compensation"].includes(grantType);
     const baseEligibility = resolveEligibleEmployees(settlementMode ? { ...grant, eligibility_mode: "all", criterion_date: null } : grant, {
       workforceRows: workforceByRoute.get(grant.route) || [],
       annualRows: annualByRoute.get(grant.route) || [],
       factsByMonth,
     });
-    // 발생일이 마감된 뒤에도 계획·출근·휴무 여부로 부여 대상자를 변경하지 않습니다.
-    const eligibility = baseEligibility;
     const occurrenceFinalized = settlementMode
       && closureCutoffByRouteMonth.get(`${grant.route}|${occurrenceMonth}`) >= occurrenceDate;
+    let eligibility = baseEligibility;
+    let restPeople = 0;
+    if (settlementMode && grantType === "compensation") {
+      const workedIds = occurrenceFinalized
+        ? baseEligibility.employeeIds.filter((employeeId) => {
+            const fact = factByRouteMonthEmployee.get(`${grant.route}|${occurrenceMonth}|${normalizeEmployeeId(employeeId)}`);
+            return fact ? resolveOccurrenceFact(fact, occurrenceDate).hasClockIn : false;
+          })
+        : [];
+      eligibility = { ...baseEligibility, employeeIds: workedIds };
+      restPeople = occurrenceFinalized ? Math.max(0, baseEligibility.employeeIds.length - workedIds.length) : 0;
+    }
     const usedDays = usedByGrant.get(grant.id) || 0;
     const assignedDays = roundHalf(roundHalf(grant.granted_days) * eligibility.employeeIds.length);
     return {
@@ -83,6 +99,8 @@ export async function onRequestGet(context) {
       assigned_days: assignedDays,
       used_days: usedDays,
       unused_days: roundHalf(Math.max(0, assignedDays - usedDays)),
+      rest_people: restPeople,
+      base_eligible_people: baseEligibility.employeeIds.length,
       excluded_count: parseEmployeeIds(grant.excluded_employee_ids_json).length,
       eligibility_cutoff: eligibility.cutoffDate,
       missing_hire_count: eligibility.missingHireCount,
