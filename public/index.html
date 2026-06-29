@@ -5,14 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#123B72" />
   <title>전자랜드 · 홈플러스 근태 관리</title>
-  <link rel="stylesheet" href="./assets/styles.css?v=30" />
+  <link rel="stylesheet" href="./assets/styles.css?v=31" />
 </head>
 <body>
   <div class="app-shell">
     <header class="topbar">
       <div>
         <p class="eyebrow">ATTENDANCE MANAGEMENT</p>
-        <h1>전자랜드 · 홈플러스 근태 관리 <span class="version-tag">v30</span></h1>
+        <h1>전자랜드 · 홈플러스 근태 관리 <span class="version-tag">v31</span></h1>
       </div>
       <div class="topbar-actions">
         <span id="storageBadge" class="badge neutral">저장 방식 확인 중</span>
@@ -26,7 +26,7 @@
       <button class="tab" data-view="annualLeave" type="button">연차 누적 관리</button>
       <button class="tab" data-view="substitute" type="button">대체휴무·보상휴가 부여</button>
       <button class="tab" data-view="system" type="button">인력 매칭</button>
-      <button class="tab" data-view="files" type="button">월 마감 파일 보관함</button>
+      <button class="tab" data-view="files" type="button">월별 파일 통합 관리</button>
       <button class="tab" data-view="compare" type="button">월 마감 비교</button>
       <button class="tab" data-view="history" type="button">월 마감 기록</button>
     </nav>
@@ -318,36 +318,6 @@
             </div>
           </section>
         </div>
-
-        <section class="panel final-leave-import-panel">
-          <div class="panel-heading">
-            <div>
-              <span class="step-label">FINAL FILE IMPORT</span>
-              <h2>이전 최종본 휴가 사용내역 저장</h2>
-              <p class="muted">이전 월 최종본의 상담사근태 시트만 읽어 대체휴무·보상휴가 사용일을 D1 누적 장부에 저장합니다. 해당 시트의 사번·입사일·매장정보도 발생일 대상자 판정을 위해 함께 보완합니다.</p>
-            </div>
-          </div>
-          <form id="finalLeaveImportForm" class="final-import-form">
-            <div class="three-cols">
-              <div class="field-group">
-                <label class="field-label" for="finalLeaveImportRoute">경로</label>
-                <select id="finalLeaveImportRoute" class="input"><option value="homeplus">홈플러스</option><option value="electroland">전자랜드</option></select>
-              </div>
-              <div class="field-group">
-                <label class="field-label" for="finalLeaveImportMonth">대상 월</label>
-                <input id="finalLeaveImportMonth" class="input" type="month" required />
-              </div>
-              <div class="field-group">
-                <label class="field-label" for="finalLeaveImportFile">이전 최종본</label>
-                <input id="finalLeaveImportFile" class="input file-input" type="file" accept=".xlsx,.xls,.xlsb" required />
-              </div>
-            </div>
-            <div id="finalLeaveImportPreview" class="auto-rule-box compact-box">
-              상담사근태 시트의 사번·날짜별 화면 표시값만 읽습니다. 요약 수식, 휴무 개수 수식, 다른 시트와 수식 문자열은 사용하지 않습니다.
-            </div>
-            <button id="finalLeaveImportButton" class="btn primary" type="submit">대체휴무·보상휴가 사용내역 저장·교체</button>
-          </form>
-        </section>
       </section>
 
       <section id="systemView" class="view">
@@ -392,41 +362,58 @@
 
       <section id="filesView" class="view">
         <div class="substitute-layout file-vault-layout">
-          <section class="panel form-panel">
+          <section class="panel form-panel file-register-panel">
             <div class="panel-heading">
-              <div><span class="step-label">FILE VAULT</span><h2>월 마감 파일 보관</h2></div>
+              <div><span class="step-label">UNIFIED FILE VAULT</span><h2>월별 파일 통합 등록</h2></div>
             </div>
-            <p class="muted">계획표·근태표·수정본을 경로와 월별로 저장하고 다시 내려받을 수 있습니다. 같은 경로·같은 월·같은 파일 구분을 다시 올리면 기존 보관 파일을 교체합니다.</p>
+            <p class="muted">홈플러스와 전자랜드 파일을 경로별로 따로 선택해 한 화면에서 저장합니다. 파일 종류는 파일명과 시트 구조를 기준으로 자동 판별하며, 상담사근태 시트가 있는 최종본은 대체휴무·보상휴가 사용내역까지 함께 반영합니다.</p>
             <div id="fileStorageNotice" class="alert success file-storage-notice">파일 저장소 상태를 확인 중입니다.</div>
             <form id="archiveForm">
-              <div class="field-group">
-                <label class="field-label" for="archiveRoute">경로</label>
-                <select id="archiveRoute" class="input"><option value="homeplus">홈플러스</option><option value="electroland">전자랜드</option></select>
+              <div class="field-group month-register-field">
+                <label class="field-label" for="archiveMonth">대상 월</label>
+                <input id="archiveMonth" class="input" type="month" required />
+                <p class="field-help">같은 경로·같은 월·같은 자동 분류 파일을 다시 저장하면 기존 파일을 교체합니다.</p>
               </div>
-              <div class="two-cols">
-                <div class="field-group"><label class="field-label" for="archiveMonth">대상 월</label><input id="archiveMonth" class="input" type="month" required /></div>
-                <div class="field-group"><label class="field-label" for="archiveKind">파일 구분</label><select id="archiveKind" class="input"><option value="plan">계획표</option><option value="attendance">실제 근태표</option><option value="result">결과·수정본</option><option value="other">기타</option></select></div>
+
+              <div class="route-file-grid">
+                <section class="route-file-card homeplus-card">
+                  <div class="route-file-heading">
+                    <span class="route-dot homeplus-dot"></span>
+                    <div><strong>홈플러스</strong><small>최종본·계획표·근태표를 선택</small></div>
+                  </div>
+                  <input id="archiveHomeplusFiles" class="input file-input" type="file" accept=".xlsx,.xls,.xlsb" multiple />
+                  <div id="archiveHomeplusPreview" class="file-preview-list">선택된 홈플러스 파일이 없습니다.</div>
+                </section>
+
+                <section class="route-file-card electroland-card">
+                  <div class="route-file-heading">
+                    <span class="route-dot electroland-dot"></span>
+                    <div><strong>전자랜드</strong><small>최종본·계획표·근태표를 선택</small></div>
+                  </div>
+                  <input id="archiveElectrolandFiles" class="input file-input" type="file" accept=".xlsx,.xls,.xlsb" multiple />
+                  <div id="archiveElectrolandPreview" class="file-preview-list">선택된 전자랜드 파일이 없습니다.</div>
+                </section>
               </div>
-              <div class="field-group"><label class="field-label" for="archiveFile">보관할 엑셀 파일</label><input id="archiveFile" class="input file-input" type="file" accept=".xlsx,.xls,.xlsb" required /></div>
-              <div class="field-group"><label class="field-label" for="archiveNote">메모</label><textarea id="archiveNote" class="textarea" rows="3" placeholder="예: 담당자 확인 후 수정한 최종본"></textarea></div>
-              <button id="archiveSubmitButton" class="btn primary full" type="submit">파일 보관</button>
+
+              <div class="field-group"><label class="field-label" for="archiveNote">공통 메모 <span class="optional">선택</span></label><textarea id="archiveNote" class="textarea" rows="3" placeholder="예: 담당자 확인 완료 / 수정 최종본"></textarea></div>
+              <button id="archiveSubmitButton" class="btn primary full" type="submit">선택한 파일 저장·교체</button>
             </form>
           </section>
 
           <section class="panel grant-list-panel">
             <div class="panel-heading">
-              <div><span class="step-label">SAVED FILES</span><h2>저장된 월 마감 파일</h2><p class="muted">다운로드 후 수정하고 다시 업로드할 수 있습니다. 결과·수정본은 증빙 반영 또는 월 마감 비교의 기준본·비교본으로 바로 보낼 수 있습니다.</p></div>
+              <div><span class="step-label">SAVED FILES</span><h2>저장된 월별 파일</h2><p class="muted">파일 보관과 이전 최종본 휴가 사용내역 반영을 이 화면에서 함께 확인합니다. 최종본은 저장 시 자동 반영되며 필요하면 표에서 다시 반영할 수 있습니다.</p></div>
               <div class="toolbar-actions">
                 <select id="archiveRouteFilter" class="input compact"><option value="">전체 경로</option><option value="homeplus">홈플러스</option><option value="electroland">전자랜드</option></select>
                 <input id="archiveMonthFilter" class="input compact" type="month" />
                 <button id="refreshArchiveButton" class="btn secondary" type="button">새로고침</button>
               </div>
             </div>
-            <div id="archiveSummary" class="grant-summary"></div>
+            <div id="archiveSummary" class="grant-summary archive-summary"></div>
             <div class="table-wrap">
               <table class="wide-table archive-table">
-                <thead><tr><th>경로</th><th>대상 월</th><th>구분</th><th>파일명</th><th>용량</th><th>저장 방식</th><th>메모</th><th>저장일</th><th>관리</th></tr></thead>
-                <tbody id="archiveTableBody"><tr><td colspan="9" class="empty-cell">관리자 로그인 후 조회할 수 있습니다.</td></tr></tbody>
+                <thead><tr><th>경로</th><th>대상 월</th><th>자동 분류</th><th>파일명</th><th>휴가내역</th><th>용량</th><th>저장 방식</th><th>메모</th><th>저장일</th><th>관리</th></tr></thead>
+                <tbody id="archiveTableBody"><tr><td colspan="10" class="empty-cell">관리자 로그인 후 조회할 수 있습니다.</td></tr></tbody>
               </table>
             </div>
           </section>
@@ -505,6 +492,6 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-  <script type="module" src="./assets/app.js?v=30"></script>
+  <script type="module" src="./assets/app.js?v=31"></script>
 </body>
 </html>

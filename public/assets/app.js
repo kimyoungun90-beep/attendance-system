@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=30";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=31";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -37,7 +37,7 @@ const state = {
   annualLeaveDashboard: null,
   annualBaselinePreview: null,
   annualMonthlyPreview: null,
-  finalLeaveImportPreview: null,
+  archiveUploadPreviews: { homeplus: [], electroland: [] },
 };
 
 init();
@@ -73,15 +73,13 @@ function bindEvents() {
   $("#grantType").addEventListener("change", syncGrantFormVisibility);
   $("#grantEligibility").addEventListener("change", syncGrantFormVisibility);
   $("#grantCancelEdit").addEventListener("click", resetGrantForm);
-  $("#finalLeaveImportForm").addEventListener("submit", saveFinalLeaveImport);
-  $("#finalLeaveImportFile").addEventListener("change", previewFinalLeaveImport);
-  $("#finalLeaveImportMonth").addEventListener("change", previewFinalLeaveImport);
-  $("#finalLeaveImportRoute").addEventListener("change", previewFinalLeaveImport);
-  $("#archiveForm").addEventListener("submit", saveArchiveFile);
+  $("#archiveForm").addEventListener("submit", saveArchiveFiles);
   $("#refreshArchiveButton").addEventListener("click", loadArchiveFiles);
   $("#archiveRouteFilter").addEventListener("change", loadArchiveFiles);
   $("#archiveMonthFilter").addEventListener("change", loadArchiveFiles);
-  $("#archiveFile").addEventListener("change", autoDetectArchiveKind);
+  $("#archiveMonth").addEventListener("change", previewAllArchiveUploads);
+  $("#archiveHomeplusFiles").addEventListener("change", () => previewArchiveUploads("homeplus"));
+  $("#archiveElectrolandFiles").addEventListener("change", () => previewArchiveUploads("electroland"));
   $("#compareClosuresButton").addEventListener("click", analyzeClosureComparison);
   $("#resetClosureCompare").addEventListener("click", resetClosureComparison);
   $("#exportClosureCompare").addEventListener("click", exportClosureComparison);
@@ -118,7 +116,6 @@ function setDefaultDates() {
   $("#targetMonth").value = month;
   $("#cutoffDate").value = toISODate(now);
   $("#grantMonth").value = month;
-  $("#finalLeaveImportMonth").value = month;
   $("#archiveMonth").value = month;
   $("#workforceMonth").value = month;
   $("#annualMonthlyMonth").value = month;
@@ -2792,50 +2789,196 @@ function exportClosureComparison() {
   XLSX.writeFile(wb, `${month}_월마감_최종본_차이.xlsx`, { bookType: "xlsx", cellStyles: true });
 }
 
-function autoDetectArchiveKind() {
-  const file = $("#archiveFile")?.files?.[0];
-  if (!file) return;
-  const name = String(file.name || "").replace(/\s+/g, "");
-  if (/최종본|출퇴근현황|결과|공유용|수정본/.test(name)) $("#archiveKind").value = "result";
-  else if (/계획|스케줄/.test(name)) $("#archiveKind").value = "plan";
-  else if (/근태|출근/.test(name)) $("#archiveKind").value = "attendance";
+function archiveKindFromName(fileName) {
+  const name = String(fileName || "").replace(/\s+/g, "");
+  if (/최종본|출퇴근현황|결과|공유용|수정본/.test(name)) return "result";
+  if (/계획|스케줄/.test(name)) return "plan";
+  if (/근태|출근RAW|근태RAW|출퇴근RAW/.test(name)) return "attendance";
+  return "other";
 }
 
-async function saveArchiveFile(event) {
+function archiveKindFromSheets(sheets, fallback = "other") {
+  const names = (sheets || []).map((sheet) => String(sheet.sheetName || "").replace(/\s+/g, ""));
+  if (names.some((name) => /상담사.*근태/.test(name))) return "result";
+  if (names.some((name) => /근무계획|매장근무계획|스케줄/.test(name))) return "plan";
+  if (names.some((name) => /근태관리|근태RAW|출퇴근RAW|출퇴근기록/.test(name))) return "attendance";
+  return fallback;
+}
+
+async function inspectArchiveFile(file, route, month) {
+  const fallbackKind = archiveKindFromName(file.name);
+  let sheets = null;
+  let fileKind = fallbackKind;
+  let parsedFinal = null;
+  let warning = "";
+  try {
+    sheets = await fileToWorkbookSheets(file);
+    fileKind = archiveKindFromSheets(sheets, fallbackKind);
+    if (fileKind === "result") {
+      const hasFinalSheet = sheets.some((sheet) => /상담사\s*근태|상담사.*근태/.test(String(sheet.sheetName || "")));
+      if (hasFinalSheet) parsedFinal = parseFinalLeaveImportWorkbook(sheets, month, route);
+      else warning = "상담사근태 시트가 없어 휴가 사용내역은 자동 반영되지 않습니다.";
+    }
+  } catch (error) {
+    warning = `파일 구조 확인 오류: ${error.message || "파일을 읽지 못했습니다."}`;
+  }
+  return { file, route, month, fileKind, parsedFinal, warning };
+}
+
+async function previewArchiveUploads(route) {
+  const month = $("#archiveMonth")?.value || "";
+  const input = route === "homeplus" ? $("#archiveHomeplusFiles") : $("#archiveElectrolandFiles");
+  const target = route === "homeplus" ? $("#archiveHomeplusPreview") : $("#archiveElectrolandPreview");
+  const files = [...(input?.files || [])];
+  state.archiveUploadPreviews[route] = [];
+  if (!target) return;
+  if (!month) {
+    target.textContent = "먼저 대상 월을 선택해 주세요.";
+    return;
+  }
+  if (!files.length) {
+    target.textContent = `선택된 ${ROUTE_LABELS[route]} 파일이 없습니다.`;
+    return;
+  }
+  target.innerHTML = `<div class="preview-loading">${number(files.length)}개 파일을 자동 분류하는 중입니다...</div>`;
+  const previews = await Promise.all(files.map((file) => inspectArchiveFile(file, route, month)));
+  state.archiveUploadPreviews[route] = previews;
+  renderArchiveUploadPreview(route, previews);
+}
+
+function previewAllArchiveUploads() {
+  previewArchiveUploads("homeplus");
+  previewArchiveUploads("electroland");
+}
+
+function renderArchiveUploadPreview(route, previews) {
+  const target = route === "homeplus" ? $("#archiveHomeplusPreview") : $("#archiveElectrolandPreview");
+  if (!target) return;
+  if (!previews.length) {
+    target.textContent = `선택된 ${ROUTE_LABELS[route]} 파일이 없습니다.`;
+    return;
+  }
+  target.innerHTML = previews.map((item) => {
+    const finalInfo = item.parsedFinal
+      ? `<span class="preview-detail">직원 ${number(item.parsedFinal.employeeCount)}명 · 대체 ${formatDays(item.parsedFinal.substituteDays)} · 보상 ${formatDays(item.parsedFinal.compensationDays)} 자동 반영</span>`
+      : item.warning
+        ? `<span class="preview-warning">${escapeHtml(item.warning)}</span>`
+        : `<span class="preview-detail">파일 저장 대상</span>`;
+    return `<div class="file-preview-item">
+      <div class="file-preview-main"><strong>${escapeHtml(item.file.name)}</strong><span class="classification-pill kind-${escapeHtml(item.fileKind)}">${escapeHtml(archiveKindLabel(item.fileKind))}</span></div>
+      ${finalInfo}
+    </div>`;
+  }).join("");
+}
+
+function selectedArchiveInputs() {
+  return [
+    { route: "homeplus", files: [...($("#archiveHomeplusFiles")?.files || [])] },
+    { route: "electroland", files: [...($("#archiveElectrolandFiles")?.files || [])] },
+  ];
+}
+
+async function saveArchiveFiles(event) {
   event.preventDefault();
   if (!(state.backend.available && state.backend.configured && state.backend.loggedIn)) {
     openLogin();
     return;
   }
-  const file = $("#archiveFile").files?.[0];
-  if (!file) {
-    showToast("보관할 엑셀 파일을 선택해 주세요.");
+  const month = $("#archiveMonth")?.value || "";
+  if (!month) {
+    showToast("대상 월을 선택해 주세요.");
+    return;
+  }
+  const inputs = selectedArchiveInputs();
+  const selectedCount = inputs.reduce((sum, group) => sum + group.files.length, 0);
+  if (!selectedCount) {
+    showToast("홈플러스 또는 전자랜드 파일을 하나 이상 선택해 주세요.");
     return;
   }
 
   const button = $("#archiveSubmitButton");
+  const commonNote = text($("#archiveNote")?.value);
+  const saved = [];
+  const imported = [];
+  const failed = [];
+  const importFailed = [];
   try {
     button.disabled = true;
-    button.textContent = "파일 저장 중...";
-    await uploadArchiveFile({
-      file,
-      route: $("#archiveRoute").value,
-      month: $("#archiveMonth").value,
-      fileKind: $("#archiveKind").value,
-      note: text($("#archiveNote").value),
-      sourceType: "manual",
-      replace: true,
-    });
-    $("#archiveFile").value = "";
+    for (const group of inputs) {
+      let previews = state.archiveUploadPreviews[group.route] || [];
+      const previewFiles = new Set(previews.map((item) => item.file));
+      if (previews.length !== group.files.length || group.files.some((file) => !previewFiles.has(file)) || previews.some((item) => item.month !== month)) {
+        button.textContent = `${ROUTE_LABELS[group.route]} 파일 확인 중...`;
+        previews = await Promise.all(group.files.map((file) => inspectArchiveFile(file, group.route, month)));
+        state.archiveUploadPreviews[group.route] = previews;
+        renderArchiveUploadPreview(group.route, previews);
+      }
+      for (let index = 0; index < previews.length; index += 1) {
+        const item = previews[index];
+        button.textContent = `파일 저장 중 ${saved.length + failed.length + 1}/${selectedCount}`;
+        try {
+          await uploadArchiveFile({
+            file: item.file,
+            route: item.route,
+            month,
+            fileKind: item.fileKind,
+            note: commonNote,
+            sourceType: "manual",
+            replace: true,
+          });
+          saved.push(item);
+          if (item.fileKind === "result" && item.parsedFinal) {
+            button.textContent = `${ROUTE_LABELS[item.route]} 최종본 휴가내역 반영 중...`;
+            try {
+              const result = await importFinalLeaveData(item.file, item.route, month, item.parsedFinal);
+              imported.push({ item, result });
+            } catch (error) {
+              importFailed.push({ item, error });
+            }
+          }
+        } catch (error) {
+          failed.push({ item, error });
+        }
+      }
+    }
+    $("#archiveHomeplusFiles").value = "";
+    $("#archiveElectrolandFiles").value = "";
     $("#archiveNote").value = "";
-    await loadArchiveFiles();
-    showToast("같은 경로·같은 월·같은 구분의 기존 파일을 교체하여 보관했습니다.");
+    state.archiveUploadPreviews = { homeplus: [], electroland: [] };
+    renderArchiveUploadPreview("homeplus", []);
+    renderArchiveUploadPreview("electroland", []);
+    await Promise.all([loadArchiveFiles(), loadHistory(), loadGrants()]);
+    const summary = [`파일 ${saved.length}개 저장`];
+    if (imported.length) summary.push(`최종본 휴가내역 ${imported.length}건 반영`);
+    if (importFailed.length) summary.push(`휴가 반영 대기 ${importFailed.length}건`);
+    if (failed.length) summary.push(`파일 저장 실패 ${failed.length}건`);
+    showToast(summary.join(" · "));
   } catch (error) {
-    showToast(error.message || "파일 보관 중 오류가 발생했습니다.");
+    showToast(error.message || "월별 파일 저장 중 오류가 발생했습니다.");
   } finally {
     button.disabled = false;
-    button.textContent = "파일 보관";
+    button.textContent = "선택한 파일 저장·교체";
   }
+}
+
+async function importFinalLeaveData(file, route, month, parsed = null) {
+  let finalParsed = parsed;
+  if (!finalParsed) {
+    const sheets = await fileToWorkbookSheets(file);
+    finalParsed = parseFinalLeaveImportWorkbook(sheets, month, route);
+  }
+  const response = await fetch("/api/final-leave-import", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ route, month, fileName: file.name, employeeFacts: finalParsed.employeeFacts }),
+  });
+  if (response.status === 401) {
+    await checkBackend();
+    throw new Error("관리자 로그인이 만료되었습니다. 다시 로그인해 주세요.");
+  }
+  const data = await readJsonResponse(response);
+  if (!response.ok) throw new Error(data.error || "최종본 휴가 사용내역 반영 실패");
+  return data;
 }
 
 async function uploadArchiveFile({ file, route, month, fileKind, note = "", sourceType = "manual", closureId = "", replace = false }) {
@@ -2899,11 +3042,17 @@ function renderArchiveFiles(items) {
   body.innerHTML = items.length ? items.map((item) => {
     const canAnalyze = item.file_kind === "plan" || item.file_kind === "attendance";
     const looksFinal = item.file_kind === "result" || /최종본|출퇴근현황|결과|공유용|수정본/.test(String(item.file_name || ""));
+    const leaveStatus = looksFinal
+      ? Number(item.leave_imported || 0) > 0
+        ? '<span class="success-pill">반영 완료</span>'
+        : '<span class="warning-pill">미반영</span>'
+      : '<span class="neutral-pill">해당 없음</span>';
     return `<tr>
       <td>${escapeHtml(ROUTE_LABELS[item.route] || item.route)}</td>
       <td><strong>${escapeHtml(item.month)}</strong></td>
-      <td>${escapeHtml(archiveKindLabel(item.file_kind))}${item.source_type === "closure" ? '<br><span class="neutral-pill">마감 자동보관</span>' : ""}</td>
+      <td><span class="classification-pill kind-${escapeHtml(item.file_kind)}">${escapeHtml(archiveKindLabel(item.file_kind))}</span>${item.source_type === "closure" ? '<br><span class="neutral-pill">마감 자동보관</span>' : ""}</td>
       <td class="message-cell"><strong>${escapeHtml(item.file_name)}</strong></td>
+      <td>${leaveStatus}</td>
       <td>${escapeHtml(formatFileSize(item.size_bytes))}</td>
       <td>${item.storage_type === "r2" ? "R2" : "D1"}</td>
       <td class="message-cell">${escapeHtml(item.note || "-")}</td>
@@ -2911,13 +3060,14 @@ function renderArchiveFiles(items) {
       <td class="action-cell archive-actions">
         <a class="btn secondary small" href="/api/archive-files/${encodeURIComponent(item.id)}">다운로드</a>
         ${canAnalyze && !looksFinal ? `<button class="btn secondary small archive-use" data-id="${escapeHtml(item.id)}" type="button">분석에 불러오기</button>` : ""}
-        ${looksFinal ? `<button class="btn secondary small archive-evidence" data-id="${escapeHtml(item.id)}" type="button">증빙 반영</button><button class="btn secondary small archive-compare" data-side="base" data-id="${escapeHtml(item.id)}" type="button">기준본 A</button><button class="btn secondary small archive-compare" data-side="target" data-id="${escapeHtml(item.id)}" type="button">비교본 B</button>` : ""}
+        ${looksFinal ? `<button class="btn primary small archive-leave-import" data-id="${escapeHtml(item.id)}" type="button">${Number(item.leave_imported || 0) > 0 ? "휴가 재반영" : "휴가내역 반영"}</button><button class="btn secondary small archive-evidence" data-id="${escapeHtml(item.id)}" type="button">증빙 반영</button><button class="btn secondary small archive-compare" data-side="base" data-id="${escapeHtml(item.id)}" type="button">기준본 A</button><button class="btn secondary small archive-compare" data-side="target" data-id="${escapeHtml(item.id)}" type="button">비교본 B</button>` : ""}
         <button class="btn danger small archive-delete" data-id="${escapeHtml(item.id)}" type="button">삭제</button>
       </td>
     </tr>`;
-  }).join("") : `<tr><td colspan="9" class="empty-cell">저장된 월 마감 파일이 없습니다.</td></tr>`;
+  }).join("") : `<tr><td colspan="10" class="empty-cell">저장된 월별 파일이 없습니다.</td></tr>`;
 
   $$(".archive-use").forEach((button) => button.addEventListener("click", () => useArchiveFile(button.dataset.id, "analyze")));
+  $$(".archive-leave-import").forEach((button) => button.addEventListener("click", () => importLeaveFromArchive(button.dataset.id, button)));
   $$(".archive-evidence").forEach((button) => button.addEventListener("click", () => useArchiveFile(button.dataset.id, "evidence")));
   $$(".archive-compare").forEach((button) => button.addEventListener("click", () => useArchiveFile(button.dataset.id, button.dataset.side)));
   $$(".archive-delete").forEach((button) => button.addEventListener("click", () => deleteArchiveFile(button.dataset.id)));
@@ -2927,12 +3077,15 @@ function renderArchiveSummary(items) {
   const target = $("#archiveSummary");
   if (!target) return;
   const totalBytes = items.reduce((sum, item) => sum + Number(item.size_bytes || 0), 0);
-  const routes = new Set(items.map((item) => `${item.route}|${item.month}`)).size;
-  const closureFiles = items.filter((item) => item.source_type === "closure").length;
+  const homeplusCount = items.filter((item) => item.route === "homeplus").length;
+  const electrolandCount = items.filter((item) => item.route === "electroland").length;
+  const finalFiles = items.filter((item) => item.file_kind === "result" || /최종본|출퇴근현황|결과|공유용|수정본/.test(String(item.file_name || "")));
+  const importedCount = finalFiles.filter((item) => Number(item.leave_imported || 0) > 0).length;
   target.innerHTML = [
     ["보관 파일", `${items.length}개`],
-    ["경로·월", `${routes}건`],
-    ["마감 자동보관", `${closureFiles}개`],
+    ["홈플러스", `${homeplusCount}개`],
+    ["전자랜드", `${electrolandCount}개`],
+    ["최종본 휴가 반영", `${importedCount}/${finalFiles.length}개`],
     ["전체 용량", formatFileSize(totalBytes)],
   ].map(([label, value]) => `<div class="summary-chip"><span>${label}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
 }
@@ -2990,6 +3143,29 @@ async function useArchiveFile(id, mode = "analyze") {
   }
 }
 
+async function importLeaveFromArchive(id, button = null) {
+  const item = state.archiveFiles.find((row) => row.id === id);
+  if (!item) return;
+  const originalText = button?.textContent || "휴가내역 반영";
+  try {
+    if (button) {
+      button.disabled = true;
+      button.textContent = "반영 중...";
+    }
+    const file = await fetchArchiveFile(item);
+    const result = await importFinalLeaveData(file, item.route, item.month);
+    await Promise.all([loadArchiveFiles(), loadHistory(), loadGrants()]);
+    showToast(`${item.month} ${ROUTE_LABELS[item.route]} 최종본 휴가내역을 반영했습니다. 대체휴무 ${formatDays(result.substituteDays)} · 보상휴가 ${formatDays(result.compensationDays)}.`);
+  } catch (error) {
+    showToast(error.message || "최종본 휴가내역 반영 실패");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
+}
+
 async function deleteArchiveFile(id) {
   const item = state.archiveFiles.find((row) => row.id === id);
   if (!item || !confirm(`보관된 파일 “${item.file_name}”을 삭제하시겠습니까?`)) return;
@@ -3005,7 +3181,7 @@ async function deleteArchiveFile(id) {
 }
 
 function archiveKindLabel(kind) {
-  return ({ plan: "계획표", attendance: "실제 근태표", result: "결과·수정본", other: "기타" })[kind] || kind;
+  return ({ plan: "계획표", attendance: "실제 근태표", result: "최종본·수정본", other: "기타" })[kind] || kind;
 }
 
 function formatFileSize(value) {
@@ -3147,76 +3323,6 @@ async function deleteClosure(id, routeLabel, month) {
   }
 }
 
-
-async function previewFinalLeaveImport() {
-  const file = $("#finalLeaveImportFile")?.files?.[0];
-  const month = $("#finalLeaveImportMonth")?.value || "";
-  const route = $("#finalLeaveImportRoute")?.value || "homeplus";
-  const target = $("#finalLeaveImportPreview");
-  state.finalLeaveImportPreview = null;
-  if (!target) return;
-  if (!file || !month) {
-    target.textContent = "대상 월과 이전 최종본을 선택해 주세요. 상담사근태 시트의 화면 표시값만 읽습니다.";
-    return;
-  }
-  try {
-    target.textContent = "상담사근태 시트를 확인 중입니다...";
-    const sheets = await fileToWorkbookSheets(file);
-    const parsed = parseFinalLeaveImportWorkbook(sheets, month, route);
-    state.finalLeaveImportPreview = { file, route, month, parsed };
-    target.innerHTML = `<strong>${escapeHtml(parsed.mainSheetName)}</strong> · 직원 ${number(parsed.employeeCount)}명 · 대체휴무 ${number(parsed.substituteEvents)}건/${formatDays(parsed.substituteDays)} · 보상휴가 ${number(parsed.compensationEvents)}건/${formatDays(parsed.compensationDays)} · ${escapeHtml(`${month}-01`)} 출근 ${number(parsed.workedOnFirstDay)}명 / 미출근 ${number(parsed.restedOnFirstDay)}명 · 입사일 확인 ${number(parsed.rosterReadyCount)}명`;
-  } catch (error) {
-    target.textContent = `확인 오류: ${error.message || "최종본을 읽지 못했습니다."}`;
-  }
-}
-
-async function saveFinalLeaveImport(event) {
-  event.preventDefault();
-  if (!(state.backend.available && state.backend.configured && state.backend.loggedIn)) {
-    openLogin();
-    return;
-  }
-  const file = $("#finalLeaveImportFile")?.files?.[0];
-  const route = $("#finalLeaveImportRoute")?.value || "";
-  const month = $("#finalLeaveImportMonth")?.value || "";
-  if (!file || !month) {
-    showToast("경로·대상 월·이전 최종본을 선택해 주세요.");
-    return;
-  }
-  const button = $("#finalLeaveImportButton");
-  try {
-    button.disabled = true;
-    button.textContent = "상담사근태 읽기·저장 중...";
-    let parsed = state.finalLeaveImportPreview?.file === file
-      && state.finalLeaveImportPreview?.route === route
-      && state.finalLeaveImportPreview?.month === month
-      ? state.finalLeaveImportPreview.parsed
-      : null;
-    if (!parsed) {
-      const sheets = await fileToWorkbookSheets(file);
-      parsed = parseFinalLeaveImportWorkbook(sheets, month, route);
-    }
-    const response = await fetch("/api/final-leave-import", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ route, month, fileName: file.name, employeeFacts: parsed.employeeFacts }),
-    });
-    if (response.status === 401) {
-      await checkBackend();
-      openLogin();
-      return;
-    }
-    const data = await readJsonResponse(response);
-    if (!response.ok) throw new Error(data.error || "이전 최종본 휴가 사용내역 저장 실패");
-    await Promise.all([loadHistory(), loadGrants()]);
-    showToast(`${month} ${ROUTE_LABELS[route]} 이전 최종본을 ${data.replaced ? "교체" : "저장"}했습니다. 대체휴무 ${formatDays(data.substituteDays)} · 보상휴가 ${formatDays(data.compensationDays)} 사용 반영.`);
-  } catch (error) {
-    showToast(error.message || "이전 최종본 휴가 사용내역 저장 실패");
-  } finally {
-    button.disabled = false;
-    button.textContent = "대체휴무·보상휴가 사용내역 저장·교체";
-  }
-}
 
 async function saveGrant(event) {
   event.preventDefault();

@@ -39,3 +39,24 @@
 /* v19 monthly closure comparison */
 .compare-panel{padding:24px;overflow:hidden}.compare-heading{align-items:flex-start}.compare-upload-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:8px}.compare-run{display:block;min-width:240px;margin:18px auto 0}.closure-compare-table{min-width:1120px}.closure-compare-table td:nth-child(7),.closure-compare-table td:nth-child(8){font-weight:800}.archive-actions{min-width:430px}.compare-panel .grant-summary{grid-template-columns:repeat(5,minmax(0,1fr))}@media(max-width:980px){.compare-upload-grid{grid-template-columns:1fr}.compare-panel .grant-summary{grid-template-columns:repeat(2,1fr)}}@media(max-width:700px){.compare-panel{padding:16px}.compare-panel .grant-summary{grid-template-columns:1fr}.archive-actions{min-width:220px}}
 .final-leave-import-panel{margin-top:22px;padding:22px}.final-import-form{margin-top:4px}.three-cols{display:grid;grid-template-columns:180px 180px minmax(260px,1fr);gap:12px;align-items:end}.final-import-form .field-group{margin-top:14px}.final-import-form .btn{margin-top:14px}@media(max-width:900px){.three-cols{grid-template-columns:1fr}.final-leave-import-panel{padding:18px}}
+
+/* v31 unified monthly file vault */
+.file-register-panel{position:static;align-self:start}
+.month-register-field{max-width:250px}
+.route-file-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:18px}
+.route-file-card{min-width:0;padding:16px;border:1px solid var(--line);border-radius:14px;background:#f9fbff}
+.route-file-card.homeplus-card{border-color:#cdddf8;background:#f6f9ff}
+.route-file-card.electroland-card{border-color:#d7e7dc;background:#f8fcf9}
+.route-file-heading{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.route-file-heading>div{min-width:0}.route-file-heading strong{display:block;color:var(--navy);font-size:15px}.route-file-heading small{display:block;margin-top:3px;color:var(--muted);font-size:11px}
+.route-dot{width:12px;height:12px;border-radius:50%;flex:0 0 12px}.homeplus-dot{background:#2d6fd4}.electroland-dot{background:#2e8b57}
+.file-preview-list{min-height:72px;margin-top:10px;padding:10px;border:1px dashed #cad5e5;border-radius:10px;background:#fff;color:var(--muted);font-size:11px;line-height:1.45}
+.preview-loading{padding:12px;text-align:center;color:#62718a}
+.file-preview-item{padding:9px 0;border-bottom:1px solid #edf1f6}.file-preview-item:last-child{border-bottom:0}
+.file-preview-main{display:flex;align-items:center;gap:7px;min-width:0}.file-preview-main strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#24324a;font-size:11px}
+.preview-detail,.preview-warning{display:block;margin-top:5px}.preview-detail{color:#4e617d}.preview-warning{color:#a35c00}
+.classification-pill{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;padding:3px 7px;border-radius:99px;font-size:9px;font-weight:850}
+.classification-pill.kind-plan{color:#22539c;background:#e8f1ff}.classification-pill.kind-attendance{color:#7c4f00;background:#fff0c9}.classification-pill.kind-result{color:#0c6b42;background:#dff6e9}.classification-pill.kind-other{color:#5e6878;background:#eef2f7}
+.archive-summary{grid-template-columns:repeat(5,minmax(0,1fr))}.archive-table{min-width:1460px}.archive-actions{min-width:510px}
+@media(max-width:1280px){.route-file-grid{grid-template-columns:1fr}.archive-summary{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:700px){.archive-summary{grid-template-columns:1fr}.archive-actions{min-width:240px}}

@@ -18,21 +18,29 @@ export async function onRequestGet(context) {
   const bindings = [];
   if (route) {
     if (!VALID_ROUTES.has(route)) return json({ error: "경로 구분이 올바르지 않습니다." }, 400);
-    conditions.push("route = ?");
+    conditions.push("a.route = ?");
     bindings.push(route);
   }
   if (month) {
     if (!/^\d{4}-\d{2}$/.test(month)) return json({ error: "대상 월이 올바르지 않습니다." }, 400);
-    conditions.push("month = ?");
+    conditions.push("a.month = ?");
     bindings.push(month);
   }
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   let statement = context.env.DB.prepare(`
-    SELECT id, route, month, file_kind, file_name, content_type, size_bytes,
-           storage_type, source_type, closure_id, note, created_at
-    FROM attendance_archive_files
+    SELECT a.id, a.route, a.month, a.file_kind, a.file_name, a.content_type, a.size_bytes,
+           a.storage_type, a.source_type, a.closure_id, a.note, a.created_at,
+           CASE
+             WHEN a.file_kind = 'result'
+              AND c.id IS NOT NULL
+              AND COALESCE(c.attendance_file_name, '') = COALESCE(a.file_name, '')
+             THEN 1 ELSE 0
+           END AS leave_imported
+    FROM attendance_archive_files a
+    LEFT JOIN attendance_closures c
+      ON c.company = a.route AND c.month = a.month
     ${where}
-    ORDER BY month DESC, route ASC, created_at DESC
+    ORDER BY a.month DESC, a.route ASC, a.created_at DESC
     LIMIT 500
   `);
   if (bindings.length) statement = statement.bind(...bindings);
@@ -62,7 +70,7 @@ export async function onRequestPost(context) {
 
   if (!(file instanceof File) || file.size <= 0) return json({ error: "보관할 엑셀 파일을 선택해 주세요." }, 400);
   if (!VALID_ROUTES.has(route) || !/^\d{4}-\d{2}$/.test(month) || !VALID_KINDS.has(fileKind)) {
-    return json({ error: "경로·대상 월·파일 구분을 확인해 주세요." }, 400);
+    return json({ error: "경로·대상 월·자동 분류값을 확인해 주세요." }, 400);
   }
   if (!/\.(xlsx|xls|xlsb)$/i.test(file.name)) return json({ error: "엑셀 파일(xlsx, xls, xlsb)만 보관할 수 있습니다." }, 400);
   if (!context.env.FILES && file.size > D1_FILE_LIMIT) {
