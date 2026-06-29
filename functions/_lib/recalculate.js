@@ -171,24 +171,6 @@ export async function recalculateRoute(db, route) {
         .filter(validUsageEvent)
         .sort(eventSort);
 
-      const combinedPools = consumeCombinedPools({
-        lots,
-        substituteEvents,
-        compensationEvents,
-        monthStart,
-        monthEnd,
-        nextMonthStart,
-        closureId: closure.id,
-        employeeId,
-        allocationTotals,
-      });
-      const substitute = combinedPools.substitute;
-      const compensation = combinedPools.compensation;
-
-      const currentAnnual = roundHalf(fact.annual_leave_used);
-      const cumulativeAnnual = roundHalf((cumulativeAnnualByEmployee.get(employeeId) || 0) + currentAnnual);
-      cumulativeAnnualByEmployee.set(employeeId, cumulativeAnnual);
-
       const storedOccurrenceRestDays = roundHalf(fact.occurrence_rest_days);
       const savedBaseAllowance = roundHalf(fact.base_allowance);
       const storedRawAllowance = roundHalf(fact.base_allowance_raw);
@@ -198,6 +180,37 @@ export async function recalculateRoute(db, route) {
       const baseAllowance = roundHalf(baseAllowanceRaw + occurrenceRestDays);
       const basicDayoffUsed = roundHalf(fact.basic_dayoff_used);
       const baseExcess = roundHalf(Math.max(0, basicDayoffUsed - baseAllowance));
+      const dayoffReplacementEvents = extractDayoffReplacementEvents(fact, baseAllowance, baseExcess, closure.month);
+
+      // 계획표에 직접 표기된 대체휴무·보상휴가를 먼저 차감합니다.
+      const explicitPools = consumeCombinedPools({
+        lots, substituteEvents, compensationEvents, monthStart, monthEnd, nextMonthStart,
+        closureId: closure.id, employeeId, allocationTotals,
+      });
+      // 기본 휴무 초과분은 남은 대체휴무를 우선 사용하고 부족하면 보상휴가로 자동 대체합니다.
+      const replacementPools = consumeCombinedPools({
+        lots, substituteEvents: dayoffReplacementEvents, compensationEvents: [], monthStart, monthEnd, nextMonthStart,
+        closureId: closure.id, employeeId, allocationTotals,
+      });
+      const substitute = {
+        ...explicitPools.substitute,
+        remaining: replacementPools.substitute.remaining,
+        expired: replacementPools.substitute.expired,
+      };
+      const compensation = {
+        ...explicitPools.compensation,
+        remaining: replacementPools.compensation.remaining,
+        expired: replacementPools.compensation.expired,
+      };
+      const dayoffReplacementUsed = roundHalf(replacementPools.substitute.applied + replacementPools.compensation.applied);
+      const dayoffReplacementShortage = roundHalf(replacementPools.substitute.shortage);
+      const dayoffReplacementSubstituteUsed = roundHalf(replacementPools.substitute.applied);
+      const dayoffReplacementCompensationUsed = roundHalf(replacementPools.compensation.applied);
+
+      const currentAnnual = roundHalf(fact.annual_leave_used);
+      const cumulativeAnnual = roundHalf((cumulativeAnnualByEmployee.get(employeeId) || 0) + currentAnnual);
+      cumulativeAnnualByEmployee.set(employeeId, cumulativeAnnual);
+
       const explicitSubDayoffUsed = roundHalf(substituteEvents
         .filter((event) => String(event.planStatus || "").startsWith("대체휴일"))
         .reduce((sum, event) => sum + Number(event.days || 0), 0));
@@ -224,7 +237,7 @@ export async function recalculateRoute(db, route) {
       });
 
       if (baseExcess > 0) dayoffExcessPeople += 1;
-      if (substitute.shortage > 0) substituteShortagePeople += 1;
+      if (substitute.shortage > 0 || dayoffReplacementShortage > 0) substituteShortagePeople += 1;
       if (compensation.shortage > 0) compensationShortagePeople += 1;
       if (currentAnnual > 0) annualLeavePeople += 1;
 
@@ -236,14 +249,19 @@ export async function recalculateRoute(db, route) {
          remaining_substitute, expired_substitute, shortage,
          compensation_needed, available_compensation, compensation_applied,
          remaining_compensation, expired_compensation, compensation_shortage,
+         dayoff_replacement_used, dayoff_replacement_shortage,
+         dayoff_replacement_substitute_used, dayoff_replacement_compensation_used,
          current_annual_leave, cumulative_annual_leave, judgment, compensation_judgment)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).bind(
         closure.id, route, closure.month, fact.store || "", employeeId, fact.employee_name || "",
         baseAllowance, basicDayoffUsed, explicitSubDayoffUsed, baseExcess,
         substituteNeeded, substitute.available, substitute.applied, substitute.remaining, substitute.expired, substitute.shortage,
         compensationNeeded, compensation.available, compensation.applied, compensation.remaining, compensation.expired, compensation.shortage,
-        currentAnnual, cumulativeAnnual, judgment, compensationJudgment
+        dayoffReplacementUsed, dayoffReplacementShortage, dayoffReplacementSubstituteUsed, dayoffReplacementCompensationUsed,
+        currentAnnual, cumulativeAnnual,
+        dayoffReplacementShortage > 0 ? `휴무초과 확인 요청 · ${dayoffReplacementShortage}일 미대체` : (baseExcess > 0 ? `휴무초과 ${baseExcess}일 · 대체사용 ${dayoffReplacementUsed}일` : judgment),
+        compensationJudgment
       ));
     }
 
@@ -278,6 +296,26 @@ export async function recalculateRoute(db, route) {
   await runBatch(db, closureUpdates);
 
   return { affectedMonths: closures.length, affectedEmployees };
+}
+
+function extractDayoffReplacementEvents(fact, baseAllowance, baseExcess, month) {
+  if (!(Number(baseExcess) > 0)) return [];
+  let rows = [];
+  try { rows = JSON.parse(fact.daily_statuses_json || "[]"); } catch { rows = []; }
+  const dates = (Array.isArray(rows) ? rows : [])
+    .filter((row) => String(row?.date || "").startsWith(month))
+    .filter((row) => {
+      const plan = String(row?.planStatus || "").replace(/\s+/g, "");
+      const actual = String(row?.actualStatus || "").replace(/\s+/g, "");
+      return actual === "휴무" || (!row?.hasClockIn && plan === "휴무");
+    })
+    .map((row) => String(row.date))
+    .sort();
+  const start = Math.max(0, Math.floor(Number(baseAllowance) || 0));
+  const excessDates = dates.slice(start, start + Math.ceil(Number(baseExcess) || 0));
+  const fallbackDate = endOfMonth(month);
+  while (excessDates.length < Math.ceil(Number(baseExcess) || 0)) excessDates.push(fallbackDate);
+  return excessDates.map((date, index) => ({ date, days: Math.min(1, Number(baseExcess) - index), source: "휴무초과 자동 대체", planStatus: "휴무" })).filter((row) => row.days > 0);
 }
 
 function consumeCombinedPools({ lots, substituteEvents, compensationEvents, monthStart, monthEnd, nextMonthStart, closureId, employeeId, allocationTotals }) {

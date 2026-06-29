@@ -34,6 +34,10 @@ const SUMMARY_COLUMNS = {
   expired_compensation: "REAL NOT NULL DEFAULT 0",
   compensation_shortage: "REAL NOT NULL DEFAULT 0",
   compensation_judgment: "TEXT",
+  dayoff_replacement_used: "REAL NOT NULL DEFAULT 0",
+  dayoff_replacement_shortage: "REAL NOT NULL DEFAULT 0",
+  dayoff_replacement_substitute_used: "REAL NOT NULL DEFAULT 0",
+  dayoff_replacement_compensation_used: "REAL NOT NULL DEFAULT 0",
 };
 
 let initialized = false;

@@ -1,6 +1,7 @@
 import { json, requireAuth } from "../_lib/auth.js";
 import { normalizeEmployeeId, parseEmployeeIds, resolveEligibleEmployees, resolveOccurrenceFact } from "../_lib/leave-eligibility.js";
 import { ensureSchema } from "../_lib/schema.js";
+import { recalculateRoute } from "../_lib/recalculate.js";
 
 const VALID_ROUTES = new Set(["homeplus", "electroland"]);
 
@@ -16,9 +17,13 @@ export async function onRequestGet(context) {
     return json({ error: "경로와 대상 월을 확인해 주세요." }, 400);
   }
 
+  // v34 배포 전 저장된 월도 새 휴무초과 자동대체 기준으로 즉시 재계산합니다.
+  await recalculateRoute(context.env.DB, route);
+
   const monthStart = `${month}-01`;
   const monthEnd = endOfMonth(month);
-  const [grantsResult, factsResult, allocationsResult, annualUsageResult, workforceResult, annualEmployeeResult, closuresResult] = await Promise.all([
+  const previousMonth = shiftMonth(month, -1);
+  const [grantsResult, factsResult, allocationsResult, annualUsageResult, workforceResult, annualEmployeeResult, closuresResult, previousSummaryResult] = await Promise.all([
     context.env.DB.prepare(`
       SELECT * FROM attendance_leave_grants_v5
       WHERE route = ? AND valid_from <= ? AND valid_to >= ?
@@ -52,6 +57,12 @@ export async function onRequestGet(context) {
     context.env.DB.prepare(`
       SELECT month, cutoff_date FROM attendance_closures WHERE company = ?
     `).bind(route).all(),
+    context.env.DB.prepare(`
+      SELECT employee_id, base_excess, dayoff_replacement_used, dayoff_replacement_shortage,
+             dayoff_replacement_substitute_used, dayoff_replacement_compensation_used
+      FROM attendance_monthly_summaries_v3
+      WHERE route = ? AND month = ?
+    `).bind(route, previousMonth).all(),
   ]);
 
   const factsByMonth = new Map();
@@ -172,7 +183,17 @@ export async function onRequestGet(context) {
       excludedEmployeeIds: parseEmployeeIds(grant.excluded_employee_ids_json),
     }));
 
-  return json({ lotsByEmployee, balances, annualLeaveBefore, currentGrants, settlementGrants, autoUseDates });
+  const previousMonthFacts = {};
+  for (const row of previousSummaryResult.results || []) {
+    previousMonthFacts[normalizeEmployeeId(row.employee_id)] = {
+      baseExcess: roundHalf(row.base_excess),
+      dayoffReplacementUsed: roundHalf(row.dayoff_replacement_used),
+      dayoffReplacementShortage: roundHalf(row.dayoff_replacement_shortage),
+      dayoffReplacementSubstituteUsed: roundHalf(row.dayoff_replacement_substitute_used),
+      dayoffReplacementCompensationUsed: roundHalf(row.dayoff_replacement_compensation_used),
+    };
+  }
+  return json({ lotsByEmployee, balances, annualLeaveBefore, currentGrants, settlementGrants, autoUseDates, previousMonth, previousMonthFacts });
 }
 
 function endOfMonth(monthText) {
@@ -182,4 +203,10 @@ function endOfMonth(monthText) {
 
 function roundHalf(value) {
   return Math.round((Number(value) || 0) * 2) / 2;
+}
+
+function shiftMonth(monthText, amount) {
+  const [year, month] = monthText.split("-").map(Number);
+  const date = new Date(year, month - 1 + amount, 1);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }

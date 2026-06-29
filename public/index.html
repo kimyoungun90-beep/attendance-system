@@ -5,14 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#123B72" />
   <title>전자랜드 · 홈플러스 근태 관리</title>
-  <link rel="stylesheet" href="./assets/styles.css?v=32" />
+  <link rel="stylesheet" href="./assets/styles.css?v=34" />
 </head>
 <body>
   <div class="app-shell">
     <header class="topbar">
       <div>
         <p class="eyebrow">ATTENDANCE MANAGEMENT</p>
-        <h1>전자랜드 · 홈플러스 근태 관리 <span class="version-tag">v32</span></h1>
+        <h1>전자랜드 · 홈플러스 근태 관리 <span class="version-tag">v34</span></h1>
       </div>
       <div class="topbar-actions">
         <span id="storageBadge" class="badge neutral">저장 방식 확인 중</span>
@@ -189,35 +189,52 @@
       <section id="annualLeaveView" class="view">
         <div class="substitute-layout annual-leave-layout">
           <section class="panel form-panel">
-            <div class="panel-heading"><div><span class="step-label">INITIAL BASELINE</span><h2>최초 연차 누적현황 등록</h2></div></div>
-            <p class="muted">현재 연차대장은 처음 한 번만 등록합니다. 이후 수기 수정본을 다시 넣으면 해당 경로의 기준값을 마지막 파일로 완전히 교체합니다.</p>
-            <form id="annualBaselineForm">
-              <div class="two-cols">
-                <div class="field-group"><label class="field-label" for="annualBaselineRoute">경로</label><select id="annualBaselineRoute" class="input"><option value="homeplus">홈플러스</option><option value="electroland" selected>전자랜드</option></select></div>
-                <div class="field-group"><label class="field-label" for="annualBaselineDate">기준일</label><input id="annualBaselineDate" class="input" type="date" value="2026-05-31" required /></div>
-              </div>
-              <div class="field-group"><label class="field-label" for="annualBaselineFile">연차 누적현황 초본</label><input id="annualBaselineFile" class="input file-input" type="file" accept=".xlsx,.xls,.xlsb" required /><p class="field-help">1년 이상자와 1년 미만자 시트를 함께 읽어 발생·사용·잔여·사용기간·촉진일을 저장합니다.</p></div>
-              <div id="annualBaselinePreview" class="auto-rule-box compact-box">최초 기준 파일을 선택해 주세요.</div>
-              <button id="annualBaselineSubmit" class="btn primary full" type="submit">최초 기준값 저장·교체</button>
-            </form>
+            <div class="panel-heading"><div><span class="step-label">ROUTE LEDGER INPUT</span><h2>경로별 기존 연차대장 등록</h2></div></div>
+            <p class="muted">홈플러스와 전자랜드는 기존에 사용하던 연차대장 양식이 서로 달라도 그대로 등록할 수 있습니다. 파일에서 수기로 수정한 발생·사용·잔여·적용기간을 읽고, 누적 현황은 오른쪽의 시스템 표준 원장으로 계속 관리합니다.</p>
+            <div class="route-ledger-grid">
+              <form id="homeplusAnnualBaselineForm" class="route-ledger-card">
+                <div class="route-ledger-title"><span class="route-chip homeplus">홈플러스</span><strong>기존 연차대장 등록·교체</strong></div>
+                <div class="field-group"><label class="field-label" for="homeplusAnnualBaselineDate">수기 대장 기준일</label><input id="homeplusAnnualBaselineDate" class="input" type="date" value="2026-05-31" required /></div>
+                <div class="auto-rule-box compact-box"><strong>홈플러스 전용 구조</strong><p>현재 사용하는 상담사 연차관리대장 단일 시트를 읽습니다. 퇴사·휴직·경로이동과 수기로 수정한 발생·사용·잔여·적용기간을 저장합니다.</p></div>
+                <div class="field-group"><label class="field-label" for="homeplusAnnualBaselineFile">홈플러스 연차대장</label><input id="homeplusAnnualBaselineFile" class="input file-input" type="file" accept=".xlsx,.xls,.xlsb" required /></div>
+                <div id="homeplusAnnualBaselinePreview" class="auto-rule-box compact-box">홈플러스 연차대장을 선택해 주세요.</div>
+                <button id="homeplusAnnualBaselineSubmit" class="btn primary full" type="submit">홈플러스 기준대장 저장·교체</button>
+              </form>
+
+              <form id="electrolandAnnualBaselineForm" class="route-ledger-card">
+                <div class="route-ledger-title"><span class="route-chip electroland">전자랜드</span><strong>기존 연차대장 등록·교체</strong></div>
+                <div class="field-group"><label class="field-label" for="electrolandAnnualBaselineDate">수기 대장 기준일</label><input id="electrolandAnnualBaselineDate" class="input" type="date" value="2026-05-31" required /></div>
+                <div class="auto-rule-box compact-box"><strong>전자랜드 전용 구조</strong><p>현재 사용하는 1년 이상자·1년 미만자 분리 시트를 읽습니다. 수기로 수정한 발생·누적사용·잔여·적용기간을 저장합니다.</p></div>
+                <div class="field-group"><label class="field-label" for="electrolandAnnualBaselineFile">전자랜드 연차대장</label><input id="electrolandAnnualBaselineFile" class="input file-input" type="file" accept=".xlsx,.xls,.xlsb" required /></div>
+                <div id="electrolandAnnualBaselinePreview" class="auto-rule-box compact-box">전자랜드 연차대장을 선택해 주세요.</div>
+                <button id="electrolandAnnualBaselineSubmit" class="btn primary full" type="submit">전자랜드 기준대장 저장·교체</button>
+              </form>
+            </div>
 
             <hr class="section-divider" />
             <div class="panel-heading"><div><span class="step-label">MONTHLY APPROVAL</span><h2>월별 승인·반려 파일 등록</h2></div></div>
-            <p class="muted">같은 경로·같은 월을 다시 등록하면 그 달 자료를 완전히 교체합니다. 승인된 연차·반차만 잔여 연차에서 차감하며 반려·취소·미사용은 차감하지 않습니다.</p>
-            <form id="annualMonthlyForm">
-              <div class="two-cols">
-                <div class="field-group"><label class="field-label" for="annualMonthlyRoute">경로</label><select id="annualMonthlyRoute" class="input"><option value="homeplus">홈플러스</option><option value="electroland" selected>전자랜드</option></select></div>
-                <div class="field-group"><label class="field-label" for="annualMonthlyMonth">대상 월</label><input id="annualMonthlyMonth" class="input" type="month" required /></div>
-              </div>
-              <div class="field-group"><label class="field-label" for="annualMonthlyFile">연차신청현황 승인·반려 엑셀</label><input id="annualMonthlyFile" class="input file-input" type="file" accept=".xlsx,.xls,.xlsb" required /></div>
-              <div id="annualMonthlyPreview" class="auto-rule-box compact-box">월별 승인·반려 파일을 선택해 주세요.</div>
-              <button id="annualMonthlySubmit" class="btn primary full" type="submit">월별 연차 현황 저장·교체</button>
-            </form>
+            <p class="muted">경로별 전용 등록칸입니다. 같은 경로·같은 월을 다시 등록하면 해당 월 자료를 마지막 파일 기준으로 교체합니다.</p>
+            <div class="route-ledger-grid">
+              <form id="homeplusAnnualMonthlyForm" class="route-ledger-card compact-card">
+                <div class="route-ledger-title"><span class="route-chip homeplus">홈플러스</span><strong>월별 연차 신청현황</strong></div>
+                <div class="field-group"><label class="field-label" for="homeplusAnnualMonthlyMonth">대상 월</label><input id="homeplusAnnualMonthlyMonth" class="input" type="month" required /></div>
+                <div class="field-group"><label class="field-label" for="homeplusAnnualMonthlyFile">홈플러스 승인·반려 파일</label><input id="homeplusAnnualMonthlyFile" class="input file-input" type="file" accept=".xlsx,.xls,.xlsb" required /></div>
+                <div id="homeplusAnnualMonthlyPreview" class="auto-rule-box compact-box">홈플러스 월별 파일을 선택해 주세요.</div>
+                <button id="homeplusAnnualMonthlySubmit" class="btn primary full" type="submit">홈플러스 월별 현황 저장·교체</button>
+              </form>
+              <form id="electrolandAnnualMonthlyForm" class="route-ledger-card compact-card">
+                <div class="route-ledger-title"><span class="route-chip electroland">전자랜드</span><strong>월별 연차 신청현황</strong></div>
+                <div class="field-group"><label class="field-label" for="electrolandAnnualMonthlyMonth">대상 월</label><input id="electrolandAnnualMonthlyMonth" class="input" type="month" required /></div>
+                <div class="field-group"><label class="field-label" for="electrolandAnnualMonthlyFile">전자랜드 승인·반려 파일</label><input id="electrolandAnnualMonthlyFile" class="input file-input" type="file" accept=".xlsx,.xls,.xlsb" required /></div>
+                <div id="electrolandAnnualMonthlyPreview" class="auto-rule-box compact-box">전자랜드 월별 파일을 선택해 주세요.</div>
+                <button id="electrolandAnnualMonthlySubmit" class="btn primary full" type="submit">전자랜드 월별 현황 저장·교체</button>
+              </form>
+            </div>
           </section>
 
           <section class="panel grant-list-panel">
             <div class="panel-heading">
-              <div><span class="step-label">ANNUAL LEAVE LEDGER</span><h2>연차 누적 현황</h2><p class="muted">홈플러스는 1월 1일, 전자랜드는 입사일 기준으로 연차를 생성합니다. 1년 미만자는 월 입사일 기준 월차를 별도 관리합니다.</p></div>
+              <div><span class="step-label">ANNUAL LEAVE LEDGER</span><h2>연차 누적 현황</h2><p class="muted">왼쪽에서 어떤 기존 양식을 등록하더라도 이 화면은 동일한 표준 원장으로 표시합니다. 홈플러스는 1월 1일, 전자랜드는 입사일 기준으로 생성하며 1년 미만자는 월차를 별도 계산합니다.</p></div>
               <div class="toolbar-actions">
                 <select id="annualLedgerRoute" class="input compact"><option value="homeplus">홈플러스</option><option value="electroland" selected>전자랜드</option></select>
                 <input id="annualLedgerMonth" class="input compact" type="month" />
@@ -517,6 +534,6 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-  <script type="module" src="./assets/app.js?v=32"></script>
+  <script type="module" src="./assets/app.js?v=34"></script>
 </body>
 </html>

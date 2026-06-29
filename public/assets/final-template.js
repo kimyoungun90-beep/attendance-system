@@ -112,8 +112,15 @@ function buildContext(result, daysInMonth) {
     addIssue(issueMap, issue.employeeId, issue.date, issue.reason || issue.result);
   }
   for (const summary of result.employeeSummaries || []) {
-    for (const event of summary.baseExcessEvents || []) {
-      addIssue(issueMap, summary.employeeId, event.date, `기본 휴무 기준 ${daysText(summary.baseAllowance)} 초과분`);
+    // 기본 휴무 초과분은 대체휴무·보상휴가로 모두 대체된 경우 오류로 표시하지 않습니다.
+    // 대체하지 못한 날짜만 빨간색 확인 대상으로 표시합니다.
+    const dayoffShortageDates = resolveLeaveShortageDates(
+      summary.baseExcessEvents || [],
+      Number(summary.dayoffReplacementShortage || 0),
+      summary.dayoffReplacementShortageDates || [],
+    );
+    for (const date of dayoffShortageDates) {
+      addIssue(issueMap, summary.employeeId, date, `휴무초과 확인 요청 · ${daysText(summary.dayoffReplacementShortage)} 미대체`);
     }
     // 대체휴무와 보상휴가는 각각의 초과 발생일만 빨간색으로 표시합니다.
     const substituteShortageDates = resolveLeaveShortageDates(
@@ -258,7 +265,7 @@ function buildIssueSummarySheet(workbook, result, ctx, year, monthNo) {
   };
 
   for (const row of result.mismatchRows || []) {
-    if (row.issueType === "missing_plan") continue;
+    if (row.issueType === "missing_plan" || row.resolved) continue;
     const group = ensureGroup(row.employeeId, row);
     if (!group) continue;
     const text = summarizeIssueRow(row);
@@ -278,14 +285,21 @@ function buildIssueSummarySheet(workbook, result, ctx, year, monthNo) {
   }
 
   for (const summary of result.employeeSummaries || []) {
+    if (summary.dayoffResolved) continue;
     const group = ensureGroup(summary.employeeId, summary);
     if (!group) continue;
-    const combinedShortage = Number(summary.combinedShortage ?? Math.max(0,
-      Number(summary.substituteNeeded ?? summary.explicitSubDayoffUsed ?? 0) + Number(summary.compensationNeeded || 0)
-      - Number(summary.availableSubstitute || 0) - Number(summary.availableCompensation || 0)
-    ));
-    if (combinedShortage > 0) {
-      group.issues.push(`대체·보상 휴무 ${daysText(combinedShortage)} 초과 사용`);
+    const dayoffShortage = Number(summary.dayoffReplacementShortage || 0);
+    const priorShortage = Number(summary.priorDayoffReplacementShortage || 0);
+    if (dayoffShortage > 0 || priorShortage > 0) {
+      group.issues.push(`휴무초과 미대체 ${daysText(dayoffShortage + priorShortage)}`);
+      group.priorities.add("긴급");
+    }
+    if (Number(summary.shortage || 0) > 0) {
+      group.issues.push(`대체휴무 ${daysText(summary.shortage)} 초과 사용`);
+      group.priorities.add("긴급");
+    }
+    if (Number(summary.compensationShortage || 0) > 0) {
+      group.issues.push(`보상휴가 ${daysText(summary.compensationShortage)} 초과 사용`);
       group.priorities.add("긴급");
     }
   }
@@ -561,125 +575,13 @@ function styleSummarySheet(sheet, lastRow) {
 
 
 function buildManagerRequestSheet(workbook, result, year, monthNo) {
-  const regionOrder = ["서울", "경인", "충청", "경북", "경남", "전라"];
-  const rows = (result.managerRequests || []).map((row) => {
-    const text = `${row.issueText || ""} ${row.message || ""}`;
-    const category = /출근|증빙|초과|미입력/.test(text) ? "긴급 전달" : /등록|사번|매칭/.test(text) ? "등록 확인" : "확인 필요";
-    return {
-      ...row,
-      category,
-      regionGroup: normalizeDashboardRegion(row.region || "", row.store || ""),
-      status: "미전달",
-    };
-  }).sort((a, b) => regionOrder.indexOf(a.regionGroup) - regionOrder.indexOf(b.regionGroup)
-    || String(a.regionalManager || "").localeCompare(String(b.regionalManager || ""), "ko")
-    || String(a.manager || "").localeCompare(String(b.manager || ""), "ko")
-    || String(a.store || "").localeCompare(String(b.store || ""), "ko")
-    || String(a.name || "").localeCompare(String(b.name || ""), "ko"));
-
-  const totalIssues = rows.reduce((sum, row) => sum + Number(row.issueCount || 0), 0);
-  const managerCount = new Set(rows.map((row) => `${row.regionalManager || ""}|${row.manager || ""}`).filter((value) => value !== "|")).size;
-  const urgentCount = rows.filter((row) => row.category === "긴급 전달").length;
-  const matrix = Array.from({ length: 7 }, () => Array(12).fill(""));
-  matrix[0][0] = `${year}년 ${monthNo}월 매니저별 상담사 이상 근태`;
-  matrix[1][0] = "지역별 수정 요청 대상을 확인하고 복사용 멘트를 그대로 전달할 수 있도록 정리했습니다.";
-  const cards = [
-    [0, "총 요청 인원", `${rows.length}명`], [2, "총 문제 건수", `${totalIssues}건`], [4, "대상 매니저", `${managerCount}명`],
-    [6, "미전달", `${rows.length}건`], [8, "전달 완료", "0건"],
-  ];
-  for (const [col, label, value] of cards) { matrix[2][col] = label; matrix[3][col] = value; }
-  matrix[2][10] = "구분 색상 안내";
-  matrix[3][10] = "● 긴급 전달"; matrix[3][11] = "● 확인 필요";
-  matrix[4][10] = "● 등록 확인"; matrix[4][11] = "● 전달 완료";
-  matrix[6] = ["No", "지역장", "매니저", "지역", "매장명", "이름", "사번", "문제 건수", "구분", "문제 요약", "복사용 수정요청 멘트", "전달상태"];
-
-  const regionRows = [];
-  const dataRows = [];
-  let number = 1;
-  for (const region of regionOrder) {
-    const group = rows.filter((row) => row.regionGroup === region);
-    const counts = {
-      urgent: group.filter((row) => row.category === "긴급 전달").length,
-      review: group.filter((row) => row.category === "확인 필요").length,
-      register: group.filter((row) => row.category === "등록 확인").length,
-    };
-    const regionRowIndex = matrix.length;
-    matrix.push([
-      `▼  ${region} (총 ${group.length}명)`, "", "", "", "", "", "",
-      `긴급 ${counts.urgent}명  |  검토 ${counts.review}명  |  등록 ${counts.register}명  |  완료 0명`, "", "", "", "",
-    ]);
-    regionRows.push({ row: regionRowIndex, region });
-    for (const row of group) {
-      matrix.push([
-        number++, row.regionalManager || "", row.manager || "", region, row.store || "", row.name || "", row.employeeId || "",
-        Number(row.issueCount || 0), row.category, row.issueText || "", row.message || "", row.status,
-      ]);
-      dataRows.push({ row: matrix.length - 1, category: row.category, status: row.status });
-    }
-  }
-
-  const sheet = XLSX.utils.aoa_to_sheet(matrix);
-  sheet["!merges"] = [
-    { s: { r: 0, c: 0 }, e: { r: 0, c: 11 } }, { s: { r: 1, c: 0 }, e: { r: 1, c: 11 } },
-    { s: { r: 2, c: 0 }, e: { r: 2, c: 1 } }, { s: { r: 3, c: 0 }, e: { r: 4, c: 1 } },
-    { s: { r: 2, c: 2 }, e: { r: 2, c: 3 } }, { s: { r: 3, c: 2 }, e: { r: 4, c: 3 } },
-    { s: { r: 2, c: 4 }, e: { r: 2, c: 5 } }, { s: { r: 3, c: 4 }, e: { r: 4, c: 5 } },
-    { s: { r: 2, c: 6 }, e: { r: 2, c: 7 } }, { s: { r: 3, c: 6 }, e: { r: 4, c: 7 } },
-    { s: { r: 2, c: 8 }, e: { r: 2, c: 9 } }, { s: { r: 3, c: 8 }, e: { r: 4, c: 9 } },
-    { s: { r: 2, c: 10 }, e: { r: 2, c: 11 } },
-  ];
-  for (const item of regionRows) {
-    sheet["!merges"].push(
-      { s: { r: item.row, c: 0 }, e: { r: item.row, c: 6 } },
-      { s: { r: item.row, c: 7 }, e: { r: item.row, c: 11 } },
-    );
-  }
-  sheet["!cols"] = [
-    { wch: 6 }, { wch: 11 }, { wch: 11 }, { wch: 9 }, { wch: 18 }, { wch: 11 }, { wch: 13 }, { wch: 10 },
-    { wch: 16 }, { wch: 44 }, { wch: 78 }, { wch: 12 },
-  ];
-  sheet["!rows"] = matrix.map((_, index) => ({ hpt: index === 0 ? 34 : index === 1 ? 24 : index >= 2 && index <= 4 ? 28 : index === 5 ? 8 : index === 6 ? 30 : regionRows.some((item) => item.row === index) ? 26 : 48 }));
-  sheet["!freeze"] = { xSplit: 0, ySplit: 7, topLeftCell: "A8", activePane: "bottomLeft", state: "frozen" };
-  sheet["!views"] = [{ showGridLines: false, zoomScale: 70, zoomScaleNormal: 70 }];
-
-  styleCellRange(sheet, 0, 0, 0, 11, { fill: { patternType: "solid", fgColor: { rgb: "FF0B3B76" } }, font: { name: "맑은 고딕", sz: 18, bold: true, color: { rgb: "FFFFFFFF" } }, alignment: { horizontal: "left", vertical: "center" } });
-  styleCellRange(sheet, 1, 0, 1, 11, { fill: { patternType: "solid", fgColor: { rgb: "FFF4F7FB" } }, font: { name: "맑은 고딕", sz: 10, color: { rgb: "FF40516B" } }, alignment: { horizontal: "right", vertical: "center" } });
-  const cardPalettes = [
-    { fill: "FFF7FAFF", border: "FF8FB7E8", font: "FF0B5CCB" }, { fill: "FFFFF8EF", border: "FFF4C27A", font: "FFC55A11" },
-    { fill: "FFF3F8FF", border: "FF9CC2EF", font: "FF2F75B5" }, { fill: "FFFFF5F5", border: "FFF1A2A7", font: "FFC00000" },
-    { fill: "FFF3FBF6", border: "FF9FD3B2", font: "FF107C41" },
-  ];
-  cards.forEach(([col], index) => {
-    const palette = cardPalettes[index];
-    styleCellRange(sheet, 2, col, 4, col + 1, { fill: { patternType: "solid", fgColor: { rgb: palette.fill } }, font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FF26364D" } }, alignment: { horizontal: "center", vertical: "center", wrapText: true }, border: thinBorder(palette.border) });
-    styleCellRange(sheet, 3, col, 4, col + 1, { fill: { patternType: "solid", fgColor: { rgb: palette.fill } }, font: { name: "맑은 고딕", sz: 19, bold: true, color: { rgb: palette.font } }, alignment: { horizontal: "center", vertical: "center" }, border: thinBorder(palette.border) });
-  });
-  styleCellRange(sheet, 2, 10, 2, 11, { fill: { patternType: "solid", fgColor: { rgb: "FFFFFFFF" } }, font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: "FF2E3B52" } }, alignment: { horizontal: "left", vertical: "center" }, border: thinBorder("FFB8C5D6") });
-  const legendStyles = [
-    [3, 10, "FFFFF5F5", "FFC00000"], [3, 11, "FFFFF8EF", "FFC55A11"],
-    [4, 10, "FFF3F8FF", "FF2F75B5"], [4, 11, "FFF3FBF6", "FF107C41"],
-  ];
-  for (const [row, col, fill, font] of legendStyles) styleCellRange(sheet, row, col, row, col, { fill: { patternType: "solid", fgColor: { rgb: fill } }, font: { name: "맑은 고딕", sz: 8.5, bold: true, color: { rgb: font } }, alignment: { horizontal: "left", vertical: "center", wrapText: true }, border: thinBorder("FFD6DFEA") });
-  styleCellRange(sheet, 6, 0, 6, 11, { fill: { patternType: "solid", fgColor: { rgb: "FF0B3B76" } }, font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FFFFFFFF" } }, alignment: { horizontal: "center", vertical: "center", wrapText: true }, border: thinBorder("FF8EA6C3") });
-  const regionPalette = { 서울: { fill: "FFEAF2FB", font: "FF0B5CCB" }, 경인: { fill: "FFF0F6FC", font: "FF2F75B5" }, 충청: { fill: "FFEFF7F1", font: "FF107C41" }, 경북: { fill: "FFF3EFF9", font: "FF7030A0" }, 경남: { fill: "FFFFF3EA", font: "FFC55A11" }, 전라: { fill: "FFEDF8FA", font: "FF008C95" } };
-  for (const item of regionRows) {
-    const palette = regionPalette[item.region];
-    styleCellRange(sheet, item.row, 0, item.row, 11, { fill: { patternType: "solid", fgColor: { rgb: palette.fill } }, font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: palette.font } }, alignment: { horizontal: "left", vertical: "center" }, border: thinBorder("FFD6DFEA") });
-    const summaryAddr = XLSX.utils.encode_cell({ r: item.row, c: 7 }); if (sheet[summaryAddr]) sheet[summaryAddr].s.alignment = { horizontal: "right", vertical: "center" };
-  }
-  dataRows.forEach((item, index) => {
-    styleCellRange(sheet, item.row, 0, item.row, 11, { fill: { patternType: "solid", fgColor: { rgb: index % 2 ? "FFF9FBFD" : "FFFFFFFF" } }, font: { name: "맑은 고딕", sz: 9, color: { rgb: "FF1F2937" } }, alignment: { horizontal: "center", vertical: "center", wrapText: true }, border: thinBorder("FFDCE3EC") });
-    for (const col of [9, 10]) { const addr = XLSX.utils.encode_cell({ r: item.row, c: col }); if (sheet[addr]) sheet[addr].s.alignment = { horizontal: "left", vertical: "center", wrapText: true }; }
-    const categoryAddr = XLSX.utils.encode_cell({ r: item.row, c: 8 });
-    const categoryPalette = item.category === "긴급 전달" ? { fill: "FFFFE4E6", font: "FFC00000" } : item.category === "등록 확인" ? { fill: "FFE4F0FF", font: "FF2F75B5" } : { fill: "FFFFEFD9", font: "FFC55A11" };
-    sheet[categoryAddr].s = { ...(sheet[categoryAddr].s || {}), fill: { patternType: "solid", fgColor: { rgb: categoryPalette.fill } }, font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: categoryPalette.font } }, alignment: { horizontal: "center", vertical: "center" }, border: thinBorder("FFFFFFFF") };
-    applyProcessStatusStyle(sheet, XLSX.utils.encode_cell({ r: item.row, c: 11 }), item.status === "완료" ? "처리 완료" : "미처리");
-  });
-  setRef(sheet, matrix.length, 12);
-  workbook.Sheets["매니저별 이상 근태"] = sheet;
-  if (!workbook.SheetNames.includes("매니저별 이상 근태")) workbook.SheetNames.push("매니저별 이상 근태");
+  const regions=["서울","경인","충청","경북","경남","전라"];
+  const rows=[...(result.managerRequests||[])].map(r=>({...r,regionGroup:normalizeDashboardRegion(r.region||"",r.store||"")})).sort((a,b)=>regions.indexOf(a.regionGroup)-regions.indexOf(b.regionGroup)||String(a.manager).localeCompare(String(b.manager),"ko")||String(a.name).localeCompare(String(b.name),"ko"));
+  const matrix=Array.from({length:7},()=>Array(13).fill(""));matrix[0][0]=`${year}년 ${monthNo}월 매니저별 상담사 이상 근태`;matrix[1][0]="복사용 수정요청 멘트를 전달한 뒤 L열에 O를 입력하면 전달 완료로 표시됩니다.";const cards=[[0,"총 요청 인원",`${rows.length}명`],[2,"총 문제 건수",`${rows.reduce((a,r)=>a+Number(r.issueCount||0),0)}건`],[4,"대상 매니저",`${new Set(rows.map(r=>r.manager).filter(Boolean)).size}명`],[6,"미전달",`${rows.filter(r=>!r.delivered).length}건`],[8,"전달 완료",`${rows.filter(r=>r.delivered).length}건`]];for(const[c,l,v]of cards){matrix[2][c]=l;matrix[3][c]=v;}matrix[2][10]="구분 색상 안내";matrix[3][10]="● 긴급 전달";matrix[3][12]="● 확인 필요";matrix[4][10]="● 등록 확인";matrix[4][12]="● 전달 완료";matrix[6]=["No","지역장","매니저","지역","매장명","이름","사번","문제 건수","구분","문제 요약","복사용 수정요청 멘트","전달체크(O 입력)","전달상태"];
+  const regionRows=[],dataRows=[];let no=1;for(const region of regions){const group=rows.filter(r=>r.regionGroup===region),rr=matrix.length;matrix.push([`▼  ${region} (총 ${group.length}명)`,"","","","","","","",`미전달 ${group.filter(r=>!r.delivered).length}명  |  완료 ${group.filter(r=>r.delivered).length}명`,"","","",""]);regionRows.push({row:rr,region});for(const row of group){const category=/출근기록|초과|미대체/.test(row.issueText||"")?"긴급 전달":/인력|사번/.test(row.issueText||"")?"등록 확인":"확인 필요";const r=matrix.length;matrix.push([no++,row.regionalManager||"",row.manager||"",region,row.store||"",row.name||"",normalizeId(row.employeeId),row.issueCount||0,category,row.issueText||"",row.message||"",row.delivered?"O":"",row.delivered?"전달 완료":"미전달"]);dataRows.push({row:r,category,delivered:row.delivered});}}
+  const sh=XLSX.utils.aoa_to_sheet(matrix);sh["!merges"]=[{s:{r:0,c:0},e:{r:0,c:12}},{s:{r:1,c:0},e:{r:1,c:12}},{s:{r:2,c:0},e:{r:2,c:1}},{s:{r:3,c:0},e:{r:4,c:1}},{s:{r:2,c:2},e:{r:2,c:3}},{s:{r:3,c:2},e:{r:4,c:3}},{s:{r:2,c:4},e:{r:2,c:5}},{s:{r:3,c:4},e:{r:4,c:5}},{s:{r:2,c:6},e:{r:2,c:7}},{s:{r:3,c:6},e:{r:4,c:7}},{s:{r:2,c:8},e:{r:2,c:9}},{s:{r:3,c:8},e:{r:4,c:9}},{s:{r:2,c:10},e:{r:2,c:12}},{s:{r:3,c:10},e:{r:3,c:11}},{s:{r:4,c:10},e:{r:4,c:11}}];for(const x of regionRows)sh["!merges"].push({s:{r:x.row,c:0},e:{r:x.row,c:7}},{s:{r:x.row,c:8},e:{r:x.row,c:12}});sh["!cols"]=[{wch:6},{wch:11},{wch:11},{wch:9},{wch:18},{wch:11},{wch:13},{wch:10},{wch:14},{wch:45},{wch:58},{wch:16},{wch:12}];sh["!rows"]=matrix.map((_,i)=>({hpt:i===0?34:i===1?24:i>=2&&i<=4?28:i===5?8:i===6?32:regionRows.some(x=>x.row===i)?26:40}));sh["!freeze"]={xSplit:0,ySplit:7,topLeftCell:"A8",activePane:"bottomLeft",state:"frozen"};sh["!views"]=[{showGridLines:false,zoomScale:70,zoomScaleNormal:70}];styleDashboardShell(sh,matrix.length,13,cards,regionRows);
+  dataRows.forEach((x,i)=>{styleCellRange(sh,x.row,0,x.row,12,{fill:{patternType:"solid",fgColor:{rgb:i%2?"FFF9FBFD":"FFFFFFFF"}},font:{name:"맑은 고딕",sz:9,color:{rgb:"FF1F2937"}},alignment:{horizontal:"center",vertical:"center",wrapText:true},border:thinBorder("FFDCE3EC")});for(const c of [9,10]){const a=XLSX.utils.encode_cell({r:x.row,c});if(sh[a])sh[a].s.alignment={horizontal:"left",vertical:"center",wrapText:true};}const mark=XLSX.utils.encode_cell({r:x.row,c:11}),status=XLSX.utils.encode_cell({r:x.row,c:12}),excelRow=x.row+1;sh[mark]=sh[mark]||{t:"s",v:x.delivered?"O":""};sh[mark].s={...(sh[mark].s||{}),fill:{patternType:"solid",fgColor:{rgb:x.delivered?"FFD9EAD3":"FFFFF2CC"}},font:{name:"맑은 고딕",sz:9,bold:true,color:{rgb:x.delivered?"FF107C41":"FFC55A11"}},alignment:{horizontal:"center",vertical:"center"},border:thinBorder("FFDCE3EC")};sh[status]={t:"s",v:x.delivered?"전달 완료":"미전달",f:`IF(OR(UPPER(TRIM(L${excelRow}))="O",L${excelRow}="○",L${excelRow}="ㅇ"),"전달 완료","미전달")`,s:sh[status]?.s||{}};applyProcessStatusStyle(sh,status,x.delivered?"처리 완료":"미처리");});setRef(sh,matrix.length,13);workbook.Sheets["매니저별 이상 근태"]=sh;if(!workbook.SheetNames.includes("매니저별 이상 근태"))workbook.SheetNames.push("매니저별 이상 근태");
 }
-
 
 function buildPersonnelStatusSheet(workbook, result, year, monthNo) {
   const rows = [...(result.personnelChecks || [])].sort((a, b) =>
@@ -789,67 +691,13 @@ function routeLabel(route) {
 }
 
 function buildAnnualComparisonSheet(workbook, result, year, monthNo) {
-  const comparison = result.annualComparison || { rows: [], matchCount: 0, mismatchCount: 0, missingApplicationCount: 0, supplied: false };
-  const matrix = [
-    [`${year}년 ${monthNo}월 연차 등록 현황 및 일자`],
-    [comparison.supplied ? "계획 기준 연차·반차 신청과 월초 승인·반려 현황을 사번·날짜 기준으로 정리했습니다. 승인 건만 누적 연차에서 차감됩니다." : "저장된 승인·반려 파일이 없어 근무계획의 연차·반차만 표시합니다."],
-    [],
-    ["일치", "", "신청 있음·계획 불일치", "", "계획 있음·신청 없음", ""],
-    [comparison.matchCount || 0, "", comparison.mismatchCount || 0, "", comparison.missingApplicationCount || 0, ""],
-    [],
-    ["휴가일자", "지역장", "매니저", "지역", "매장명", "이름", "사번", "신청구분", "신청일수", "근무계획", "대조결과", "신청상태", "비고"],
-  ];
-  for (const row of comparison.rows || []) matrix.push([
-    row.date || "", row.regionalManager || "", row.manager || "", row.region || "", row.store || "",
-    row.name || "", row.employeeId || "", row.requestedKind || "-", row.requestedDays || 0,
-    row.planStatus || "공백", row.result || "", row.applicationStatus || "", row.note || "",
-  ]);
-  if (!(comparison.rows || []).length) matrix.push(["", "", "", "", "", "", "", "", 0, "", "대조 자료 없음", "", ""]);
-  const sheet = XLSX.utils.aoa_to_sheet(matrix);
-  sheet["!merges"] = [
-    { s: { r: 0, c: 0 }, e: { r: 0, c: 12 } },
-    { s: { r: 1, c: 0 }, e: { r: 1, c: 12 } },
-    { s: { r: 3, c: 0 }, e: { r: 3, c: 1 } },
-    { s: { r: 4, c: 0 }, e: { r: 4, c: 1 } },
-    { s: { r: 3, c: 2 }, e: { r: 3, c: 3 } },
-    { s: { r: 4, c: 2 }, e: { r: 4, c: 3 } },
-    { s: { r: 3, c: 4 }, e: { r: 3, c: 5 } },
-    { s: { r: 4, c: 4 }, e: { r: 4, c: 5 } },
-  ];
-  sheet["!cols"] = [
-    { wch: 12 }, { wch: 11 }, { wch: 11 }, { wch: 10 }, { wch: 18 }, { wch: 11 }, { wch: 13 },
-    { wch: 11 }, { wch: 10 }, { wch: 16 }, { wch: 30 }, { wch: 11 }, { wch: 25 },
-  ];
-  sheet["!rows"] = [{ hpt: 30 }, { hpt: 24 }, { hpt: 8 }, { hpt: 22 }, { hpt: 28 }, { hpt: 8 }, { hpt: 30 }];
-  styleSimpleReportSheet(sheet, matrix.length, 13, [10, 12]);
-  for (const [start, color] of [[0, "FFE2F0D9"], [2, "FFFCE4D6"], [4, "FFFFF2CC"]]) {
-    styleCellRange(sheet, 3, start, 3, start + 1, {
-      fill: { patternType: "solid", fgColor: { rgb: color } },
-      font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FF1F2937" } },
-      alignment: { horizontal: "center", vertical: "center" }, border: thinBorder("FFCBD5E1"),
-    });
-    styleCellRange(sheet, 4, start, 4, start + 1, {
-      fill: { patternType: "solid", fgColor: { rgb: "FFFFFFFF" } },
-      font: { name: "맑은 고딕", sz: 16, bold: true, color: { rgb: "FF173F73" } },
-      alignment: { horizontal: "center", vertical: "center" }, border: thinBorder("FFCBD5E1"),
-    });
-  }
-  for (let r = 7; r < matrix.length; r += 1) {
-    const resultAddr = XLSX.utils.encode_cell({ r, c: 10 });
-    const value = String(sheet[resultAddr]?.v || "");
-    if (value === "일치") {
-      sheet[resultAddr].s.fill = { patternType: "solid", fgColor: { rgb: "FFE2F0D9" } };
-      sheet[resultAddr].s.font = { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FF375623" } };
-    } else {
-      sheet[resultAddr].s.fill = { patternType: "solid", fgColor: { rgb: value.includes("신청내역 없음") ? "FFFFF2CC" : "FFF4CCCC" } };
-      sheet[resultAddr].s.font = { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: value.includes("신청내역 없음") ? "FF7F6000" : "FF9C0006" } };
-    }
-  }
-  workbook.Sheets["해당 월 연차 등록 현황 및 일자"] = sheet;
-  if (!workbook.SheetNames.includes("해당 월 연차 등록 현황 및 일자")) workbook.SheetNames.push("해당 월 연차 등록 현황 및 일자");
+  const comparison=result.annualComparison||{rows:[],matchCount:0,reviewCount:0,supplied:false};const regions=["서울","경인","충청","경북","경남","전라"];
+  const rows=[...(comparison.rows||[])].map(r=>({...r,regionGroup:normalizeDashboardRegion(r.region||"",r.store||"")})).sort((a,b)=>Number(a.sortOrder||9)-Number(b.sortOrder||9)||regions.indexOf(a.regionGroup)-regions.indexOf(b.regionGroup)||String(a.date).localeCompare(String(b.date)));
+  const matrix=Array.from({length:7},()=>Array(15).fill(""));matrix[0][0]=`${year}년 ${monthNo}월 연차 등록 현황 및 일자`;matrix[1][0]="계획 연차·반차와 승인 신청이 동일하고 출근기록이 없는 경우만 정상입니다. 나머지는 모두 확인 요청으로 분류합니다.";const cards=[[0,"전체 대조",`${rows.length}건`],[2,"동일",`${rows.filter(r=>!r.needsReview).length}건`],[4,"계획 연차·신청 없음",`${rows.filter(r=>r.category==="계획 연차·신청 없음").length}건`],[6,"계획 연차·출근",`${rows.filter(r=>r.category==="계획 연차·출근").length}건`],[8,"기타 확인 요청",`${rows.filter(r=>r.needsReview&&!['계획 연차·신청 없음','계획 연차·출근'].includes(r.category)).length}건`]];for(const[c,l,v]of cards){matrix[2][c]=l;matrix[3][c]=v;}matrix[2][10]="구분 색상 안내";matrix[3][10]="● 동일";matrix[3][13]="● 신청 없음";matrix[4][10]="● 출근 기록";matrix[4][13]="● 기타 확인";matrix[6]=["No","휴가일자","지역장","매니저","지역","매장명","이름","사번","신청구분","신청일수","근무계획","실제근태","대조구분","신청상태","확인상태"];
+  const regionRows=[],dataRows=[];let no=1;for(const region of regions){const group=rows.filter(r=>r.regionGroup===region),rr=matrix.length;matrix.push([`▼  ${region} (총 ${group.length}건)`,"","","","","","","",`동일 ${group.filter(r=>!r.needsReview).length}건  |  확인요청 ${group.filter(r=>r.needsReview).length}건`,"","","","","",""]);regionRows.push({row:rr,region});for(const row of group){const r=matrix.length;matrix.push([no++,row.date||"",row.regionalManager||"",row.manager||"",region,row.store||"",row.name||"",normalizeId(row.employeeId),row.requestedKind||"-",row.requestedDays||0,row.planStatus||"공백",row.actualStatus||"미출근",row.category||row.result||"",row.applicationStatus||"-",row.needsReview?"확인 요청":"동일"]);dataRows.push({row:r,needsReview:row.needsReview,category:row.category});}}
+  const sh=XLSX.utils.aoa_to_sheet(matrix);sh["!merges"]=[{s:{r:0,c:0},e:{r:0,c:14}},{s:{r:1,c:0},e:{r:1,c:14}},{s:{r:2,c:0},e:{r:2,c:1}},{s:{r:3,c:0},e:{r:4,c:1}},{s:{r:2,c:2},e:{r:2,c:3}},{s:{r:3,c:2},e:{r:4,c:3}},{s:{r:2,c:4},e:{r:2,c:5}},{s:{r:3,c:4},e:{r:4,c:5}},{s:{r:2,c:6},e:{r:2,c:7}},{s:{r:3,c:6},e:{r:4,c:7}},{s:{r:2,c:8},e:{r:2,c:9}},{s:{r:3,c:8},e:{r:4,c:9}},{s:{r:2,c:10},e:{r:2,c:14}},{s:{r:3,c:10},e:{r:3,c:12}},{s:{r:3,c:13},e:{r:3,c:14}},{s:{r:4,c:10},e:{r:4,c:12}},{s:{r:4,c:13},e:{r:4,c:14}}];for(const x of regionRows)sh["!merges"].push({s:{r:x.row,c:0},e:{r:x.row,c:7}},{s:{r:x.row,c:8},e:{r:x.row,c:14}});sh["!cols"]=[{wch:6},{wch:13},{wch:11},{wch:11},{wch:9},{wch:18},{wch:11},{wch:13},{wch:12},{wch:10},{wch:17},{wch:12},{wch:26},{wch:12},{wch:12}];sh["!rows"]=matrix.map((_,i)=>({hpt:i===0?34:i===1?24:i>=2&&i<=4?28:i===5?8:i===6?32:regionRows.some(x=>x.row===i)?26:25}));sh["!freeze"]={xSplit:0,ySplit:7,topLeftCell:"A8",activePane:"bottomLeft",state:"frozen"};sh["!views"]=[{showGridLines:false,zoomScale:70,zoomScaleNormal:70}];styleDashboardShell(sh,matrix.length,15,cards,regionRows);
+  dataRows.forEach((x,i)=>{styleCellRange(sh,x.row,0,x.row,14,{fill:{patternType:"solid",fgColor:{rgb:i%2?"FFF9FBFD":"FFFFFFFF"}},font:{name:"맑은 고딕",sz:9,color:{rgb:"FF1F2937"}},alignment:{horizontal:"center",vertical:"center",wrapText:true},border:thinBorder("FFDCE3EC")});const cat=XLSX.utils.encode_cell({r:x.row,c:12}),status=XLSX.utils.encode_cell({r:x.row,c:14});const fill=!x.needsReview?"FFD9EAD3":x.category==="계획 연차·출근"?"FFF4CCCC":"FFFFE699",font=!x.needsReview?"FF375623":x.category==="계획 연차·출근"?"FF9C0006":"FF9C6500";for(const a of [cat,status])if(sh[a])sh[a].s={...(sh[a].s||{}),fill:{patternType:"solid",fgColor:{rgb:fill}},font:{name:"맑은 고딕",sz:9,bold:true,color:{rgb:font}},alignment:{horizontal:"center",vertical:"center",wrapText:true},border:thinBorder("FFDCE3EC")};});setRef(sh,matrix.length,15);workbook.Sheets["해당 월 연차 등록 현황 및 일자"]=sh;if(!workbook.SheetNames.includes("해당 월 연차 등록 현황 및 일자"))workbook.SheetNames.push("해당 월 연차 등록 현황 및 일자");
 }
-
-
 
 function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
   const regionOrder = ["서울", "경인", "충청", "경북", "경남", "전라"];
@@ -1075,197 +923,27 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
 }
 
 function buildPlanAttendanceMatchSheet(workbook, result, ctx, year, monthNo) {
-  const regionOrder = ["서울", "경인", "충청", "경북", "경남", "전라"];
-  const evidenceSet = new Set((result.evidenceOverrides || []).map(String));
-  const rows = (result.mismatchRows || [])
-    .filter((row) => row.issueType !== "missing_plan")
-    .map((row) => {
+  const regions = ["서울", "경인", "충청", "경북", "경남", "전라"];
+  const rows = (result.mismatchRows || []).filter((row) => row.issueType !== "missing_plan").map((row) => {
     const member = findMember(ctx, row.employeeId, row.store) || {};
-    const evidenceKey = `${normalizeId(row.employeeId)}|${row.date}`;
-    const evidenced = Boolean(row.evidenced || evidenceSet.has(evidenceKey));
     const category = mismatchDashboardCategory(row);
-    return {
-      ...row,
-      member,
-      evidenced,
-      category,
-      region: normalizeDashboardRegion(member.region2 || member.region1 || row.region || "", member.storeName || row.store || ""),
-      status: evidenced && row.issueType !== "missing_plan"
-        ? "처리 완료"
-        : category === "근무인데 출근기록 없음" ? "미처리" : "확인중",
-    };
-  }).filter((row) => !(row.evidenced && row.category === "근무인데 출근기록 없음"));
-
-  rows.sort((a, b) => regionOrder.indexOf(a.region) - regionOrder.indexOf(b.region)
-    || String(a.member.regionalManager || "").localeCompare(String(b.member.regionalManager || ""), "ko")
-    || String(a.member.manager || "").localeCompare(String(b.member.manager || ""), "ko")
-    || String(a.member.storeName || a.store || "").localeCompare(String(b.member.storeName || b.store || ""), "ko")
-    || String(a.date || "").localeCompare(String(b.date || ""))
-    || String(a.name || "").localeCompare(String(b.name || ""), "ko"));
-
-  const total = rows.length;
-  const missingCount = rows.filter((row) => row.category === "근무인데 출근기록 없음" && row.status !== "처리 완료").length;
-  const unexpectedCount = rows.filter((row) => row.category === "휴무·휴가인데 출근기록 있음" && row.status !== "처리 완료").length;
-  const reviewCount = rows.filter((row) => row.category === "검토 필요" && row.status !== "처리 완료").length;
-  const completedCount = rows.filter((row) => row.status === "처리 완료").length;
-
-  const matrix = Array.from({ length: 7 }, () => Array(13).fill(""));
-  matrix[0][0] = `${year}년 ${monthNo}월 계획 & 근태 상이 인원`;
-  matrix[1][0] = `사번·발생일 기준 자동 비교 · 기준일 ${result.cutoffDate || `${year}-${String(monthNo).padStart(2, "0")}-${String(new Date(year, monthNo, 0).getDate()).padStart(2, "0")}`} · 증빙 O 반영`;
-  const cards = [
-    [0, "총 상이 건수", total],
-    [2, "근무인데 출근기록 없음", missingCount],
-    [4, "휴무·휴가인데 출근기록 있음", unexpectedCount],
-    [6, "검토 필요", reviewCount],
-    [8, "처리 완료", completedCount],
-  ];
-  for (const [col, label, value] of cards) {
-    matrix[2][col] = label;
-    matrix[3][col] = `${value}건`;
-  }
-  matrix[2][10] = "구분 색상 안내";
-  matrix[3][10] = "● 근무인데 출근기록 없음";
-  matrix[3][11] = "● 휴무·휴가인데 출근기록 있음";
-  matrix[4][10] = "● 검토 필요";
-  matrix[4][11] = "● 처리 완료";
-  matrix[6] = ["No", "지역장", "매니저", "지역", "매장명", "이름", "사번", "발생일", "근무계획", "실제근태", "구분", "상세사유", "처리상태"];
-
-  const regionRows = [];
-  const dataRows = [];
-  let number = 1;
-  for (const region of regionOrder) {
-    const group = rows.filter((row) => row.region === region);
-    const counts = {
-      missing: group.filter((row) => row.category === "근무인데 출근기록 없음" && row.status !== "처리 완료").length,
-      unexpected: group.filter((row) => row.category === "휴무·휴가인데 출근기록 있음" && row.status !== "처리 완료").length,
-      review: group.filter((row) => row.category === "검토 필요" && row.status !== "처리 완료").length,
-      completed: group.filter((row) => row.status === "처리 완료").length,
-    };
-    const regionRowIndex = matrix.length;
-    matrix.push([
-      `▼  ${region} (총 ${group.length}건)`, "", "", "", "", "", "", "",
-      `근무미입력 ${counts.missing}건  |  휴무출근 ${counts.unexpected}건  |  검토 ${counts.review}건  |  완료 ${counts.completed}건`, "", "", "", "",
-    ]);
-    regionRows.push({ row: regionRowIndex, region });
-    for (const row of group) {
-      const actual = row.evidenced
-        ? "출근"
-        : row.actualStatus || (row.clockStatus && row.clockStatus !== "미기록" ? "출근" : "미입력");
-      matrix.push([
-        number++, row.member.regionalManager || "", row.member.manager || "", region,
-        row.member.storeName || row.store || "", row.name || row.member.employeeName || "", normalizeId(row.employeeId), row.date || "",
-        row.planStatus || "공백", actual, row.category, row.reason || "", row.status,
-      ]);
-      dataRows.push({ row: matrix.length - 1, category: row.category, status: row.status });
-    }
-  }
-
-  const sheet = XLSX.utils.aoa_to_sheet(matrix);
-  sheet["!merges"] = [
-    { s: { r: 0, c: 0 }, e: { r: 0, c: 12 } },
-    { s: { r: 1, c: 0 }, e: { r: 1, c: 12 } },
-    { s: { r: 2, c: 0 }, e: { r: 2, c: 1 } }, { s: { r: 3, c: 0 }, e: { r: 4, c: 1 } },
-    { s: { r: 2, c: 2 }, e: { r: 2, c: 3 } }, { s: { r: 3, c: 2 }, e: { r: 4, c: 3 } },
-    { s: { r: 2, c: 4 }, e: { r: 2, c: 5 } }, { s: { r: 3, c: 4 }, e: { r: 4, c: 5 } },
-    { s: { r: 2, c: 6 }, e: { r: 2, c: 7 } }, { s: { r: 3, c: 6 }, e: { r: 4, c: 7 } },
-    { s: { r: 2, c: 8 }, e: { r: 2, c: 9 } }, { s: { r: 3, c: 8 }, e: { r: 4, c: 9 } },
-    { s: { r: 2, c: 10 }, e: { r: 2, c: 12 } },
-    { s: { r: 3, c: 11 }, e: { r: 3, c: 12 } },
-    { s: { r: 4, c: 11 }, e: { r: 4, c: 12 } },
-  ];
-  for (const item of regionRows) {
-    sheet["!merges"].push(
-      { s: { r: item.row, c: 0 }, e: { r: item.row, c: 7 } },
-      { s: { r: item.row, c: 8 }, e: { r: item.row, c: 12 } },
-    );
-  }
-
-  sheet["!cols"] = [
-    { wch: 6 }, { wch: 11 }, { wch: 11 }, { wch: 9 }, { wch: 18 }, { wch: 11 }, { wch: 13 },
-    { wch: 13 }, { wch: 17 }, { wch: 15 }, { wch: 26 }, { wch: 46 }, { wch: 12 },
-  ];
-  sheet["!rows"] = matrix.map((_, index) => ({ hpt: index === 0 ? 34 : index === 1 ? 24 : index >= 2 && index <= 4 ? 28 : index === 5 ? 8 : index === 6 ? 30 : regionRows.some((item) => item.row === index) ? 26 : 24 }));
-  sheet["!freeze"] = { xSplit: 0, ySplit: 7, topLeftCell: "A8", activePane: "bottomLeft", state: "frozen" };
-  sheet["!views"] = [{ showGridLines: false, zoomScale: 70, zoomScaleNormal: 70 }];
-
-  styleCellRange(sheet, 0, 0, 0, 12, {
-    fill: { patternType: "solid", fgColor: { rgb: "FF0B3B76" } },
-    font: { name: "맑은 고딕", sz: 18, bold: true, color: { rgb: "FFFFFFFF" } },
-    alignment: { horizontal: "left", vertical: "center" },
-  });
-  styleCellRange(sheet, 1, 0, 1, 12, {
-    fill: { patternType: "solid", fgColor: { rgb: "FFF4F7FB" } },
-    font: { name: "맑은 고딕", sz: 10, color: { rgb: "FF40516B" } },
-    alignment: { horizontal: "right", vertical: "center" },
-  });
-
-  const cardPalettes = [
-    { fill: "FFF7FAFF", border: "FF8FB7E8", font: "FF0B5CCB" },
-    { fill: "FFFFF5F5", border: "FFF1A2A7", font: "FFC00000" },
-    { fill: "FFFFF8EF", border: "FFF4C27A", font: "FFC55A11" },
-    { fill: "FFF3F8FF", border: "FF9CC2EF", font: "FF2F75B5" },
-    { fill: "FFF3FBF6", border: "FF9FD3B2", font: "FF107C41" },
-  ];
-  cards.forEach(([col], index) => {
-    const palette = cardPalettes[index];
-    styleCellRange(sheet, 2, col, 4, col + 1, {
-      fill: { patternType: "solid", fgColor: { rgb: palette.fill } },
-      font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FF26364D" } },
-      alignment: { horizontal: "center", vertical: "center", wrapText: true },
-      border: thinBorder(palette.border),
-    });
-    styleCellRange(sheet, 3, col, 4, col + 1, {
-      fill: { patternType: "solid", fgColor: { rgb: palette.fill } },
-      font: { name: "맑은 고딕", sz: 19, bold: true, color: { rgb: palette.font } },
-      alignment: { horizontal: "center", vertical: "center" },
-      border: thinBorder(palette.border),
-    });
-  });
-  applyDashboardLegendStyle(sheet);
-
-  styleCellRange(sheet, 6, 0, 6, 12, {
-    fill: { patternType: "solid", fgColor: { rgb: "FF0B3B76" } },
-    font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FFFFFFFF" } },
-    alignment: { horizontal: "center", vertical: "center", wrapText: true },
-    border: thinBorder("FF8EA6C3"),
-  });
-
-  const regionPalette = {
-    서울: { fill: "FFEAF2FB", font: "FF0B5CCB" },
-    경인: { fill: "FFF0F6FC", font: "FF2F75B5" },
-    충청: { fill: "FFEFF7F1", font: "FF107C41" },
-    경북: { fill: "FFF3EFF9", font: "FF7030A0" },
-    경남: { fill: "FFFFF3EA", font: "FFC55A11" },
-    전라: { fill: "FFEDF8FA", font: "FF008C95" },
-  };
-  for (const item of regionRows) {
-    const palette = regionPalette[item.region];
-    styleCellRange(sheet, item.row, 0, item.row, 12, {
-      fill: { patternType: "solid", fgColor: { rgb: palette.fill } },
-      font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: palette.font } },
-      alignment: { horizontal: "left", vertical: "center" },
-      border: thinBorder("FFD6DFEA"),
-    });
-    const summaryAddr = XLSX.utils.encode_cell({ r: item.row, c: 8 });
-    if (sheet[summaryAddr]) sheet[summaryAddr].s.alignment = { horizontal: "right", vertical: "center" };
-  }
-
-  dataRows.forEach((item, index) => {
-    styleCellRange(sheet, item.row, 0, item.row, 12, {
-      fill: { patternType: "solid", fgColor: { rgb: index % 2 ? "FFF9FBFD" : "FFFFFFFF" } },
-      font: { name: "맑은 고딕", sz: 9, color: { rgb: "FF1F2937" } },
-      alignment: { horizontal: "center", vertical: "center", wrapText: true },
-      border: thinBorder("FFDCE3EC"),
-    });
-    const reasonAddr = XLSX.utils.encode_cell({ r: item.row, c: 11 });
-    if (sheet[reasonAddr]) sheet[reasonAddr].s.alignment = { horizontal: "left", vertical: "center", wrapText: true };
-    applyMismatchBadgeStyle(sheet, XLSX.utils.encode_cell({ r: item.row, c: 10 }), item.category);
-    applyProcessStatusStyle(sheet, XLSX.utils.encode_cell({ r: item.row, c: 12 }), item.status);
-  });
-
-  setRef(sheet, matrix.length, 13);
-  workbook.Sheets["계획&근태 상이 인원"] = sheet;
-  if (!workbook.SheetNames.includes("계획&근태 상이 인원")) workbook.SheetNames.push("계획&근태 상이 인원");
+    return { ...row, member, category, regionGroup: normalizeDashboardRegion(member.region2 || member.region1 || row.region || "", member.storeName || row.store || ""), resolved: Boolean(row.resolved) };
+  }).sort((a,b)=>regions.indexOf(a.regionGroup)-regions.indexOf(b.regionGroup)||String(a.date).localeCompare(String(b.date))||String(a.name).localeCompare(String(b.name),"ko"));
+  const completed = rows.filter(r=>r.resolved).length;
+  const matrix=Array.from({length:7},()=>Array(14).fill(""));
+  matrix[0][0]=`${year}년 ${monthNo}월 계획 & 근태 상이 인원`;
+  matrix[1][0]="처리 완료한 행은 M열에 O 입력 후 증빙 최종본으로 다시 업로드하면 전체 요약본에서 제외됩니다.";
+  const cards=[[0,"총 상이 건수",rows.length],[2,"근무인데 출근기록 없음",rows.filter(r=>r.category==="근무인데 출근기록 없음"&&!r.resolved).length],[4,"휴무·휴가인데 출근기록 있음",rows.filter(r=>r.category==="휴무·휴가인데 출근기록 있음"&&!r.resolved).length],[6,"검토 필요",rows.filter(r=>r.category==="검토 필요"&&!r.resolved).length],[8,"처리 완료",completed]];
+  for(const [c,l,v] of cards){matrix[2][c]=l;matrix[3][c]=`${v}건`;}
+  matrix[2][10]="구분 색상 안내";matrix[3][10]="● 근무인데 출근기록 없음";matrix[3][12]="● 휴무·휴가인데 출근기록 있음";matrix[4][10]="● 검토 필요";matrix[4][12]="● 처리 완료";
+  matrix[6]=["No","지역장","매니저","지역","매장명","이름","사번","발생일","근무계획","실제근태","구분","상세사유","처리여부(O 입력)","처리상태"];
+  const regionRows=[],dataRows=[];let no=1;
+  for(const region of regions){const group=rows.filter(r=>r.regionGroup===region);const rr=matrix.length;matrix.push([`▼  ${region} (총 ${group.length}건)`,"","","","","","","",`미처리 ${group.filter(r=>!r.resolved).length}건  |  완료 ${group.filter(r=>r.resolved).length}건`,"","","","",""]);regionRows.push({row:rr,region});for(const row of group){const r=matrix.length;matrix.push([no++,row.member.regionalManager||"",row.member.manager||"",region,row.member.storeName||row.store||"",row.name||row.member.employeeName||"",normalizeId(row.employeeId),row.date||"",row.planStatus||"공백",row.actualStatus||(row.clockStatus&&row.clockStatus!=="미기록"?"출근":"미입력"),row.category,row.reason||"",row.resolved?"O":"",row.resolved?"처리 완료":(row.category==="근무인데 출근기록 없음"?"미처리":"확인중")]);dataRows.push({row:r,category:row.category,resolved:row.resolved});}}
+  const sh=XLSX.utils.aoa_to_sheet(matrix);sh["!merges"]=[{s:{r:0,c:0},e:{r:0,c:13}},{s:{r:1,c:0},e:{r:1,c:13}},{s:{r:2,c:0},e:{r:2,c:1}},{s:{r:3,c:0},e:{r:4,c:1}},{s:{r:2,c:2},e:{r:2,c:3}},{s:{r:3,c:2},e:{r:4,c:3}},{s:{r:2,c:4},e:{r:2,c:5}},{s:{r:3,c:4},e:{r:4,c:5}},{s:{r:2,c:6},e:{r:2,c:7}},{s:{r:3,c:6},e:{r:4,c:7}},{s:{r:2,c:8},e:{r:2,c:9}},{s:{r:3,c:8},e:{r:4,c:9}},{s:{r:2,c:10},e:{r:2,c:13}},{s:{r:3,c:10},e:{r:3,c:11}},{s:{r:3,c:12},e:{r:3,c:13}},{s:{r:4,c:10},e:{r:4,c:11}},{s:{r:4,c:12},e:{r:4,c:13}}];for(const x of regionRows){sh["!merges"].push({s:{r:x.row,c:0},e:{r:x.row,c:7}},{s:{r:x.row,c:8},e:{r:x.row,c:13}})}
+  sh["!cols"]=[{wch:6},{wch:11},{wch:11},{wch:9},{wch:18},{wch:11},{wch:13},{wch:13},{wch:17},{wch:15},{wch:26},{wch:44},{wch:16},{wch:12}];sh["!rows"]=matrix.map((_,i)=>({hpt:i===0?34:i===1?24:i>=2&&i<=4?28:i===5?8:i===6?30:regionRows.some(x=>x.row===i)?26:25}));sh["!freeze"]={xSplit:0,ySplit:7,topLeftCell:"A8",activePane:"bottomLeft",state:"frozen"};sh["!views"]=[{showGridLines:false,zoomScale:70,zoomScaleNormal:70}];
+  styleDashboardShell(sh,matrix.length,14,cards,regionRows);
+  dataRows.forEach((x,i)=>{styleCellRange(sh,x.row,0,x.row,13,{fill:{patternType:"solid",fgColor:{rgb:i%2?"FFF9FBFD":"FFFFFFFF"}},font:{name:"맑은 고딕",sz:9,color:{rgb:"FF1F2937"}},alignment:{horizontal:"center",vertical:"center",wrapText:true},border:thinBorder("FFDCE3EC")});applyMismatchBadgeStyle(sh,XLSX.utils.encode_cell({r:x.row,c:10}),x.category);const mark=XLSX.utils.encode_cell({r:x.row,c:12}),status=XLSX.utils.encode_cell({r:x.row,c:13}),excelRow=x.row+1;sh[mark]=sh[mark]||{t:"s",v:x.resolved?"O":""};sh[status]={t:"s",v:x.resolved?"처리 완료":"미처리",f:`IF(OR(UPPER(TRIM(M${excelRow}))="O",M${excelRow}="○",M${excelRow}="ㅇ"),"처리 완료","미처리")`,s:sh[status]?.s||{}};applyProcessStatusStyle(sh,status,x.resolved?"처리 완료":"미처리");sh[mark].s={...(sh[mark].s||{}),fill:{patternType:"solid",fgColor:{rgb:x.resolved?"FFD9EAD3":"FFFFF2CC"}},font:{name:"맑은 고딕",sz:9,bold:true,color:{rgb:x.resolved?"FF107C41":"FFC55A11"}},alignment:{horizontal:"center",vertical:"center"},border:thinBorder("FFDCE3EC")};});
+  setRef(sh,matrix.length,14);workbook.Sheets["계획&근태 상이 인원"]=sh;if(!workbook.SheetNames.includes("계획&근태 상이 인원"))workbook.SheetNames.push("계획&근태 상이 인원");
 }
 
 function mismatchDashboardCategory(row) {
@@ -1364,140 +1042,17 @@ function applyProcessStatusStyle(sheet, address, status) {
 }
 
 function buildDayoffSubstituteSheet(workbook, result, ctx, year, monthNo) {
-  const regionOrder = ["서울", "경인", "충청", "경북", "경남", "전라"];
-  const rows = [...(result.employeeSummaries || [])]
-    .filter((row) => Number(row.baseExcess || 0) > 0)
-    .map((row) => {
-      const member = findMember(ctx, row.employeeId, row.store) || {};
-      return {
-        ...row,
-        member,
-        regionGroup: normalizeDashboardRegion(member.region2 || member.region1 || row.region || "", member.storeName || row.store || ""),
-      };
-    })
-    .sort((a, b) => regionOrder.indexOf(a.regionGroup) - regionOrder.indexOf(b.regionGroup)
-      || String(a.member.regionalManager || "").localeCompare(String(b.member.regionalManager || ""), "ko")
-      || String(a.member.manager || "").localeCompare(String(b.member.manager || ""), "ko")
-      || String(a.member.storeName || a.store || "").localeCompare(String(b.member.storeName || b.store || ""), "ko")
-      || String(a.name || "").localeCompare(String(b.name || ""), "ko"));
-
-  const baseExcessTotal = roundHalf(rows.reduce((sum, row) => sum + Number(row.baseExcess || 0), 0));
-  const substituteShortagePeople = rows.filter((row) => Number(row.shortage || 0) > 0).length;
-  const compensationShortagePeople = rows.filter((row) => Number(row.compensationShortage || 0) > 0).length;
-  const urgentPeople = rows.filter((row) => Number(row.shortage || 0) > 0 || Number(row.compensationShortage || 0) > 0).length;
-
-  const matrix = Array.from({ length: 7 }, () => Array(17).fill(""));
-  matrix[0][0] = `${year}년 ${monthNo}월 기본 휴무 초과자`;
-  matrix[1][0] = "기본 휴무 초과와 대체휴무·보상휴가 사용 및 잔여 부족 여부를 지역별로 정리했습니다.";
-  const cards = [
-    [0, "총 초과 인원", `${rows.length}명`], [2, "기본 휴무 초과", `${daysText(baseExcessTotal)}`],
-    [4, "대체휴무 부족", `${substituteShortagePeople}명`], [6, "보상휴가 부족", `${compensationShortagePeople}명`], [8, "긴급 확인", `${urgentPeople}명`],
-  ];
-  for (const [col, label, value] of cards) { matrix[2][col] = label; matrix[3][col] = value; }
-  matrix[2][10] = "구분 색상 안내";
-  matrix[3][10] = "● 기본 휴무 초과"; matrix[3][12] = "● 대체휴무 부족";
-  matrix[4][10] = "● 보상휴가 부족"; matrix[4][12] = "● 잔여 정상";
-  matrix[6] = ["No", "지역장", "매니저", "지역", "매장명", "이름", "사번", "휴무수", "기본휴무", "휴무초과", "대체휴무 필요", "대체휴무 잔여", "대체휴무 초과", "보상휴가 필요", "보상휴가 잔여", "보상휴가 초과", "판정"];
-
-  const regionRows = [];
-  const dataRows = [];
-  let number = 1;
-  for (const region of regionOrder) {
-    const group = rows.filter((row) => row.regionGroup === region);
-    const counts = {
-      base: group.length,
-      substitute: group.filter((row) => Number(row.shortage || 0) > 0).length,
-      compensation: group.filter((row) => Number(row.compensationShortage || 0) > 0).length,
-      urgent: group.filter((row) => Number(row.shortage || 0) > 0 || Number(row.compensationShortage || 0) > 0).length,
-    };
-    const regionRowIndex = matrix.length;
-    matrix.push([
-      `▼  ${region} (총 ${group.length}명)`, "", "", "", "", "", "", "",
-      `휴무초과 ${counts.base}명  |  대체부족 ${counts.substitute}명  |  보상부족 ${counts.compensation}명  |  긴급 ${counts.urgent}명`, "", "", "", "", "", "", "", "",
-    ]);
-    regionRows.push({ row: regionRowIndex, region });
-    for (const row of group) {
-      const substituteShortage = roundHalf(Number(row.shortage || 0));
-      const compensationShortage = roundHalf(Number(row.compensationShortage || 0));
-      const judgment = `${row.judgment || ""}${row.compensationJudgment ? ` / ${row.compensationJudgment}` : ""}` || (substituteShortage > 0 || compensationShortage > 0 ? "잔여 부족" : "기본 휴무 초과");
-      matrix.push([
-        number++, row.member.regionalManager || "", row.member.manager || "", region, row.member.storeName || row.store || "",
-        row.name || row.member.employeeName || "", normalizeId(row.employeeId), roundHalf(Number(row.basicDayoffUsed || 0)), roundHalf(Number(row.baseAllowance || 0)),
-        roundHalf(Number(row.baseExcess || 0)), roundHalf(Number(row.substituteNeeded || 0)), roundHalf(Number(row.remainingSubstitute || 0)), substituteShortage,
-        roundHalf(Number(row.compensationNeeded || 0)), roundHalf(Number(row.remainingCompensation || 0)), compensationShortage, judgment,
-      ]);
-      dataRows.push({ row: matrix.length - 1, substituteShortage, compensationShortage });
-    }
-  }
-
-  const sheet = XLSX.utils.aoa_to_sheet(matrix);
-  sheet["!merges"] = [
-    { s: { r: 0, c: 0 }, e: { r: 0, c: 16 } }, { s: { r: 1, c: 0 }, e: { r: 1, c: 16 } },
-    { s: { r: 2, c: 0 }, e: { r: 2, c: 1 } }, { s: { r: 3, c: 0 }, e: { r: 4, c: 1 } },
-    { s: { r: 2, c: 2 }, e: { r: 2, c: 3 } }, { s: { r: 3, c: 2 }, e: { r: 4, c: 3 } },
-    { s: { r: 2, c: 4 }, e: { r: 2, c: 5 } }, { s: { r: 3, c: 4 }, e: { r: 4, c: 5 } },
-    { s: { r: 2, c: 6 }, e: { r: 2, c: 7 } }, { s: { r: 3, c: 6 }, e: { r: 4, c: 7 } },
-    { s: { r: 2, c: 8 }, e: { r: 2, c: 9 } }, { s: { r: 3, c: 8 }, e: { r: 4, c: 9 } },
-    { s: { r: 2, c: 10 }, e: { r: 2, c: 16 } },
-    { s: { r: 3, c: 10 }, e: { r: 3, c: 11 } }, { s: { r: 3, c: 12 }, e: { r: 3, c: 16 } },
-    { s: { r: 4, c: 10 }, e: { r: 4, c: 11 } }, { s: { r: 4, c: 12 }, e: { r: 4, c: 16 } },
-  ];
-  for (const item of regionRows) {
-    sheet["!merges"].push(
-      { s: { r: item.row, c: 0 }, e: { r: item.row, c: 7 } },
-      { s: { r: item.row, c: 8 }, e: { r: item.row, c: 16 } },
-    );
-  }
-  sheet["!cols"] = [
-    { wch: 6 }, { wch: 11 }, { wch: 11 }, { wch: 9 }, { wch: 18 }, { wch: 11 }, { wch: 13 },
-    { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 13 }, { wch: 13 }, { wch: 13 }, { wch: 13 }, { wch: 13 }, { wch: 13 }, { wch: 42 },
-  ];
-  sheet["!rows"] = matrix.map((_, index) => ({ hpt: index === 0 ? 34 : index === 1 ? 24 : index >= 2 && index <= 4 ? 28 : index === 5 ? 8 : index === 6 ? 30 : regionRows.some((item) => item.row === index) ? 26 : 28 }));
-  sheet["!freeze"] = { xSplit: 0, ySplit: 7, topLeftCell: "A8", activePane: "bottomLeft", state: "frozen" };
-  sheet["!views"] = [{ showGridLines: false, zoomScale: 70, zoomScaleNormal: 70 }];
-
-  styleCellRange(sheet, 0, 0, 0, 16, { fill: { patternType: "solid", fgColor: { rgb: "FF0B3B76" } }, font: { name: "맑은 고딕", sz: 18, bold: true, color: { rgb: "FFFFFFFF" } }, alignment: { horizontal: "left", vertical: "center" } });
-  styleCellRange(sheet, 1, 0, 1, 16, { fill: { patternType: "solid", fgColor: { rgb: "FFF4F7FB" } }, font: { name: "맑은 고딕", sz: 10, color: { rgb: "FF40516B" } }, alignment: { horizontal: "right", vertical: "center" } });
-  const cardPalettes = [
-    { fill: "FFF7FAFF", border: "FF8FB7E8", font: "FF0B5CCB" }, { fill: "FFFFF5F5", border: "FFF1A2A7", font: "FFC00000" },
-    { fill: "FFFFF8EF", border: "FFF4C27A", font: "FFC55A11" }, { fill: "FFF3F8FF", border: "FF9CC2EF", font: "FF2F75B5" },
-    { fill: "FFFCE4D6", border: "FFF4B183", font: "FF9C5700" },
-  ];
-  cards.forEach(([col], index) => {
-    const palette = cardPalettes[index];
-    styleCellRange(sheet, 2, col, 4, col + 1, { fill: { patternType: "solid", fgColor: { rgb: palette.fill } }, font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FF26364D" } }, alignment: { horizontal: "center", vertical: "center", wrapText: true }, border: thinBorder(palette.border) });
-    styleCellRange(sheet, 3, col, 4, col + 1, { fill: { patternType: "solid", fgColor: { rgb: palette.fill } }, font: { name: "맑은 고딕", sz: 19, bold: true, color: { rgb: palette.font } }, alignment: { horizontal: "center", vertical: "center" }, border: thinBorder(palette.border) });
-  });
-  styleCellRange(sheet, 2, 10, 2, 16, { fill: { patternType: "solid", fgColor: { rgb: "FFFFFFFF" } }, font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: "FF2E3B52" } }, alignment: { horizontal: "left", vertical: "center" }, border: thinBorder("FFB8C5D6") });
-  const legendStyles = [
-    [3, 10, 11, "FFFFF5F5", "FFC00000"], [3, 12, 16, "FFFFF8EF", "FFC55A11"],
-    [4, 10, 11, "FFF3F8FF", "FF2F75B5"], [4, 12, 16, "FFF3FBF6", "FF107C41"],
-  ];
-  for (const [row, start, end, fill, font] of legendStyles) styleCellRange(sheet, row, start, row, end, { fill: { patternType: "solid", fgColor: { rgb: fill } }, font: { name: "맑은 고딕", sz: 8.5, bold: true, color: { rgb: font } }, alignment: { horizontal: "left", vertical: "center", wrapText: true }, border: thinBorder("FFD6DFEA") });
-  styleCellRange(sheet, 6, 0, 6, 16, { fill: { patternType: "solid", fgColor: { rgb: "FF0B3B76" } }, font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FFFFFFFF" } }, alignment: { horizontal: "center", vertical: "center", wrapText: true }, border: thinBorder("FF8EA6C3") });
-  const regionPalette = { 서울: { fill: "FFEAF2FB", font: "FF0B5CCB" }, 경인: { fill: "FFF0F6FC", font: "FF2F75B5" }, 충청: { fill: "FFEFF7F1", font: "FF107C41" }, 경북: { fill: "FFF3EFF9", font: "FF7030A0" }, 경남: { fill: "FFFFF3EA", font: "FFC55A11" }, 전라: { fill: "FFEDF8FA", font: "FF008C95" } };
-  for (const item of regionRows) {
-    const palette = regionPalette[item.region];
-    styleCellRange(sheet, item.row, 0, item.row, 16, { fill: { patternType: "solid", fgColor: { rgb: palette.fill } }, font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: palette.font } }, alignment: { horizontal: "left", vertical: "center" }, border: thinBorder("FFD6DFEA") });
-    const summaryAddr = XLSX.utils.encode_cell({ r: item.row, c: 8 }); if (sheet[summaryAddr]) sheet[summaryAddr].s.alignment = { horizontal: "right", vertical: "center" };
-  }
-  dataRows.forEach((item, index) => {
-    styleCellRange(sheet, item.row, 0, item.row, 16, { fill: { patternType: "solid", fgColor: { rgb: index % 2 ? "FFF9FBFD" : "FFFFFFFF" } }, font: { name: "맑은 고딕", sz: 9, color: { rgb: "FF1F2937" } }, alignment: { horizontal: "center", vertical: "center", wrapText: true }, border: thinBorder("FFDCE3EC") });
-    const baseAddr = XLSX.utils.encode_cell({ r: item.row, c: 9 });
-    sheet[baseAddr].s = { ...(sheet[baseAddr].s || {}), fill: { patternType: "solid", fgColor: { rgb: "FFFFE4E6" } }, font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: "FFC00000" } }, alignment: { horizontal: "center", vertical: "center" }, border: thinBorder("FFFFFFFF") };
-    const subAddr = XLSX.utils.encode_cell({ r: item.row, c: item.substituteShortage > 0 ? 12 : 11 });
-    sheet[subAddr].s = { ...(sheet[subAddr].s || {}), fill: { patternType: "solid", fgColor: { rgb: item.substituteShortage > 0 ? "FFF4CCCC" : "FFD9EAD3" } }, font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: item.substituteShortage > 0 ? "FF9C0006" : "FF375623" } }, alignment: { horizontal: "center", vertical: "center" }, border: thinBorder("FFFFFFFF") };
-    const compAddr = XLSX.utils.encode_cell({ r: item.row, c: item.compensationShortage > 0 ? 15 : 14 });
-    sheet[compAddr].s = { ...(sheet[compAddr].s || {}), fill: { patternType: "solid", fgColor: { rgb: item.compensationShortage > 0 ? "FFF4CCCC" : "FFE2F0D9" } }, font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: item.compensationShortage > 0 ? "FF9C0006" : "FF375623" } }, alignment: { horizontal: "center", vertical: "center" }, border: thinBorder("FFFFFFFF") };
-    const judgmentAddr = XLSX.utils.encode_cell({ r: item.row, c: 16 });
-    const shortage = item.substituteShortage > 0 || item.compensationShortage > 0;
-    sheet[judgmentAddr].s = { ...(sheet[judgmentAddr].s || {}), fill: { patternType: "solid", fgColor: { rgb: shortage ? "FFFFE4E6" : "FFFFEFD9" } }, font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: shortage ? "FFC00000" : "FFC55A11" } }, alignment: { horizontal: "left", vertical: "center", wrapText: true }, border: thinBorder("FFFFFFFF") };
-  });
-  setRef(sheet, matrix.length, 17);
-  workbook.Sheets["휴무 초과자"] = sheet;
-  if (!workbook.SheetNames.includes("휴무 초과자")) workbook.SheetNames.push("휴무 초과자");
+  const regions=["서울","경인","충청","경북","경남","전라"];
+  const rows=[...(result.dayoffExcessRows||[])].map(row=>{const member=findMember(ctx,row.employeeId,row.store)||{};return{...row,member,regionGroup:normalizeDashboardRegion(member.region2||member.region1||row.region||"",member.storeName||row.store||""),resolved:Boolean(row.dayoffResolved)}}).sort((a,b)=>regions.indexOf(a.regionGroup)-regions.indexOf(b.regionGroup)||String(a.name).localeCompare(String(b.name),"ko"));
+  const unresolved=rows.filter(r=>!r.resolved&&(Number(r.dayoffReplacementShortage||0)>0||Number(r.priorDayoffReplacementShortage||0)>0)).length;
+  const matrix=Array.from({length:7},()=>Array(18).fill(""));matrix[0][0]=`${year}년 ${monthNo}월 기본 휴무 초과자`;matrix[1][0]="전월·당월 휴무 초과분은 남은 대체휴무→보상휴가 순으로 자동 대체합니다. 처리한 행은 Q열에 O 입력합니다.";
+  const cards=[[0,"총 초과 인원",`${rows.length}명`],[2,"당월 휴무 초과",daysText(rows.reduce((a,r)=>a+Number(r.baseExcess||0),0))],[4,"당월 대체 사용",daysText(rows.reduce((a,r)=>a+Number(r.dayoffReplacementUsed||0),0))],[6,"확인 요청",`${unresolved}명`],[8,"처리 완료",`${rows.filter(r=>r.resolved).length}명`]];for(const[c,l,v]of cards){matrix[2][c]=l;matrix[3][c]=v;}matrix[2][10]="구분 색상 안내";matrix[3][10]="● 대체 완료";matrix[3][14]="● 휴무초과 확인 요청";matrix[4][10]="● 잔여 정상";matrix[4][14]="● 처리 완료";
+  matrix[6]=["No","지역장","매니저","지역","매장명","이름","사번","휴무수","기본휴무","당월초과","당월 대체사용","당월 미대체","전월초과","전월 대체사용","전월 미대체","판정","처리여부(O 입력)","처리상태"];
+  const regionRows=[],dataRows=[];let no=1;for(const region of regions){const group=rows.filter(r=>r.regionGroup===region);const rr=matrix.length;matrix.push([`▼  ${region} (총 ${group.length}명)`,"","","","","","","",`확인 ${group.filter(r=>!r.resolved&&(Number(r.dayoffReplacementShortage||0)>0||Number(r.priorDayoffReplacementShortage||0)>0)).length}명  |  완료 ${group.filter(r=>r.resolved).length}명`,"","","","","","","","",""]);regionRows.push({row:rr,region});for(const row of group){const currentShort=roundHalf(row.dayoffReplacementShortage||0),priorShort=roundHalf(row.priorDayoffReplacementShortage||0),short=currentShort>0||priorShort>0;const judgment=short?"휴무초과 확인 요청":(Number(row.baseExcess||0)>0||Number(row.priorDayoffExcess||0)>0?"휴무초과 대체 완료":"정상");const r=matrix.length;matrix.push([no++,row.member.regionalManager||"",row.member.manager||"",region,row.member.storeName||row.store||"",row.name||row.member.employeeName||"",normalizeId(row.employeeId),roundHalf(row.basicDayoffUsed||0),roundHalf(row.baseAllowance||0),roundHalf(row.baseExcess||0),roundHalf(row.dayoffReplacementUsed||0),currentShort,roundHalf(row.priorDayoffExcess||0),roundHalf(row.priorDayoffReplacementUsed||0),priorShort,judgment,row.resolved?"O":"",row.resolved?"처리 완료":"미처리"]);dataRows.push({row:r,short,resolved:row.resolved});}}
+  const sh=XLSX.utils.aoa_to_sheet(matrix);sh["!merges"]=[{s:{r:0,c:0},e:{r:0,c:17}},{s:{r:1,c:0},e:{r:1,c:17}},{s:{r:2,c:0},e:{r:2,c:1}},{s:{r:3,c:0},e:{r:4,c:1}},{s:{r:2,c:2},e:{r:2,c:3}},{s:{r:3,c:2},e:{r:4,c:3}},{s:{r:2,c:4},e:{r:2,c:5}},{s:{r:3,c:4},e:{r:4,c:5}},{s:{r:2,c:6},e:{r:2,c:7}},{s:{r:3,c:6},e:{r:4,c:7}},{s:{r:2,c:8},e:{r:2,c:9}},{s:{r:3,c:8},e:{r:4,c:9}},{s:{r:2,c:10},e:{r:2,c:17}},{s:{r:3,c:10},e:{r:3,c:13}},{s:{r:3,c:14},e:{r:3,c:17}},{s:{r:4,c:10},e:{r:4,c:13}},{s:{r:4,c:14},e:{r:4,c:17}}];for(const x of regionRows)sh["!merges"].push({s:{r:x.row,c:0},e:{r:x.row,c:7}},{s:{r:x.row,c:8},e:{r:x.row,c:17}});
+  sh["!cols"]=[{wch:6},{wch:11},{wch:11},{wch:9},{wch:18},{wch:11},{wch:13},{wch:9},{wch:10},{wch:10},{wch:12},{wch:11},{wch:10},{wch:12},{wch:11},{wch:24},{wch:16},{wch:12}];sh["!rows"]=matrix.map((_,i)=>({hpt:i===0?34:i===1?24:i>=2&&i<=4?28:i===5?8:i===6?32:regionRows.some(x=>x.row===i)?26:26}));sh["!freeze"]={xSplit:0,ySplit:7,topLeftCell:"A8",activePane:"bottomLeft",state:"frozen"};sh["!views"]=[{showGridLines:false,zoomScale:70,zoomScaleNormal:70}];styleDashboardShell(sh,matrix.length,18,cards,regionRows);
+  dataRows.forEach((x,i)=>{styleCellRange(sh,x.row,0,x.row,17,{fill:{patternType:"solid",fgColor:{rgb:i%2?"FFF9FBFD":"FFFFFFFF"}},font:{name:"맑은 고딕",sz:9,color:{rgb:"FF1F2937"}},alignment:{horizontal:"center",vertical:"center",wrapText:true},border:thinBorder("FFDCE3EC")});for(const c of [10,13]){const a=XLSX.utils.encode_cell({r:x.row,c});if(sh[a])sh[a].s={...(sh[a].s||{}),fill:{patternType:"solid",fgColor:{rgb:"FFD9EAD3"}},font:{name:"맑은 고딕",sz:9,bold:true,color:{rgb:"FF375623"}},alignment:{horizontal:"center",vertical:"center"},border:thinBorder("FFDCE3EC")};}for(const c of [11,14]){const a=XLSX.utils.encode_cell({r:x.row,c});if(sh[a]&&Number(sh[a].v)>0)sh[a].s={...(sh[a].s||{}),fill:{patternType:"solid",fgColor:{rgb:"FFF4CCCC"}},font:{name:"맑은 고딕",sz:9,bold:true,color:{rgb:"FF9C0006"}},alignment:{horizontal:"center",vertical:"center"},border:thinBorder("FFDCE3EC")};}const judge=XLSX.utils.encode_cell({r:x.row,c:15});sh[judge].s={...(sh[judge].s||{}),fill:{patternType:"solid",fgColor:{rgb:x.short?"FFF4CCCC":"FFD9EAD3"}},font:{name:"맑은 고딕",sz:9,bold:true,color:{rgb:x.short?"FF9C0006":"FF375623"}},alignment:{horizontal:"center",vertical:"center",wrapText:true},border:thinBorder("FFDCE3EC")};const mark=XLSX.utils.encode_cell({r:x.row,c:16}),status=XLSX.utils.encode_cell({r:x.row,c:17}),excelRow=x.row+1;sh[mark]=sh[mark]||{t:"s",v:x.resolved?"O":""};sh[mark].s={...(sh[mark].s||{}),fill:{patternType:"solid",fgColor:{rgb:x.resolved?"FFD9EAD3":"FFFFF2CC"}},font:{name:"맑은 고딕",sz:9,bold:true,color:{rgb:x.resolved?"FF107C41":"FFC55A11"}},alignment:{horizontal:"center",vertical:"center"},border:thinBorder("FFDCE3EC")};sh[status]={t:"s",v:x.resolved?"처리 완료":"미처리",f:`IF(OR(UPPER(TRIM(Q${excelRow}))="O",Q${excelRow}="○",Q${excelRow}="ㅇ"),"처리 완료","미처리")`,s:sh[status]?.s||{}};applyProcessStatusStyle(sh,status,x.resolved?"처리 완료":"미처리");});setRef(sh,matrix.length,18);workbook.Sheets["휴무 초과자"]=sh;if(!workbook.SheetNames.includes("휴무 초과자"))workbook.SheetNames.push("휴무 초과자");
 }
-
 
 function buildReferenceComparisonSheet(workbook, result, year, monthNo) {
   const comparison = result.referenceComparison || { rows: [], supplied: false, sameMonth: false, mismatchCount: 0, summary: "비교 파일 미선택" };
@@ -2609,6 +2164,17 @@ function styleEvidenceSheet(sheet, lastRow) {
   }
 }
 
+function styleDashboardShell(sheet, rowCount, colCount, cards, regionRows) {
+  styleCellRange(sheet,0,0,0,colCount-1,{fill:{patternType:"solid",fgColor:{rgb:"FF0B3B76"}},font:{name:"맑은 고딕",sz:18,bold:true,color:{rgb:"FFFFFFFF"}},alignment:{horizontal:"left",vertical:"center"}});
+  styleCellRange(sheet,1,0,1,colCount-1,{fill:{patternType:"solid",fgColor:{rgb:"FFF4F7FB"}},font:{name:"맑은 고딕",sz:10,color:{rgb:"FF40516B"}},alignment:{horizontal:"right",vertical:"center"}});
+  const palettes=[{fill:"FFF7FAFF",border:"FF8FB7E8",font:"FF0B5CCB"},{fill:"FFFFF5F5",border:"FFF1A2A7",font:"FFC00000"},{fill:"FFFFF8EF",border:"FFF4C27A",font:"FFC55A11"},{fill:"FFF3F8FF",border:"FF9CC2EF",font:"FF2F75B5"},{fill:"FFF3FBF6",border:"FF9FD3B2",font:"FF107C41"}];
+  cards.forEach(([col],i)=>{const p=palettes[i]||palettes[0];styleCellRange(sheet,2,col,4,Math.min(col+1,colCount-1),{fill:{patternType:"solid",fgColor:{rgb:p.fill}},font:{name:"맑은 고딕",sz:10,bold:true,color:{rgb:"FF26364D"}},alignment:{horizontal:"center",vertical:"center",wrapText:true},border:thinBorder(p.border)});styleCellRange(sheet,3,col,4,Math.min(col+1,colCount-1),{fill:{patternType:"solid",fgColor:{rgb:p.fill}},font:{name:"맑은 고딕",sz:19,bold:true,color:{rgb:p.font}},alignment:{horizontal:"center",vertical:"center"},border:thinBorder(p.border)});});
+  styleCellRange(sheet,2,10,4,colCount-1,{fill:{patternType:"solid",fgColor:{rgb:"FFFFFFFF"}},font:{name:"맑은 고딕",sz:8.5,bold:true,color:{rgb:"FF2E3B52"}},alignment:{horizontal:"left",vertical:"center",wrapText:true},border:thinBorder("FFD6DFEA")});
+  styleCellRange(sheet,6,0,6,colCount-1,{fill:{patternType:"solid",fgColor:{rgb:"FF0B3B76"}},font:{name:"맑은 고딕",sz:10,bold:true,color:{rgb:"FFFFFFFF"}},alignment:{horizontal:"center",vertical:"center",wrapText:true},border:thinBorder("FF8EA6C3")});
+  const rp={서울:{fill:"FFEAF2FB",font:"FF0B5CCB"},경인:{fill:"FFF0F6FC",font:"FF2F75B5"},충청:{fill:"FFEFF7F1",font:"FF107C41"},경북:{fill:"FFF3EFF9",font:"FF7030A0"},경남:{fill:"FFFFF3EA",font:"FFC55A11"},전라:{fill:"FFEDF8FA",font:"FF008C95"}};
+  for(const x of regionRows){const p=rp[x.region]||rp.서울;styleCellRange(sheet,x.row,0,x.row,colCount-1,{fill:{patternType:"solid",fgColor:{rgb:p.fill}},font:{name:"맑은 고딕",sz:10,bold:true,color:{rgb:p.font}},alignment:{horizontal:"left",vertical:"center"},border:thinBorder("FFD6DFEA")});}
+}
+
 function styleCellRange(sheet, sr, sc, er, ec, style, preserveFill = false) {
   for (let r = sr; r <= er; r += 1) {
     for (let c = sc; c <= ec; c += 1) {
@@ -2661,81 +2227,25 @@ function extendRefForAddress(sheet, address) {
 }
 
 async function applyLiveEvidenceConditionalFormatting(buffer, result) {
-  // v24의 문자열 직접 삽입 방식은 일부 Excel 환경에서 sheet3.xml 복구 경고를 만들 수 있었습니다.
-  // v27은 XML DOM 검증을 유지하고, Excel 기본 DXF(bgColor) 방식으로 채우기를 생성합니다.
   if (typeof JSZip === "undefined" || typeof DOMParser === "undefined" || typeof XMLSerializer === "undefined") return buffer;
   try {
     const zip = await JSZip.loadAsync(buffer);
-    const workbookPath = "xl/workbook.xml";
-    const relsPath = "xl/_rels/workbook.xml.rels";
-    const stylesPath = "xl/styles.xml";
-    const workbookXml = await zip.file(workbookPath)?.async("string");
-    const relsXml = await zip.file(relsPath)?.async("string");
-    const originalStylesXml = await zip.file(stylesPath)?.async("string");
-    if (!workbookXml || !relsXml || !originalStylesXml) return buffer;
-
-    const evidencePath = findWorksheetPath(workbookXml, relsXml, "출근 미등록");
-    const attendancePath = findWorksheetPath(workbookXml, relsXml, "상담사근태");
-    if (!evidencePath || !attendancePath) return buffer;
-
-    const originalEvidenceXml = await zip.file(evidencePath)?.async("string");
-    const originalAttendanceXml = await zip.file(attendancePath)?.async("string");
-    if (!originalEvidenceXml || !originalAttendanceXml) return buffer;
-
-    const dxfResult = appendConditionalDxfs(originalStylesXml);
-    const [year, month] = String(result?.targetMonth || "").split("-").map(Number);
-    const days = year && month ? new Date(year, month, 0).getDate() : 31;
-    const lastDayColumn = XLSX.utils.encode_col(14 + days - 1);
-
-    const evidenceXml = addWorksheetConditionalFormatting(originalEvidenceXml, [
-      {
-        sqref: "K8:K1000",
-        rules: [
-          { dxfId: dxfResult.evidence, formula: 'OR(UPPER(TRIM(K8))="O",K8="○",K8="ㅇ")' },
-        ],
-      },
-      {
-        sqref: "M8:M1000",
-        rules: [
-          { dxfId: dxfResult.completed, formula: '$M8="처리 완료"' },
-          { dxfId: dxfResult.pending, formula: '$M8="미처리"' },
-        ],
-      },
-    ]);
-
-    const attendanceFormula = `(COUNTIFS('출근 미등록'!$G$8:$G$1000,$I7,'출근 미등록'!$H$8:$H$1000,O$5,'출근 미등록'!$K$8:$K$1000,"O")+COUNTIFS('출근 미등록'!$G$8:$G$1000,$I7,'출근 미등록'!$H$8:$H$1000,O$5,'출근 미등록'!$K$8:$K$1000,"○")+COUNTIFS('출근 미등록'!$G$8:$G$1000,$I7,'출근 미등록'!$H$8:$H$1000,O$5,'출근 미등록'!$K$8:$K$1000,"ㅇ"))>0`;
-    const attendanceXml = addWorksheetConditionalFormatting(originalAttendanceXml, [
-      {
-        sqref: `O7:${lastDayColumn}500`,
-        rules: [{ dxfId: dxfResult.attendance, formula: attendanceFormula }],
-      },
-    ]);
-
-    // 수정된 각 XML을 한 번 더 파싱해 손상된 경우 원본 XLSX를 반환합니다.
-    parseXmlOrThrow(dxfResult.xml, "styles.xml");
-    parseXmlOrThrow(evidenceXml, "출근 미등록 XML");
-    parseXmlOrThrow(attendanceXml, "상담사근태 XML");
-
-    zip.file(stylesPath, dxfResult.xml);
-    zip.file(evidencePath, evidenceXml);
-    zip.file(attendancePath, attendanceXml);
-    const candidate = await zip.generateAsync({ type: "arraybuffer", compression: "DEFLATE" });
-
-    // ZIP 재생성 후에도 실제 저장된 XML이 파싱되는지 최종 확인합니다.
-    const verifyZip = await JSZip.loadAsync(candidate);
-    const verifyStyles = await verifyZip.file(stylesPath)?.async("string");
-    const verifyEvidence = await verifyZip.file(evidencePath)?.async("string");
-    const verifyAttendance = await verifyZip.file(attendancePath)?.async("string");
-    parseXmlOrThrow(verifyStyles || "", "저장 후 styles.xml");
-    parseXmlOrThrow(verifyEvidence || "", "저장 후 출근 미등록 XML");
-    parseXmlOrThrow(verifyAttendance || "", "저장 후 상담사근태 XML");
-    return candidate;
-  } catch (error) {
-    console.warn("실시간 증빙 색상 규칙 적용 실패 · 손상 방지를 위해 기본 파일로 저장", error);
-    return buffer;
-  }
+    const workbookPath="xl/workbook.xml",relsPath="xl/_rels/workbook.xml.rels",stylesPath="xl/styles.xml";
+    const workbookXml=await zip.file(workbookPath)?.async("string"),relsXml=await zip.file(relsPath)?.async("string"),stylesXml=await zip.file(stylesPath)?.async("string");
+    if(!workbookXml||!relsXml||!stylesXml)return buffer;
+    const dxf=appendConditionalDxfs(stylesXml);
+    const configs=[
+      ["출근 미등록",[{sqref:"K8:K1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(K8))="O",K8="○",K8="ㅇ")'}]},{sqref:"M8:M1000",rules:[{dxfId:dxf.completed,formula:'$M8="처리 완료"'},{dxfId:dxf.pending,formula:'$M8="미처리"'}]}]],
+      ["계획&근태 상이 인원",[{sqref:"M8:M1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(M8))="O",M8="○",M8="ㅇ")'}]},{sqref:"N8:N1000",rules:[{dxfId:dxf.completed,formula:'$N8="처리 완료"'},{dxfId:dxf.pending,formula:'$N8="미처리"'}]}]],
+      ["휴무 초과자",[{sqref:"Q8:Q1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(Q8))="O",Q8="○",Q8="ㅇ")'}]},{sqref:"R8:R1000",rules:[{dxfId:dxf.completed,formula:'$R8="처리 완료"'},{dxfId:dxf.pending,formula:'$R8="미처리"'}]}]],
+      ["매니저별 이상 근태",[{sqref:"L8:L1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(L8))="O",L8="○",L8="ㅇ")'}]},{sqref:"M8:M1000",rules:[{dxfId:dxf.completed,formula:'$M8="전달 완료"'},{dxfId:dxf.pending,formula:'$M8="미전달"'}]}]],
+    ];
+    const changed=[];
+    for(const [sheetName,rules] of configs){const path=findWorksheetPath(workbookXml,relsXml,sheetName);if(!path)continue;const xml=await zip.file(path)?.async("string");if(!xml)continue;const updated=addWorksheetConditionalFormatting(xml,rules);parseXmlOrThrow(updated,`${sheetName} XML`);zip.file(path,updated);changed.push([path,sheetName]);}
+    const attendancePath=findWorksheetPath(workbookXml,relsXml,"상담사근태");if(attendancePath){const xml=await zip.file(attendancePath)?.async("string");if(xml){const [year,month]=String(result?.targetMonth||"").split("-").map(Number);const days=year&&month?new Date(year,month,0).getDate():31;const lastCol=XLSX.utils.encode_col(14+days-1);const formula=`(COUNTIFS('출근 미등록'!$G$8:$G$1000,$I7,'출근 미등록'!$H$8:$H$1000,O$5,'출근 미등록'!$K$8:$K$1000,"O")+COUNTIFS('출근 미등록'!$G$8:$G$1000,$I7,'출근 미등록'!$H$8:$H$1000,O$5,'출근 미등록'!$K$8:$K$1000,"○")+COUNTIFS('출근 미등록'!$G$8:$G$1000,$I7,'출근 미등록'!$H$8:$H$1000,O$5,'출근 미등록'!$K$8:$K$1000,"ㅇ"))>0`;const updated=addWorksheetConditionalFormatting(xml,[{sqref:`O7:${lastCol}500`,rules:[{dxfId:dxf.attendance,formula}]}]);parseXmlOrThrow(updated,"상담사근태 XML");zip.file(attendancePath,updated);changed.push([attendancePath,"상담사근태"]);}}
+    parseXmlOrThrow(dxf.xml,"styles.xml");zip.file(stylesPath,dxf.xml);const candidate=await zip.generateAsync({type:"arraybuffer",compression:"DEFLATE"});const verify=await JSZip.loadAsync(candidate);parseXmlOrThrow(await verify.file(stylesPath)?.async("string")||"","저장 후 styles.xml");for(const[path,name]of changed)parseXmlOrThrow(await verify.file(path)?.async("string")||"",`저장 후 ${name} XML`);return candidate;
+  } catch(error){console.warn("실시간 처리 색상 규칙 적용 실패 · 기본 파일로 저장",error);return buffer;}
 }
-
 
 async function applyWorkbookOpenViewSettings(buffer) {
   if (typeof JSZip === "undefined" || typeof DOMParser === "undefined" || typeof XMLSerializer === "undefined") return buffer;
@@ -2746,7 +2256,7 @@ async function applyWorkbookOpenViewSettings(buffer) {
     if (!workbookXml || !relsXml) return buffer;
 
     const frozenDashboardSheets = new Set([
-      "계획&근태 상이 인원", "출근 미등록", "휴무 초과자", "전체 요약본", "매니저별 이상 근태", "인력 변동 확인",
+      "계획&근태 상이 인원", "출근 미등록", "휴무 초과자", "전체 요약본", "매니저별 이상 근태", "해당 월 연차 등록 현황 및 일자", "인력 변동 확인",
     ]);
     const sheetTags = workbookXml.match(/<sheet\b[^>]*\/?\s*>/g) || [];
     const changedPaths = [];
