@@ -59,6 +59,7 @@ export async function onRequestPost(context) {
   const month = String(form?.get("month") || "");
   const membersRaw = parseJson(form?.get("members"), []);
   const portalMappingsRaw = parseJson(form?.get("portalMappings"), []);
+  const personnelOverridesRaw = parseJson(form?.get("personnelOverrides"), []);
 
   if (!(file instanceof File) || file.size <= 0) return json({ error: "인력 및 매장매칭 엑셀을 선택해 주세요." }, 400);
   if (!/^\d{4}-\d{2}$/.test(month)) return json({ error: "적용 월을 확인해 주세요." }, 400);
@@ -68,6 +69,7 @@ export async function onRequestPost(context) {
   const members = normalizeMembers(membersRaw, month);
   if (!members.length) return json({ error: "저장할 직원 매칭 정보가 없습니다." }, 400);
   const portalMappings = normalizePortalMappings(portalMappingsRaw);
+  const personnelOverrides = normalizePersonnelOverrides(personnelOverridesRaw, month);
   const old = await context.env.DB.prepare(`SELECT * FROM attendance_workforce_uploads WHERE month = ? LIMIT 1`).bind(month).first();
   const oldRoutesResult = old?.id
     ? await context.env.DB.prepare(`SELECT DISTINCT route FROM attendance_workforce_members WHERE upload_id = ?`).bind(old.id).all()
@@ -153,6 +155,34 @@ export async function onRequestPost(context) {
     ));
     await runBatch(context.env.DB, memberStatements);
 
+    await context.env.DB.prepare(`
+      DELETE FROM attendance_personnel_status_overrides
+      WHERE month = ? AND source_type = 'workforce'
+    `).bind(month).run();
+
+    if (personnelOverrides.length) {
+      const personnelStatements = personnelOverrides.map((item) => context.env.DB.prepare(`
+        INSERT INTO attendance_personnel_status_overrides
+        (month, route, employee_id, employee_name, issue_type, personnel_status,
+         effective_from, effective_to, destination_route, note, source_type, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'workforce', datetime('now'), datetime('now'))
+        ON CONFLICT(month, route, employee_id) DO UPDATE SET
+          employee_name = excluded.employee_name,
+          issue_type = excluded.issue_type,
+          personnel_status = excluded.personnel_status,
+          effective_from = excluded.effective_from,
+          effective_to = excluded.effective_to,
+          destination_route = excluded.destination_route,
+          note = excluded.note,
+          source_type = 'workforce',
+          updated_at = datetime('now')
+      `).bind(
+        month, item.route, item.employeeId, item.employeeName, item.issueType, item.personnelStatus,
+        item.effectiveFrom || null, item.effectiveTo || null, item.destinationRoute || null, item.note
+      ));
+      await runBatch(context.env.DB, personnelStatements);
+    }
+
     if (old?.storage_type === "r2" && old.object_key && context.env.FILES) {
       await context.env.FILES.delete(old.object_key).catch(() => {});
     }
@@ -181,6 +211,7 @@ export async function onRequestPost(context) {
       portalCount,
       storageType,
       recalculatedMonths,
+      personnelStatusCount: personnelOverrides.length,
     }, replaced ? 200 : 201);
   } catch (error) {
     if (storageType === "r2" && objectKey && context.env.FILES) await context.env.FILES.delete(objectKey).catch(() => {});
@@ -216,6 +247,28 @@ function normalizeMembers(items, month) {
       note: clean(item?.note),
     };
     map.set(`${route}|${employeeId}|${storeCode}`, member);
+  }
+  return [...map.values()];
+}
+
+function normalizePersonnelOverrides(items, month) {
+  const validStatuses = new Set(["확인 요청", "재직·포함", "퇴사", "경로이동", "육아휴직", "기타휴직", "제외"]);
+  const map = new Map();
+  for (const raw of Array.isArray(items) ? items : []) {
+    const route = String(raw?.route || "");
+    const employeeId = normalizeId(raw?.employeeId || raw?.employee_id);
+    if (!VALID_ROUTES.has(route) || !employeeId) continue;
+    const status = validStatuses.has(String(raw?.personnelStatus || "")) ? String(raw.personnelStatus) : "확인 요청";
+    map.set(`${route}|${employeeId}`, {
+      month, route, employeeId,
+      employeeName: clean(raw?.employeeName || raw?.employee_name),
+      issueType: clean(raw?.issueType || raw?.issue_type || "인력현황 변동 입력"),
+      personnelStatus: status,
+      effectiveFrom: normalizeDate(raw?.effectiveFrom || raw?.effective_from),
+      effectiveTo: normalizeDate(raw?.effectiveTo || raw?.effective_to),
+      destinationRoute: VALID_ROUTES.has(String(raw?.destinationRoute || raw?.destination_route)) ? String(raw.destinationRoute || raw.destination_route) : "",
+      note: clean(raw?.note),
+    });
   }
   return [...map.values()];
 }

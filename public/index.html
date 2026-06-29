@@ -5,14 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#123B72" />
   <title>전자랜드 · 홈플러스 근태 관리</title>
-  <link rel="stylesheet" href="./assets/styles.css?v=31" />
+  <link rel="stylesheet" href="./assets/styles.css?v=32" />
 </head>
 <body>
   <div class="app-shell">
     <header class="topbar">
       <div>
         <p class="eyebrow">ATTENDANCE MANAGEMENT</p>
-        <h1>전자랜드 · 홈플러스 근태 관리 <span class="version-tag">v31</span></h1>
+        <h1>전자랜드 · 홈플러스 근태 관리 <span class="version-tag">v32</span></h1>
       </div>
       <div class="topbar-actions">
         <span id="storageBadge" class="badge neutral">저장 방식 확인 중</span>
@@ -108,7 +108,7 @@
                 <input id="referenceFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
                 <span class="drop-icon">C</span>
                 <strong id="referenceFileName">증빙 O 입력 최종본 선택</strong>
-                <small>출근 미등록 시트 K열에 O를 입력한 최종본을 넣으면 증빙 출근으로 반영합니다. 마감본끼리 비교는 ‘월 마감 비교’ 메뉴에서 진행합니다.</small>
+                <small>출근 미등록 시트 K열 O와 ‘인력 변동 확인’ 시트의 퇴사·경로이동·육아휴직·휴직 입력값을 함께 인식합니다. 마감본끼리 비교는 ‘월 마감 비교’ 메뉴에서 진행합니다.</small>
               </label>
             </div>
 
@@ -168,6 +168,7 @@
                   <button class="inner-tab" data-result-tab="annualCompare" type="button">연차 신청 대조 <b id="annualCompareTabCount">0</b></button>
                   <button class="inner-tab" data-result-tab="managerRequests" type="button">매니저별 이상 근태 <b id="managerRequestTabCount">0</b></button>
                   <button class="inner-tab" data-result-tab="referenceCompare" type="button">최종본 비교 <b id="referenceCompareTabCount">0</b></button>
+                  <button class="inner-tab" data-result-tab="personnelChecks" type="button">인력 확인 요청 <b id="personnelCheckTabCount">0</b></button>
                 </div>
 
                 <div class="result-pane active">
@@ -357,6 +358,30 @@
               </table>
             </div>
           </section>
+
+          <section class="panel grant-list-panel personnel-review-panel">
+            <div class="panel-heading">
+              <div>
+                <span class="step-label">PERSONNEL STATUS REVIEW</span>
+                <h2>인력현황 · 연차대장 확인 요청</h2>
+                <p class="muted">인력현황과 연차 기준대장을 사번 기준으로 비교합니다. 누락·경로 불일치 인원은 확인 요청으로 표시하고 퇴사·경로이동·육아휴직 등을 직접 지정할 수 있습니다.</p>
+              </div>
+              <div class="toolbar-actions">
+                <input id="personnelCheckMonth" class="input compact" type="month" />
+                <select id="personnelCheckRoute" class="input compact"><option value="">전체 경로</option><option value="homeplus">홈플러스</option><option value="electroland">전자랜드</option></select>
+                <button id="refreshPersonnelChecks" class="btn secondary" type="button">새로고침</button>
+                <button id="savePersonnelChecks" class="btn primary" type="button">수기 변동 저장</button>
+              </div>
+            </div>
+            <div id="personnelCheckSummary" class="grant-summary"></div>
+            <div class="alert success compact-box">최종본의 ‘인력 변동 확인’ 시트에 처리구분·적용일·종료일·이동경로·비고를 입력한 뒤 출근 증빙 최종본으로 다시 넣어도 동일하게 인식합니다.</div>
+            <div class="table-wrap">
+              <table class="wide-table personnel-check-table">
+                <thead><tr><th>경로</th><th>확인 유형</th><th>지역장</th><th>매니저</th><th>매장</th><th>사번</th><th>이름</th><th>인력현황</th><th>연차대장</th><th>처리구분</th><th>적용일</th><th>종료일·복직일</th><th>이동경로</th><th>비고</th><th>상태</th></tr></thead>
+                <tbody id="personnelCheckTableBody"><tr><td colspan="15" class="empty-cell">대상 월 인력현황을 등록하면 자동 비교합니다.</td></tr></tbody>
+              </table>
+            </div>
+          </section>
         </div>
       </section>
 
@@ -492,6 +517,6 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-  <script type="module" src="./assets/app.js?v=31"></script>
+  <script type="module" src="./assets/app.js?v=32"></script>
 </body>
 </html>

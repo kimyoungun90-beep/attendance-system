@@ -300,6 +300,22 @@ async function initialize(db) {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       UNIQUE(month, route, employee_id, store_code)
     )`,
+    `CREATE TABLE IF NOT EXISTS attendance_personnel_status_overrides (
+      month TEXT NOT NULL,
+      route TEXT NOT NULL CHECK (route IN ('homeplus', 'electroland')),
+      employee_id TEXT NOT NULL,
+      employee_name TEXT,
+      issue_type TEXT,
+      personnel_status TEXT NOT NULL DEFAULT '확인 요청',
+      effective_from TEXT,
+      effective_to TEXT,
+      destination_route TEXT,
+      note TEXT,
+      source_type TEXT NOT NULL DEFAULT 'manual' CHECK (source_type IN ('manual', 'workforce', 'evidence')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (month, route, employee_id)
+    )`,
     `CREATE TABLE IF NOT EXISTS annual_leave_baseline_uploads (
       route TEXT PRIMARY KEY CHECK (route IN ('homeplus', 'electroland')),
       baseline_date TEXT NOT NULL,
@@ -377,6 +393,7 @@ async function initialize(db) {
     `CREATE INDEX IF NOT EXISTS idx_workforce_chunks_upload ON attendance_workforce_file_chunks(upload_id, chunk_index)`,
     `CREATE INDEX IF NOT EXISTS idx_workforce_members_month_route ON attendance_workforce_members(month, route, employee_id, store_code)`,
     `CREATE INDEX IF NOT EXISTS idx_workforce_members_upload ON attendance_workforce_members(upload_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_personnel_status_month_route ON attendance_personnel_status_overrides(month, route, personnel_status, employee_id)`,
     `CREATE INDEX IF NOT EXISTS idx_annual_leave_employees_route ON annual_leave_employees(route, under_one_year, employee_id)`,
     `CREATE INDEX IF NOT EXISTS idx_annual_leave_applications_route_month ON annual_leave_applications(route, month, employee_id, leave_date)`,
     `CREATE INDEX IF NOT EXISTS idx_annual_leave_applications_employee_date ON annual_leave_applications(route, employee_id, leave_date)`,

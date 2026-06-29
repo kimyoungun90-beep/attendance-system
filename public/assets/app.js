@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=31";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=32";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -34,6 +34,7 @@ const state = {
   archiveFiles: [],
   workforceUploads: [],
   workforce: null,
+  personnelChecks: null,
   annualLeaveDashboard: null,
   annualBaselinePreview: null,
   annualMonthlyPreview: null,
@@ -53,7 +54,7 @@ async function init() {
   setupDropzone("closureTargetDropzone", "closureTargetFile", setClosureTargetFile);
   await checkBackend();
   syncRouteRuleHelp();
-  if (state.backend.loggedIn) await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard()]);
+  if (state.backend.loggedIn) await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard(), loadPersonnelChecks()]);
 }
 
 function bindEvents() {
@@ -100,6 +101,10 @@ function bindEvents() {
   $("#workforceMonth").addEventListener("change", previewWorkforceFile);
   $("#workforceFile").addEventListener("change", previewWorkforceFile);
   $("#portalReferenceFile").addEventListener("change", previewWorkforceFile);
+  $("#refreshPersonnelChecks").addEventListener("click", loadPersonnelChecks);
+  $("#personnelCheckMonth").addEventListener("change", loadPersonnelChecks);
+  $("#personnelCheckRoute").addEventListener("change", loadPersonnelChecks);
+  $("#savePersonnelChecks").addEventListener("click", savePersonnelChecks);
   $("#loginButton").addEventListener("click", openLogin);
   $("#logoutButton").addEventListener("click", logout);
   $("#loginCancel").addEventListener("click", () => $("#loginDialog").close());
@@ -118,6 +123,7 @@ function setDefaultDates() {
   $("#grantMonth").value = month;
   $("#archiveMonth").value = month;
   $("#workforceMonth").value = month;
+  $("#personnelCheckMonth").value = month;
   $("#annualMonthlyMonth").value = month;
   $("#annualLedgerMonth").value = month;
   syncGrantDates();
@@ -245,29 +251,32 @@ async function analyzeFiles() {
       openLogin();
       throw new Error("월별 인력·매장매칭 자료를 불러오려면 관리자 로그인이 필요합니다.");
     }
-    const [planWorkbook, attendanceWorkbook, workforce, annualWorkbook, referenceWorkbook, annualLedger] = await Promise.all([
+    const [planWorkbook, attendanceWorkbook, workforce, annualWorkbook, referenceWorkbook, annualLedger, personnelCheckData] = await Promise.all([
       fileToWorkbookSheets(state.planFile),
       fileToWorkbookSheets(state.attendanceFile),
       loadWorkforceMonth(targetMonth, route),
       state.annualFile ? fileToWorkbookSheets(state.annualFile) : Promise.resolve(null),
       state.referenceFile ? fileToWorkbookSheets(state.referenceFile) : Promise.resolve(null),
       fetchAnnualLeaveDashboard(route, targetMonth, cutoffDate),
+      fetchPersonnelChecks(targetMonth, route),
     ]);
     if (!workforce?.members?.length) throw new Error(`${targetMonth} ${ROUTE_LABELS[route]} 경로의 인력·매장매칭 파일이 없습니다. 인력 매칭에서 먼저 등록해 주세요.`);
     const plan = parsePlan(planWorkbook, targetMonth);
     const attendance = parseAttendance(attendanceWorkbook, targetMonth);
     state.priorLedger = await loadPriorLedger(route, targetMonth);
 
-    const parsedReference = referenceWorkbook ? parseReferenceFinalWorkbook(referenceWorkbook) : null;
+    const parsedReference = referenceWorkbook ? parseReferenceFinalWorkbook(referenceWorkbook, targetMonth, route) : null;
     const evidenceOverrides = parsedReference?.evidenceKeys || [];
+    const personnelOverrides = mergePersonnelOverrides(personnelCheckData?.items || [], parsedReference?.personnelOverrides || [], targetMonth, route);
+    const excludedPersonnelIds = personnelExcludedIds(personnelOverrides, targetMonth, route);
     const result = compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, ledger: state.priorLedger, evidenceKeys: evidenceOverrides });
-    appendWorkforceMatchingIssues(result, workforce, plan, route, targetMonth);
+    appendWorkforceMatchingIssues(result, workforce, plan, route, targetMonth, excludedPersonnelIds);
     applyEvidenceOverrides(result, evidenceOverrides);
     const parsedAnnual = annualWorkbook
       ? parseAnnualApplications(annualWorkbook, targetMonth)
       : annualApplicationsToParsed(annualLedger?.applications || [], targetMonth);
     const annualComparison = parsedAnnual?.rows?.length
-      ? compareAnnualApplications(parsedAnnual, plan, targetMonth, cutoffDate, workforce)
+      ? compareAnnualApplications(parsedAnnual, plan, targetMonth, cutoffDate, workforce, excludedPersonnelIds)
       : emptyAnnualComparison();
     mergeAnnualLeaveLedger(result, annualLedger, annualComparison);
     const referenceComparison = parsedReference
@@ -290,6 +299,8 @@ async function analyzeFiles() {
       annualApplications: parsedAnnual?.rows || [],
       referenceComparison,
       evidenceOverrides,
+      personnelChecks: personnelOverrides,
+      personnelOverrides: (parsedReference?.personnelOverrides || []).map((item) => ({ ...item, sourceType: "evidence" })),
       managerRequests,
       analyzedAt: new Date().toISOString(),
       workforce,
@@ -521,6 +532,137 @@ function emptyReferenceComparison() {
   return { rows: [], mismatchCount: 0, matchCount: 0, supplied: false, sameMonth: false, summary: "비교 파일 미선택" };
 }
 
+
+async function fetchPersonnelChecks(month, route = "") {
+  if (!(state.backend.available && state.backend.configured && state.backend.loggedIn)) return { items: [], summary: {} };
+  try {
+    const response = await fetch(`/api/personnel-checks?month=${encodeURIComponent(month)}&route=${encodeURIComponent(route || "")}`, { cache: "no-store" });
+    if (response.status === 401) return { items: [], summary: {} };
+    const data = await readJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "인력 확인 요청 조회 실패");
+    return data;
+  } catch (error) {
+    console.warn(error);
+    return { items: [], summary: {} };
+  }
+}
+
+function normalizePersonnelStatus(value) {
+  const raw = normalizeHeader(value);
+  if (!raw || raw.includes("확인요청") || raw === "미처리") return "확인 요청";
+  if (raw.includes("육아휴직")) return "육아휴직";
+  if (raw.includes("휴직")) return "기타휴직";
+  if (raw.includes("퇴사") || raw.includes("퇴직")) return "퇴사";
+  if (raw.includes("경로이동") || raw.includes("이동") || raw.includes("전환")) return "경로이동";
+  if (raw.includes("제외")) return "제외";
+  if (raw.includes("재직") || raw.includes("포함") || raw.includes("유지") || raw.includes("정상")) return "재직·포함";
+  return "확인 요청";
+}
+
+function mergePersonnelOverrides(serverItems, evidenceItems, month, route) {
+  const map = new Map();
+  const add = (raw, sourceType) => {
+    const employeeId = normalizeEmployeeId(raw.employeeId || raw.employee_id);
+    const itemRoute = raw.route || route;
+    if (!employeeId || !["homeplus", "electroland"].includes(itemRoute)) return;
+    const key = `${itemRoute}|${employeeId}`;
+    const previous = map.get(key) || {};
+    const status = normalizePersonnelStatus(raw.personnelStatus || raw.personnel_status);
+    map.set(key, {
+      ...previous,
+      ...raw,
+      month,
+      route: itemRoute,
+      routeLabel: ROUTE_LABELS[itemRoute],
+      employeeId,
+      employeeName: text(raw.employeeName || raw.employee_name || previous.employeeName),
+      issueType: text(raw.issueType || raw.issue_type || previous.issueType || "인력 변동 직접 입력"),
+      personnelStatus: status !== "확인 요청" || !previous.personnelStatus ? status : previous.personnelStatus,
+      effectiveFrom: parseDateCell(raw.effectiveFrom || raw.effective_from) || previous.effectiveFrom || "",
+      effectiveTo: parseDateCell(raw.effectiveTo || raw.effective_to) || previous.effectiveTo || "",
+      destinationRoute: routeValue(raw.destinationRoute || raw.destination_route) || raw.destinationRoute || previous.destinationRoute || "",
+      note: text(raw.note || previous.note),
+      sourceType,
+    });
+  };
+  for (const item of serverItems || []) add(item, item.sourceType || "server");
+  for (const item of evidenceItems || []) add(item, "evidence");
+  return [...map.values()].map((item) => ({ ...item, resolved: item.personnelStatus !== "확인 요청" }));
+}
+
+function personnelStatusApplies(item, month) {
+  const monthStart = `${month}-01`;
+  const [year, monthNumber] = month.split("-").map(Number);
+  const monthEnd = `${month}-${String(new Date(year, monthNumber, 0).getDate()).padStart(2, "0")}`;
+  if (item.effectiveFrom && item.effectiveFrom > monthEnd) return false;
+  if (item.effectiveTo && item.effectiveTo < monthStart) return false;
+  return true;
+}
+
+function personnelExcludedIds(items, month, route) {
+  const excludedStatuses = new Set(["퇴사", "경로이동", "육아휴직", "기타휴직", "제외"]);
+  return new Set((items || [])
+    .filter((item) => {
+      if (item.route !== route || !excludedStatuses.has(item.personnelStatus) || !personnelStatusApplies(item, month)) return false;
+      if (item.personnelStatus === "경로이동" && item.destinationRoute && item.destinationRoute === route) return false;
+      return true;
+    })
+    .map((item) => normalizeEmployeeId(item.employeeId))
+    .filter(Boolean));
+}
+
+function parsePersonnelOverridesFromWorkbook(sheets, targetMonth, defaultRoute) {
+  const candidates = normalizeWorkbookInput(sheets).filter((sheet) => /인력.*(변동|확인)|인원.*확인|재직.*현황|퇴사|휴직|경로.*이동/.test(normalizeHeader(sheet.sheetName)));
+  const rows = [];
+  for (const sheet of candidates) {
+    const matrix = sheet.matrix || [];
+    const headerIndex = findFlexibleHeaderRow(matrix, (headers) => (
+      findHeaderIndex(headers, ["사번", "사원번호"]) >= 0
+      && findHeaderIndex(headers, ["처리구분", "인력상태", "재직상태", "변동구분"]) >= 0
+    ));
+    if (headerIndex < 0) continue;
+    const headers = (matrix[headerIndex] || []).map(normalizeHeader);
+    const columns = {
+      route: findHeaderIndex(headers, ["경로", "현재경로"]),
+      employeeId: findHeaderIndex(headers, ["사번", "사원번호"]),
+      employeeName: findHeaderIndex(headers, ["이름", "성명"]),
+      issueType: findHeaderIndex(headers, ["확인유형", "확인요청", "사유"]),
+      status: findHeaderIndex(headers, ["처리구분", "인력상태", "재직상태", "변동구분"]),
+      effectiveFrom: findHeaderIndex(headers, ["적용일", "변동일", "퇴사일", "이동일", "휴직시작일"]),
+      effectiveTo: findHeaderIndex(headers, ["종료일", "복직일", "휴직종료일"]),
+      destinationRoute: findHeaderIndex(headers, ["이동경로", "변경경로", "이동처"]),
+      note: findHeaderIndex(headers, ["비고", "관리메모", "상세내용"]),
+      regionalManager: findHeaderIndex(headers, ["지역장"]),
+      manager: findHeaderIndex(headers, ["매니저"]),
+      region: findHeaderIndex(headers, ["지역", "권역"]),
+      storeName: findHeaderIndex(headers, ["매장명", "점포명", "매장"]),
+    };
+    for (const row of matrix.slice(headerIndex + 1)) {
+      const employeeId = normalizeEmployeeId(row[columns.employeeId]);
+      if (!looksLikeEmployeeId(employeeId)) continue;
+      const status = normalizePersonnelStatus(row[columns.status]);
+      if (status === "확인 요청" && !text(row[columns.note])) continue;
+      rows.push({
+        month: targetMonth,
+        route: routeValue(columns.route >= 0 ? row[columns.route] : "") || defaultRoute,
+        employeeId,
+        employeeName: columns.employeeName >= 0 ? text(row[columns.employeeName]) : "",
+        issueType: columns.issueType >= 0 ? text(row[columns.issueType]) : "인력 변동 직접 입력",
+        personnelStatus: status,
+        effectiveFrom: columns.effectiveFrom >= 0 ? parseDateCell(row[columns.effectiveFrom]) : "",
+        effectiveTo: columns.effectiveTo >= 0 ? parseDateCell(row[columns.effectiveTo]) : "",
+        destinationRoute: columns.destinationRoute >= 0 ? routeValue(row[columns.destinationRoute]) : "",
+        note: columns.note >= 0 ? text(row[columns.note]) : "",
+        regionalManager: columns.regionalManager >= 0 ? text(row[columns.regionalManager]) : "",
+        manager: columns.manager >= 0 ? text(row[columns.manager]) : "",
+        region: columns.region >= 0 ? text(row[columns.region]) : "",
+        storeName: columns.storeName >= 0 ? text(row[columns.storeName]) : "",
+      });
+    }
+  }
+  return rows;
+}
+
 function parseAnnualApplications(sheets, targetMonth) {
   const candidates = [];
   for (const sheet of normalizeWorkbookInput(sheets)) {
@@ -672,7 +814,7 @@ function workforceMetaMap(workforce) {
   return map;
 }
 
-function compareAnnualApplications(parsed, plan, targetMonth, cutoffDate, workforce) {
+function compareAnnualApplications(parsed, plan, targetMonth, cutoffDate, workforce, excludedPersonnelIds = new Set()) {
   const metaMap = workforceMetaMap(workforce);
   const planRows = choosePlanRows(plan.rows || [], new Map());
   const planById = new Map(planRows.map((row) => [row.employeeId, row]));
@@ -681,6 +823,7 @@ function compareAnnualApplications(parsed, plan, targetMonth, cutoffDate, workfo
   for (const application of parsed.rows || []) {
     if (!["연차", "반차"].includes(application.requestedKind)) continue;
     const employeeId = application.employeeId;
+    if (excludedPersonnelIds.has(normalizeEmployeeId(employeeId))) continue;
     const day = Number(application.date.slice(-2));
     requestKeys.add(`${employeeId}|${day}`);
     const planRow = planById.get(employeeId);
@@ -715,6 +858,7 @@ function compareAnnualApplications(parsed, plan, targetMonth, cutoffDate, workfo
 
   const cutoffDay = Number(String(cutoffDate || `${targetMonth}-31`).slice(-2)) || 31;
   for (const planRow of planRows) {
+    if (excludedPersonnelIds.has(normalizeEmployeeId(planRow.employeeId))) continue;
     const meta = metaMap.get(planRow.employeeId) || {};
     for (let day = 1; day <= cutoffDay; day += 1) {
       const planStatus = normalizePlanCode(planRow.plans?.[day]);
@@ -754,7 +898,7 @@ function parseReferenceFinalDate(value) {
   return parseDateCell(value);
 }
 
-function parseReferenceFinalWorkbook(sheets) {
+function parseReferenceFinalWorkbook(sheets, targetMonth = "", defaultRoute = "") {
   const normalizedSheets = normalizeWorkbookInput(sheets);
   const main = normalizedSheets.find((sheet) => /상담사\s*근태/.test(sheet.sheetName)) || normalizedSheets[0];
   if (!main) throw new Error("비교용 최종본의 상담사근태 시트를 찾지 못했습니다.");
@@ -803,6 +947,7 @@ function parseReferenceFinalWorkbook(sheets) {
     values,
     employeeCount: employees.size,
     evidenceKeys: parseEvidenceOverrides(normalizedSheets),
+    personnelOverrides: parsePersonnelOverridesFromWorkbook(normalizedSheets, targetMonth || month, defaultRoute),
     sheetNames: normalizedSheets.map((sheet) => sheet.sheetName),
   };
 }
@@ -1635,7 +1780,7 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
   });
 }
 
-function appendWorkforceMatchingIssues(result, workforce, plan, route, targetMonth) {
+function appendWorkforceMatchingIssues(result, workforce, plan, route, targetMonth, excludedPersonnelIds = new Set()) {
   const members = (workforce?.members || []).filter((row) => row.route === route);
   const workforceById = new Map();
   for (const member of members) {
@@ -1659,6 +1804,7 @@ function appendWorkforceMatchingIssues(result, workforce, plan, route, targetMon
   };
 
   for (const [employeeId, member] of workforceById.entries()) {
+    if (excludedPersonnelIds.has(employeeId)) continue;
     if (planById.has(employeeId)) continue;
     add({
       route, routeLabel: ROUTE_LABELS[route], store: member.storeName || member.store_name || "",
@@ -1668,6 +1814,7 @@ function appendWorkforceMatchingIssues(result, workforce, plan, route, targetMon
     });
   }
   for (const [employeeId, person] of planById.entries()) {
+    if (excludedPersonnelIds.has(employeeId)) continue;
     if (workforceById.has(employeeId)) continue;
     add({
       route, routeLabel: ROUTE_LABELS[route], store: person.store || "",
@@ -2089,6 +2236,7 @@ function refreshResultMetrics() {
   $("#annualCompareTabCount").textContent = result.annualComparison?.rows?.length || 0;
   $("#managerRequestTabCount").textContent = result.managerRequests?.length || 0;
   $("#referenceCompareTabCount").textContent = result.referenceComparison?.rows?.length || 0;
+  $("#personnelCheckTabCount").textContent = (result.personnelChecks || []).filter((item) => !item.resolved).length;
 }
 
 function switchResultTab(tabName) {
@@ -2246,6 +2394,24 @@ function tableConfig(tab) {
         { label: "비교 파일값", key: "referenceValue" },
         { label: "판정", render: (row) => `<span class="comparison-badge ${row.match ? "match" : row.informational ? "info" : "diff"}">${escapeHtml(row.result)}</span>` },
         { label: "차이 사유", className: "message-cell", key: "reason" },
+      ],
+    },
+    personnelChecks: {
+      rows: state.result.personnelChecks || [],
+      columns: [
+        { label: "경로", render: (row) => escapeHtml(ROUTE_LABELS[row.route] || row.route) },
+        { label: "확인 유형", render: (row) => `<span class="${row.resolved ? "success-pill" : "warning-pill"}">${escapeHtml(row.issueType || "확인 요청")}</span>` },
+        { label: "지역장", key: "regionalManager" },
+        { label: "매니저", key: "manager" },
+        { label: "매장", render: (row) => escapeHtml(row.storeName || row.store || "-") },
+        { label: "사번", key: "employeeId" },
+        { label: "이름", render: (row) => `<strong>${escapeHtml(row.employeeName || "-")}</strong>` },
+        { label: "인력현황", render: (row) => escapeHtml(ROUTE_LABELS[row.workforceRoute] || row.workforceRoute || "없음") },
+        { label: "연차대장", render: (row) => escapeHtml(ROUTE_LABELS[row.annualRoute] || row.annualRoute || "없음") },
+        { label: "처리구분", render: (row) => `<span class="${row.resolved ? "success-pill" : "warning-pill"}">${escapeHtml(row.personnelStatus || "확인 요청")}</span>` },
+        { label: "적용기간", render: (row) => escapeHtml([row.effectiveFrom, row.effectiveTo].filter(Boolean).join(" ~ ") || "-") },
+        { label: "이동경로", render: (row) => escapeHtml(ROUTE_LABELS[row.destinationRoute] || row.destinationRoute || "-") },
+        { label: "비고", className: "message-cell", key: "note" },
       ],
     },
   };
@@ -2593,6 +2759,9 @@ async function saveClosure() {
     if (state.annualFile && (state.result.annualApplications || []).length) {
       await persistAnnualMonthlyFromAnalysis(state.result);
     }
+    if ((state.result.personnelOverrides || []).length) {
+      await persistPersonnelOverrides(state.result.personnelOverrides, state.result.targetMonth);
+    }
 
     const correctedResultFile = await buildResultFile(state.result);
     const fileResults = await Promise.allSettled([
@@ -2635,7 +2804,7 @@ async function saveClosure() {
         note: "증빙 O 반영·최종본 비교 원본", sourceType: "closure", closureId: data.id, replace: false,
       })] : []),
     ]);
-    await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard()]);
+    await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard(), loadPersonnelChecks()]);
     const action = data.replaced ? "기존 월 마감을 완전히 교체했습니다." : "새 월 마감을 저장했습니다.";
     const recalculateMessage = data.recalculateWarning
       ? ` 월 마감 원본은 저장됐지만 누적 재계산 경고가 있습니다: ${data.recalculateWarning}`
@@ -3566,6 +3735,131 @@ function grantStatus(item) {
 }
 
 
+
+async function loadPersonnelChecks() {
+  const body = $("#personnelCheckTableBody");
+  const summaryNode = $("#personnelCheckSummary");
+  if (!body || !summaryNode) return;
+  if (!(state.backend.available && state.backend.configured && state.backend.loggedIn)) {
+    body.innerHTML = '<tr><td colspan="15" class="empty-cell">관리자 로그인 후 조회할 수 있습니다.</td></tr>';
+    summaryNode.innerHTML = "";
+    return;
+  }
+  const month = $("#personnelCheckMonth").value || $("#targetMonth").value;
+  const route = $("#personnelCheckRoute").value || "";
+  if (!month) return;
+  body.innerHTML = '<tr><td colspan="15" class="empty-cell">인력현황과 연차대장을 비교 중입니다.</td></tr>';
+  const data = await fetchPersonnelChecks(month, route);
+  state.personnelChecks = data;
+  const summary = data.summary || {};
+  summaryNode.innerHTML = [
+    ["확인 요청", summary.unresolved || 0],
+    ["인력현황 미등록", summary.workforceMissing || 0],
+    ["연차대장 미등록", summary.annualMissing || 0],
+    ["경로 불일치", summary.routeMismatch || 0],
+    ["처리 완료", Math.max(0, Number(summary.total || 0) - Number(summary.unresolved || 0))],
+  ].map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${number(value)}명</strong></div>`).join("");
+  renderPersonnelCheckRows(data.items || []);
+}
+
+function personnelStatusOptions(selected) {
+  return ["확인 요청", "재직·포함", "퇴사", "경로이동", "육아휴직", "기타휴직", "제외"]
+    .map((item) => `<option value="${item}" ${item === selected ? "selected" : ""}>${item}</option>`).join("");
+}
+
+function destinationRouteOptions(selected) {
+  return [
+    ["", "-"] , ["homeplus", "홈플러스"], ["electroland", "전자랜드"],
+  ].map(([value, label]) => `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`).join("");
+}
+
+function renderPersonnelCheckRows(items) {
+  const body = $("#personnelCheckTableBody");
+  if (!items.length) {
+    body.innerHTML = '<tr><td colspan="15" class="empty-cell">인력현황과 연차대장이 일치하며 별도 확인 대상이 없습니다.</td></tr>';
+    return;
+  }
+  body.innerHTML = items.map((item, index) => `
+    <tr class="${item.resolved ? "resolved-row" : "request-row"}" data-index="${index}" data-route="${escapeHtml(item.route)}" data-employee-id="${escapeHtml(item.employeeId)}">
+      <td class="route-text">${escapeHtml(ROUTE_LABELS[item.route] || item.route)}</td>
+      <td><span class="${item.resolved ? "success-pill" : "warning-pill"}">${escapeHtml(item.issueType || "확인 요청")}</span></td>
+      <td>${escapeHtml(item.regionalManager || "-")}</td>
+      <td>${escapeHtml(item.manager || "-")}</td>
+      <td>${escapeHtml(item.storeName || "-")}</td>
+      <td>${escapeHtml(item.employeeId)}</td>
+      <td><strong>${escapeHtml(item.employeeName || "-")}</strong></td>
+      <td>${escapeHtml(ROUTE_LABELS[item.workforceRoute] || item.workforceRoute || "없음")}</td>
+      <td>${escapeHtml(ROUTE_LABELS[item.annualRoute] || item.annualRoute || "없음")}</td>
+      <td><select class="input personnel-status">${personnelStatusOptions(item.personnelStatus || "확인 요청")}</select></td>
+      <td><input class="input personnel-from" type="date" value="${escapeHtml(item.effectiveFrom || "")}" /></td>
+      <td><input class="input personnel-to" type="date" value="${escapeHtml(item.effectiveTo || "")}" /></td>
+      <td><select class="input personnel-destination">${destinationRouteOptions(item.destinationRoute || "")}</select></td>
+      <td><input class="input personnel-note" value="${escapeHtml(item.note || "")}" placeholder="퇴사일·이동·휴직 사유" /></td>
+      <td>${item.resolved ? '<span class="success-pill">처리 완료</span>' : '<span class="warning-pill">확인 요청</span>'}</td>
+    </tr>
+  `).join("");
+}
+
+async function savePersonnelChecks() {
+  if (!(state.backend.available && state.backend.configured && state.backend.loggedIn)) {
+    openLogin();
+    return;
+  }
+  const month = $("#personnelCheckMonth").value || $("#targetMonth").value;
+  const sourceItems = state.personnelChecks?.items || [];
+  const items = [...$("#personnelCheckTableBody").querySelectorAll("tr[data-index]")].map((row) => {
+    const source = sourceItems[Number(row.dataset.index)] || {};
+    return {
+      month,
+      route: row.dataset.route,
+      employeeId: row.dataset.employeeId,
+      employeeName: source.employeeName || "",
+      issueType: source.issueType || "인력 변동 직접 입력",
+      personnelStatus: row.querySelector(".personnel-status")?.value || "확인 요청",
+      effectiveFrom: row.querySelector(".personnel-from")?.value || "",
+      effectiveTo: row.querySelector(".personnel-to")?.value || "",
+      destinationRoute: row.querySelector(".personnel-destination")?.value || "",
+      note: row.querySelector(".personnel-note")?.value || "",
+      sourceType: "manual",
+    };
+  });
+  if (!items.length) {
+    showToast("저장할 인력 확인 대상이 없습니다.");
+    return;
+  }
+  const button = $("#savePersonnelChecks");
+  try {
+    button.disabled = true;
+    button.textContent = "인력 변동 저장 중...";
+    const response = await fetch("/api/personnel-checks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ month, items, sourceType: "manual" }),
+    });
+    const data = await readJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "인력 변동 저장 실패");
+    await loadPersonnelChecks();
+    showToast(`${month} 인력 변동 ${number(data.saved)}명을 저장했습니다.`);
+  } catch (error) {
+    showToast(error.message || "인력 변동 저장 중 오류가 발생했습니다.");
+  } finally {
+    button.disabled = false;
+    button.textContent = "수기 변동 저장";
+  }
+}
+
+async function persistPersonnelOverrides(items, month) {
+  const normalized = (items || []).filter((item) => item.employeeId && item.route && item.personnelStatus && item.personnelStatus !== "확인 요청");
+  if (!normalized.length) return null;
+  const response = await fetch("/api/personnel-checks", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ month, items: normalized, sourceType: "evidence" }),
+  });
+  const data = await readJsonResponse(response);
+  if (!response.ok) throw new Error(data.error || "증빙 파일의 인력 변동 저장 실패");
+  return data;
+}
+
 async function previewWorkforceFile() {
   const file = $("#workforceFile")?.files?.[0];
   const reference = $("#portalReferenceFile")?.files?.[0];
@@ -3605,11 +3899,28 @@ async function saveWorkforceFile(event) {
       portalMappings = parsePortalMappings(referenceSheets);
     }
 
+    const memberRoutes = new Map(members.map((item) => [normalizeEmployeeId(item.employeeId), item.route]));
+    const memberStatusRows = members
+      .filter((item) => item.personnelStatus && item.personnelStatus !== "재직·포함" && item.personnelStatus !== "확인 요청")
+      .map((item) => ({
+        route: item.route, employeeId: item.employeeId, employeeName: item.employeeName,
+        issueType: "인력현황 변동 입력", personnelStatus: item.personnelStatus,
+        effectiveFrom: item.effectiveFrom || "", effectiveTo: item.effectiveTo || "",
+        destinationRoute: item.destinationRoute || "", note: item.statusNote || item.note || "",
+      }));
+    const statusSheetRows = parsePersonnelOverridesFromWorkbook(sheets, month, "").map((item) => ({
+      ...item, route: item.route || memberRoutes.get(normalizeEmployeeId(item.employeeId)) || "",
+    }));
+    const personnelOverrides = [...new Map([...memberStatusRows, ...statusSheetRows]
+      .filter((item) => item.route && item.employeeId)
+      .map((item) => [`${item.route}|${normalizeEmployeeId(item.employeeId)}`, item])).values()];
+
     const form = new FormData();
     form.append("file", file, file.name);
     form.append("month", month);
     form.append("members", JSON.stringify(members));
     form.append("portalMappings", JSON.stringify(portalMappings));
+    form.append("personnelOverrides", JSON.stringify(personnelOverrides));
     const response = await fetch("/api/workforce", { method: "POST", body: form });
     if (response.status === 401) {
       await checkBackend();
@@ -3622,8 +3933,9 @@ async function saveWorkforceFile(event) {
     $("#portalReferenceFile").value = "";
     $("#workforcePreview").textContent = "저장할 새 파일을 선택해 주세요.";
     state.workforce = null;
-    await loadWorkforceUploads();
-    showToast(`${month} 인력·매장매칭을 ${data.replaced ? "교체" : "저장"}했습니다. 전자랜드 ${number(data.electrolandCount)}명 · 홈플러스 ${number(data.homeplusCount)}명 · 포탈사번 ${number(data.portalCount)}명`);
+    $("#personnelCheckMonth").value = month;
+    await Promise.all([loadWorkforceUploads(), loadPersonnelChecks()]);
+    showToast(`${month} 인력·매장매칭을 ${data.replaced ? "교체" : "저장"}했습니다. 전자랜드 ${number(data.electrolandCount)}명 · 홈플러스 ${number(data.homeplusCount)}명 · 포탈사번 ${number(data.portalCount)}명 · 인력변동 ${number(data.personnelStatusCount || 0)}명`);
   } catch (error) {
     console.error(error);
     showToast(error.message || "인력·매장매칭 저장 중 오류가 발생했습니다.");
@@ -3707,6 +4019,11 @@ function parseWorkforcePeopleSheet(sheet, route, storeMap) {
     hireDate: findHeaderIndex(headers, ["제니엘입사일", "입사일"]),
     groupHireDate: findHeaderIndex(headers, ["그룹입사일"]),
     portalId: findHeaderIndex(headers, ["포탈사번", "포털사번"]),
+    employmentStatus: findHeaderIndex(headers, ["인력상태", "재직상태", "재직여부", "상태", "변동구분"]),
+    terminationDate: findHeaderIndex(headers, ["퇴사일", "퇴직일"]),
+    statusStartDate: findHeaderIndex(headers, ["적용일", "변동일", "이동일", "휴직시작일"]),
+    statusEndDate: findHeaderIndex(headers, ["복직일", "휴직종료일", "종료일"]),
+    destinationRoute: findHeaderIndex(headers, ["이동경로", "변경경로", "전환경로", "이동처"]),
     note: findHeaderIndex(headers, ["비고", "휴퇴사일", "휴/퇴사일"]),
   };
   const rows = [];
@@ -3718,7 +4035,14 @@ function parseWorkforcePeopleSheet(sheet, route, storeMap) {
     const matched = storeMap.get(storeCode) || {};
     const matchedRoute = matched.route || route;
     if (matchedRoute && matchedRoute !== route) continue;
-    const notes = [columns.note >= 0 ? text(row[columns.note]) : "", matched.closedDate ? `${matched.closedDate} 폐점` : "", matched.note || ""].filter(Boolean);
+    const rawNote = columns.note >= 0 ? text(row[columns.note]) : "";
+    const rawStatus = columns.employmentStatus >= 0 ? text(row[columns.employmentStatus]) : "";
+    const terminationDate = columns.terminationDate >= 0 ? parseDateCell(row[columns.terminationDate]) : "";
+    const statusStartDate = columns.statusStartDate >= 0 ? parseDateCell(row[columns.statusStartDate]) : "";
+    const statusEndDate = columns.statusEndDate >= 0 ? parseDateCell(row[columns.statusEndDate]) : "";
+    const statusText = [rawStatus, rawNote, terminationDate ? "퇴사" : ""].filter(Boolean).join(" ");
+    const personnelStatus = normalizePersonnelStatus(statusText);
+    const notes = [rawNote, matched.closedDate ? `${matched.closedDate} 폐점` : "", matched.note || ""].filter(Boolean);
     rows.push({
       route,
       regionalManager: matched.regionalManager || "",
@@ -3732,6 +4056,11 @@ function parseWorkforcePeopleSheet(sheet, route, storeMap) {
       employeeName,
       hireDate: columns.hireDate >= 0 ? parseDateCell(row[columns.hireDate]) : "",
       groupHireDate: columns.groupHireDate >= 0 ? parseDateCell(row[columns.groupHireDate]) : "",
+      personnelStatus,
+      effectiveFrom: terminationDate || statusStartDate,
+      effectiveTo: statusEndDate,
+      destinationRoute: columns.destinationRoute >= 0 ? routeValue(row[columns.destinationRoute]) : "",
+      statusNote: rawNote,
       note: [...new Set(notes)].join(" · "),
     });
   }
@@ -3996,7 +4325,8 @@ async function saveAnnualBaseline(event) {
     await uploadArchiveFile({ file: preview.file, route: preview.route, month: preview.baselineDate.slice(0, 7), fileKind: "other", note: "연차 누적현황 최초 기준대장 · 재등록 시 마지막 파일 기준", sourceType: "manual", replace: false }).catch(() => null);
     $("#annualLedgerRoute").value = preview.route;
     $("#annualLedgerMonth").value = preview.baselineDate.slice(0, 7);
-    await loadAnnualLeaveDashboard();
+    $("#personnelCheckMonth").value = preview.baselineDate.slice(0, 7);
+    await Promise.all([loadAnnualLeaveDashboard(), loadPersonnelChecks()]);
     showToast(data.replaced ? "기존 연차 초본을 마지막 파일 기준으로 완전히 교체했습니다." : "연차 누적현황 최초 기준값을 저장했습니다.");
   } catch (error) {
     showToast(error.message || "연차 기준값 저장 중 오류가 발생했습니다.");
@@ -4429,7 +4759,7 @@ function switchView(view) {
   if (view === "history") loadHistory();
   if (view === "substitute") loadGrants();
   if (view === "files") loadArchiveFiles();
-  if (view === "system") loadWorkforceUploads();
+  if (view === "system") Promise.all([loadWorkforceUploads(), loadPersonnelChecks()]);
   if (view === "annualLeave") loadAnnualLeaveDashboard();
 }
 
