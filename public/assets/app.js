@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=34";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=35";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -1395,8 +1395,19 @@ function compareReferenceFinal(reference, result, targetMonth, cutoffDate, workf
       });
     }
   }
-  const keys = new Set([...generated.keys(), ...reference.values.keys()]);
+  // 비교 기준일 이후의 비교 최종본 값은 결과·요약에서 제외합니다.
+  // 예: 기준일이 6월 28일이면 비교 파일에 들어 있는 6월 29~30일은 차이로 만들지 않습니다.
+  const referenceKeys = [...reference.values.keys()].filter((key) => {
+    const date = String(key).split("|")[1] || "";
+    return /^\d{4}-\d{2}-\d{2}$/.test(date)
+      && date.startsWith(`${targetMonth}-`)
+      && date <= cutoffDate;
+  });
+  const completedPlanKeys = new Set(result.workflowOverrides?.planMismatchCompletedKeys || []);
+  const keys = new Set([...generated.keys(), ...referenceKeys]);
   for (const key of keys) {
+    // 계획&근태 상이 시트에서 O 처리한 사번·일자는 비교 차이와 전체 요약에 다시 올리지 않습니다.
+    if (completedPlanKeys.has(key)) continue;
     const current = generated.get(key);
     const ref = reference.values.get(key);
     const generatedValue = normalizeFinalCompareValue(current?.value || "직원/일자 없음");
@@ -1732,6 +1743,10 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
     const substituteNeeded = roundHalf(explicitSubDayoffUsed);
     const compensationNeeded = compensationLeaveUsed;
     const annualLeaveUsed = roundHalf(annualLeaveEvents.reduce((sum, event) => sum + event.days, 0));
+    const openingCarryover = calculateOpeningCarryover(
+      ledger.lotsByEmployee?.[person.employeeId] || [],
+      targetMonth,
+    );
     const preview = calculatePreviewLedger({
       employeeId: person.employeeId,
       substituteEvents,
@@ -1798,6 +1813,9 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
     employeeFacts.push(fact);
     employeeSummaries.push({
       ...fact,
+      openingCarryoverSubstitute: openingCarryover.substitute,
+      openingCarryoverCompensation: openingCarryover.compensation,
+      openingCarryoverTotal: openingCarryover.total,
       availableSubstitute: preview.availableSubstitute,
       substituteApplied: preview.substituteApplied,
       remainingSubstitute: preview.remainingSubstitute,
@@ -1935,6 +1953,23 @@ function settlementCompensationRestDays(ledger, employeeId, date, cutoffDate, ha
     .filter((grant) => String(grant.occurrenceDate || "") === date)
     .filter((grant) => (grant.eligibleEmployeeIds || []).map(normalizeEmployeeId).includes(normalizedId))
     .reduce((sum) => sum + 1, 0));
+}
+
+function calculateOpeningCarryover(lots, targetMonth) {
+  const monthStart = `${targetMonth}-01`;
+  const [year, month] = String(targetMonth).split("-").map(Number);
+  const previousDate = new Date(year, month - 1, 0);
+  const previousMonthEnd = `${previousDate.getFullYear()}-${String(previousDate.getMonth() + 1).padStart(2, "0")}-${String(previousDate.getDate()).padStart(2, "0")}`;
+  const eligible = (lots || []).filter((lot) => Number(lot?.remaining || 0) > 0
+    && String(lot?.validFrom || "") <= previousMonthEnd
+    && String(lot?.validTo || "") >= monthStart);
+  const substitute = roundHalf(eligible
+    .filter((lot) => (lot.grantType || "substitute") === "substitute")
+    .reduce((sum, lot) => sum + Number(lot.remaining || 0), 0));
+  const compensation = roundHalf(eligible
+    .filter((lot) => lot.grantType === "compensation")
+    .reduce((sum, lot) => sum + Number(lot.remaining || 0), 0));
+  return { substitute, compensation, total: roundHalf(substitute + compensation) };
 }
 
 function calculatePreviewLedger({ employeeId, substituteEvents, compensationEvents, dayoffReplacementEvents = [], workedDates, occurrenceSubstituteDates, targetMonth, cutoffDate, ledger }) {
