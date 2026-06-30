@@ -89,6 +89,7 @@ export async function recalculateRoute(db, route) {
     );
 
     for (const employeeId of baseEligibility.employeeIds) {
+      const normalizedEmployeeId = normalizeEmployeeId(employeeId);
       let entitled = true;
       let restEligible = false;
       if (settlementMode && grantType === "compensation") {
@@ -115,8 +116,8 @@ export async function recalculateRoute(db, route) {
       if (!entitled) continue;
 
       const grantedDays = roundHalf(grant.granted_days);
-      if (!lotsByEmployee.has(employeeId)) lotsByEmployee.set(employeeId, []);
-      lotsByEmployee.get(employeeId).push({
+      if (!lotsByEmployee.has(normalizedEmployeeId)) lotsByEmployee.set(normalizedEmployeeId, []);
+      lotsByEmployee.get(normalizedEmployeeId).push({
         grantId: grant.id,
         grantType,
         grantMonth: grant.grant_month,
@@ -402,6 +403,7 @@ export async function runBatch(db, statements, chunkSize = 80) {
     if (chunk.length) await db.batch(chunk);
   }
 }
+
 
 function endOfMonth(monthText) {
   const [year, month] = monthText.split("-").map(Number);

@@ -81,7 +81,10 @@ export async function onRequestPost(context) {
             worked_dates_json = '[]',
             daily_statuses_json = '[]',
             occurrence_rest_days = 0,
-            occurrence_rest_allowances_json = '[]'
+            occurrence_rest_allowances_json = '[]',
+            imported_opening_balance_present = 0,
+            imported_opening_substitute = 0,
+            imported_opening_compensation = 0
         WHERE closure_id = ? AND employee_id = ?
       `).bind(closureId, row.employeeId));
       await runBatch(context.env.DB, resetStatements);
@@ -95,8 +98,9 @@ export async function onRequestPost(context) {
        annual_leave_used, substitute_events_json, compensation_events_json,
        annual_leave_events_json, worked_dates_json, occurrence_substitute_dates_json,
        base_allowance_raw, occurrence_rest_days, occurrence_rest_allowances_json,
-       daily_statuses_json, evidence_dates_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, '[]', ?, '[]', ?, 0, '[]', ?, '[]')
+       daily_statuses_json, evidence_dates_json,
+       imported_opening_balance_present, imported_opening_substitute, imported_opening_compensation)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, '[]', ?, '[]', ?, 0, '[]', ?, '[]', ?, ?, ?)
       ON CONFLICT(closure_id, employee_id) DO UPDATE SET
         route = excluded.route,
         month = excluded.month,
@@ -115,14 +119,20 @@ export async function onRequestPost(context) {
         base_allowance_raw = excluded.base_allowance_raw,
         occurrence_rest_days = 0,
         occurrence_rest_allowances_json = '[]',
-        daily_statuses_json = excluded.daily_statuses_json
+        daily_statuses_json = excluded.daily_statuses_json,
+        imported_opening_balance_present = excluded.imported_opening_balance_present,
+        imported_opening_substitute = excluded.imported_opening_substitute,
+        imported_opening_compensation = excluded.imported_opening_compensation
     `).bind(
       closureId, route, month, row.store, row.employeeId, row.name,
       row.baseAllowance, row.basicDayoffUsed, row.explicitSubDayoffUsed, row.baseExcess,
       row.substituteNeeded, row.compensationNeeded, row.compensationNeeded,
       JSON.stringify(row.substituteEvents), JSON.stringify(row.compensationEvents),
       JSON.stringify(row.workedDates), row.baseAllowanceRaw,
-      JSON.stringify(row.dailyStatuses)
+      JSON.stringify(row.dailyStatuses),
+      0,
+      0,
+      0
     ));
     await runBatch(context.env.DB, factStatements);
 
@@ -275,6 +285,11 @@ function normalizeFacts(items, route, month) {
       compensationEvents,
       workedDates,
       dailyStatuses,
+      // 과거 최종본의 수기 이월칸은 참고값일 뿐입니다.
+      // 실제 잔여는 부여 설정의 발생일·사용기간과 월별 사용내역으로 다시 계산합니다.
+      importedOpeningBalancePresent: false,
+      importedOpeningSubstitute: 0,
+      importedOpeningCompensation: 0,
     });
   }
   return [...map.values()];

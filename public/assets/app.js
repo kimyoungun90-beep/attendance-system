@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=37";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=39";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -1022,6 +1022,12 @@ function parseFinalLeaveImportWorkbook(sheets, targetMonth, route) {
   const employeeIdCol = findHeaderIndex(headers, ["사번", "사원번호"]);
   const nameCol = findHeaderIndex(headers, ["성명", "이름"]);
   const storeCol = findHeaderIndex(headers, ["매장명", "점포명", "매장"]);
+  // 과거 최종본의 수기 이월 개수는 부여 설정과 충돌할 수 있으므로 잔여 계산에 사용하지 않습니다.
+  // 상담사근태의 날짜별 대체휴무·보상휴가 사용내역만 가져오고,
+  // 잔여는 관리 화면에 저장한 발생일·사용 시작일·종료일 기준으로 다시 계산합니다.
+  const openingSubstituteCol = -1;
+  const openingCompensationCol = -1;
+  const openingBalancePresent = false;
   const metadataColumns = {
     regionalManager: findHeaderIndex(headers, ["지역장"]),
     manager: findHeaderIndex(headers, ["매니저"]),
@@ -1069,6 +1075,9 @@ function parseFinalLeaveImportWorkbook(sheets, targetMonth, route) {
       compensationEvents: [],
       workedDates: [],
       dailyStatuses: [],
+      importedOpeningBalancePresent: false,
+      importedOpeningSubstitute: 0,
+      importedOpeningCompensation: 0,
     };
     if (!current.name && nameCol >= 0) current.name = text(row?.[nameCol]);
     if (!current.store && storeCol >= 0) current.store = text(row?.[storeCol]);
@@ -1137,6 +1146,9 @@ function parseFinalLeaveImportWorkbook(sheets, targetMonth, route) {
       occurrenceRestAllowances: [],
       dailyStatuses: row.dailyStatuses,
       evidenceDates: [],
+      importedOpeningBalancePresent: false,
+      importedOpeningSubstitute: 0,
+      importedOpeningCompensation: 0,
     };
   }).sort((a, b) => a.store.localeCompare(b.store, "ko") || a.name.localeCompare(b.name, "ko"));
 
@@ -1153,6 +1165,22 @@ function parseFinalLeaveImportWorkbook(sheets, targetMonth, route) {
     restedOnFirstDay: employeeFacts.filter((row) => !row.workedDates.includes(`${targetMonth}-01`)).length,
     rosterReadyCount: employeeFacts.filter((row) => row.hireDate || row.groupHireDate).length,
   };
+}
+
+function buildStackedHeaders(matrix, headerIndex, lookbackRows = 3) {
+  const start = Math.max(0, headerIndex - Math.max(0, Number(lookbackRows) || 0));
+  const maxCols = Math.max(0, ...matrix.slice(start, headerIndex + 1).map((row) => row?.length || 0));
+  return Array.from({ length: maxCols }, (_, col) => matrix
+    .slice(start, headerIndex + 1)
+    .map((row) => normalizeHeader(row?.[col]))
+    .filter(Boolean)
+    .join(""));
+}
+
+function parseLegacyBalance(value) {
+  const raw = text(value).replace(/,/g, "");
+  const matched = raw.match(/-?\d+(?:\.\d+)?/);
+  return Math.max(0, roundHalf(matched ? Number(matched[0]) : 0));
 }
 
 function finalImportWorkedValue(rawValue, normalizedValue) {
@@ -3156,7 +3184,7 @@ function renderArchiveUploadPreview(route, previews) {
   }
   target.innerHTML = previews.map((item) => {
     const finalInfo = item.parsedFinal
-      ? `<span class="preview-detail">직원 ${number(item.parsedFinal.employeeCount)}명 · 대체 ${formatDays(item.parsedFinal.substituteDays)} · 보상 ${formatDays(item.parsedFinal.compensationDays)} 자동 반영</span>`
+      ? `<span class="preview-detail">직원 ${number(item.parsedFinal.employeeCount)}명 · 사용 대체 ${formatDays(item.parsedFinal.substituteDays)} · 사용 보상 ${formatDays(item.parsedFinal.compensationDays)} 자동 반영 · 잔여는 부여 설정 기준 재계산</span>`
       : item.warning
         ? `<span class="preview-warning">${escapeHtml(item.warning)}</span>`
         : `<span class="preview-detail">파일 저장 대상</span>`;
@@ -3451,7 +3479,7 @@ async function importLeaveFromArchive(id, button = null) {
     const file = await fetchArchiveFile(item);
     const result = await importFinalLeaveData(file, item.route, item.month);
     await Promise.all([loadArchiveFiles(), loadHistory(), loadGrants()]);
-    showToast(`${item.month} ${ROUTE_LABELS[item.route]} 최종본 휴가내역을 반영했습니다. 대체휴무 ${formatDays(result.substituteDays)} · 보상휴가 ${formatDays(result.compensationDays)}.`);
+    showToast(`${item.month} ${ROUTE_LABELS[item.route]} 최종본을 반영했습니다. 사용 대체 ${formatDays(result.substituteDays)} · 사용 보상 ${formatDays(result.compensationDays)}을 저장했고, 잔여는 부여 설정의 발생일·사용기간 기준으로 다시 계산했습니다.`);
   } catch (error) {
     showToast(error.message || "최종본 휴가내역 반영 실패");
   } finally {

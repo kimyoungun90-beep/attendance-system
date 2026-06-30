@@ -65,13 +65,14 @@ export async function onRequestGet(context) {
     `).bind(route, previousMonth).all(),
   ]);
 
+  const allFacts = factsResult.results || [];
   const factsByMonth = new Map();
-  for (const fact of factsResult.results || []) {
+  for (const fact of allFacts) {
     if (!factsByMonth.has(fact.month)) factsByMonth.set(fact.month, []);
     factsByMonth.get(fact.month).push(fact);
   }
   const factByMonthEmployee = new Map();
-  for (const fact of factsResult.results || []) {
+  for (const fact of allFacts) {
     const employeeId = normalizeEmployeeId(fact.employee_id);
     if (employeeId) factByMonthEmployee.set(`${fact.month}|${employeeId}`, fact);
   }
@@ -129,10 +130,11 @@ export async function onRequestGet(context) {
     }
 
     for (const employeeId of eligibility.employeeIds) {
-      const remaining = roundHalf(Number(grant.granted_days || 0) - (usedMap.get(`${grant.id}|${employeeId}`) || 0));
+      const normalizedEmployeeId = normalizeEmployeeId(employeeId);
+      const remaining = roundHalf(Number(grant.granted_days || 0) - (usedMap.get(`${grant.id}|${normalizedEmployeeId}`) || 0));
       if (!(remaining > 0)) continue;
-      if (!lotsByEmployee[employeeId]) lotsByEmployee[employeeId] = [];
-      lotsByEmployee[employeeId].push({
+      if (!lotsByEmployee[normalizedEmployeeId]) lotsByEmployee[normalizedEmployeeId] = [];
+      lotsByEmployee[normalizedEmployeeId].push({
         grantId: grant.id,
         grantType: grant.grant_type || "substitute",
         grantMonth: grant.grant_month,
@@ -195,6 +197,7 @@ export async function onRequestGet(context) {
   }
   return json({ lotsByEmployee, balances, annualLeaveBefore, currentGrants, settlementGrants, autoUseDates, previousMonth, previousMonthFacts });
 }
+
 
 function endOfMonth(monthText) {
   const [year, month] = monthText.split("-").map(Number);

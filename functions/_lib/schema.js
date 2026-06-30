@@ -20,6 +20,9 @@ const FACT_COLUMNS = {
   occurrence_rest_allowances_json: "TEXT NOT NULL DEFAULT '[]'",
   daily_statuses_json: "TEXT NOT NULL DEFAULT '[]'",
   evidence_dates_json: "TEXT NOT NULL DEFAULT '[]'",
+  imported_opening_balance_present: "INTEGER NOT NULL DEFAULT 0",
+  imported_opening_substitute: "REAL NOT NULL DEFAULT 0",
+  imported_opening_compensation: "REAL NOT NULL DEFAULT 0",
 };
 
 

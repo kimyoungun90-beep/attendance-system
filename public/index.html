@@ -5,14 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#123B72" />
   <title>전자랜드 · 홈플러스 근태 관리</title>
-  <link rel="stylesheet" href="./assets/styles.css?v=37" />
+  <link rel="stylesheet" href="./assets/styles.css?v=39" />
 </head>
 <body>
   <div class="app-shell">
     <header class="topbar">
       <div>
         <p class="eyebrow">ATTENDANCE MANAGEMENT</p>
-        <h1>전자랜드 · 홈플러스 근태 관리 <span class="version-tag">v37</span></h1>
+        <h1>전자랜드 · 홈플러스 근태 관리 <span class="version-tag">v39</span></h1>
       </div>
       <div class="topbar-actions">
         <span id="storageBadge" class="badge neutral">저장 방식 확인 중</span>
@@ -283,7 +283,7 @@
               <div class="field-group">
                 <label class="field-label" for="grantOccurrenceDates">발생일·근태 분기 지정일</label>
                 <textarea id="grantOccurrenceDates" class="textarea" rows="3" placeholder="예: 2026-06-03&#10;여러 날짜는 줄바꿈·쉼표로 입력"></textarea>
-                <p class="field-help">날짜별로 각각 기록됩니다. 대체휴무는 발생일의 출근·휴무 여부와 관계없이 대상자에게 동일 부여합니다. 보상휴가는 발생일 실제 출근자에게 입력한 일수를 부여하고, 출근하지 않은 대상자는 보상휴가 대신 해당 월 기본 휴무를 1일 추가합니다.</p>
+                <p class="field-help">날짜별로 각각 기록됩니다. 발생 월과 발생일은 실제 발생한 월·일로 입력하세요. 잔여와 사용 가능 여부는 발생 월이 아니라 사용 시작일·종료일을 기준으로 계산합니다. 대체휴무는 발생일 근태와 무관하게 동일 부여하고, 보상휴가는 발생일 실제 출근자에게만 부여합니다.</p>
               </div>
               <div class="two-cols" id="grantAmountRow">
                 <div class="field-group"><label class="field-label" for="grantDays">1인당 부여 일수</label><input id="grantDays" class="input" type="number" min="0.5" step="0.5" value="1" required /></div>
@@ -534,6 +534,6 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-  <script type="module" src="./assets/app.js?v=37"></script>
+  <script type="module" src="./assets/app.js?v=39"></script>
 </body>
 </html>

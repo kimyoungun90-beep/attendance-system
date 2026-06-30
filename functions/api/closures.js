@@ -49,6 +49,22 @@ export async function onRequestPost(context) {
   ).bind(route, month).first();
   const replaced = Boolean(existing?.id);
   const closureId = existing?.id || crypto.randomUUID();
+  const preservedOpeningRows = replaced
+    ? await context.env.DB.prepare(`
+        SELECT employee_id, imported_opening_balance_present,
+               imported_opening_substitute, imported_opening_compensation
+        FROM attendance_monthly_employee_facts
+        WHERE closure_id = ?
+      `).bind(closureId).all()
+    : { results: [] };
+  const preservedOpeningByEmployee = new Map((preservedOpeningRows.results || []).map((row) => [
+    String(row.employee_id || "").trim(),
+    {
+      present: Number(row.imported_opening_balance_present || 0) > 0,
+      substitute: roundHalf(row.imported_opening_substitute),
+      compensation: roundHalf(row.imported_opening_compensation),
+    },
+  ]));
 
   const missingRows = issueRows.filter((row) => row.issueType === "missing_clock_in");
   const unexpectedRows = issueRows.filter((row) => row.issueType === "unexpected_clock_in");
@@ -156,7 +172,9 @@ export async function onRequestPost(context) {
       row.duplicatePlanNote || ""
     ));
 
-    const factStatements = employeeFacts.map((row) => context.env.DB.prepare(`
+    const factStatements = employeeFacts.map((row) => {
+      const opening = preservedOpeningByEmployee.get(String(row.employeeId || "").trim()) || { present: false, substitute: 0, compensation: 0 };
+      return context.env.DB.prepare(`
       INSERT INTO attendance_monthly_employee_facts
       (closure_id, route, month, store, employee_id, employee_name,
        base_allowance, basic_dayoff_used, explicit_sub_dayoff_used, base_excess,
@@ -164,8 +182,9 @@ export async function onRequestPost(context) {
        annual_leave_used, substitute_events_json, compensation_events_json,
        annual_leave_events_json, worked_dates_json, occurrence_substitute_dates_json,
        base_allowance_raw, occurrence_rest_days, occurrence_rest_allowances_json,
-       daily_statuses_json, evidence_dates_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       daily_statuses_json, evidence_dates_json,
+       imported_opening_balance_present, imported_opening_substitute, imported_opening_compensation)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       closureId,
       route,
@@ -190,8 +209,12 @@ export async function onRequestPost(context) {
       roundHalf(row.occurrenceRestDays),
       JSON.stringify(Array.isArray(row.occurrenceRestAllowances) ? row.occurrenceRestAllowances : []),
       JSON.stringify(Array.isArray(row.dailyStatuses) ? row.dailyStatuses : []),
-      JSON.stringify(Array.isArray(row.evidenceDates) ? row.evidenceDates : [])
-    ));
+      JSON.stringify(Array.isArray(row.evidenceDates) ? row.evidenceDates : []),
+      opening.present ? 1 : 0,
+      opening.substitute,
+      opening.compensation
+    );
+    });
 
     await runBatch(context.env.DB, issueStatements);
     await runBatch(context.env.DB, missingStatements);
