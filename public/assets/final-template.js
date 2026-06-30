@@ -1791,6 +1791,11 @@ function styleSimpleReportSheet(sheet, lastRow, colCount, leftColumns = []) {
 function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
   if (!sheet) throw new Error("상담사근태 최종본 시트를 찾지 못했습니다.");
 
+  // 상담사근태는 상단 6행과 A:M열을 항상 고정합니다.
+  // 스크롤 시작 위치는 N7이며, 최종 저장 단계에서도 같은 설정을 XML로 재확인합니다.
+  sheet["!freeze"] = { xSplit: 13, ySplit: 6, topLeftCell: "N7", activePane: "bottomRight", state: "frozen" };
+  sheet["!views"] = [{ showGridLines: false, zoomScale: 70, zoomScaleNormal: 70 }];
+
   const firstDayCol0 = 14; // O열
   const lastDayCol0 = firstDayCol0 + daysInMonth - 1;
   const summaryStartCol0 = firstDayCol0 + daysInMonth;
@@ -2931,6 +2936,7 @@ async function applyWorkbookOpenViewSettings(buffer) {
     const frozenDashboardSheets = new Set([
       "계획&근태 상이 인원", "출근 미등록", "휴무 초과자", "전체 요약본", "매니저별 이상 근태", "주 근태 확인자", "해당 월 연차 등록 현황 및 일자", "인력 변동 확인",
     ]);
+    const attendanceFreezeSheet = "상담사근태";
     const sheetTags = workbookXml.match(/<sheet\b[^>]*\/?\s*>/g) || [];
     const changedPaths = [];
     for (const tag of sheetTags) {
@@ -2969,12 +2975,20 @@ async function applyWorkbookOpenViewSettings(buffer) {
       sheetView.setAttribute("zoomScale", "70");
       sheetView.setAttribute("zoomScaleNormal", "70");
 
-      if (frozenDashboardSheets.has(sheetName)) {
+      if (sheetName === attendanceFreezeSheet || frozenDashboardSheets.has(sheetName)) {
         for (const pane of xmlElementChildren(sheetView).filter((node) => node.localName === "pane")) sheetView.removeChild(pane);
         const pane = doc.createElementNS(namespace, "pane");
-        pane.setAttribute("ySplit", "7");
-        pane.setAttribute("topLeftCell", "A8");
-        pane.setAttribute("activePane", "bottomLeft");
+        if (sheetName === attendanceFreezeSheet) {
+          // 상담사근태: 1~6행과 A~M열 고정, N7부터 스크롤합니다.
+          pane.setAttribute("xSplit", "13");
+          pane.setAttribute("ySplit", "6");
+          pane.setAttribute("topLeftCell", "N7");
+          pane.setAttribute("activePane", "bottomRight");
+        } else {
+          pane.setAttribute("ySplit", "7");
+          pane.setAttribute("topLeftCell", "A8");
+          pane.setAttribute("activePane", "bottomLeft");
+        }
         pane.setAttribute("state", "frozen");
         const selection = xmlElementChildren(sheetView).find((node) => node.localName === "selection") || null;
         sheetView.insertBefore(pane, selection);
@@ -2993,7 +3007,15 @@ async function applyWorkbookOpenViewSettings(buffer) {
       const doc = parseXmlOrThrow(xml || "", `${item.name || item.path} 저장 후 보기 설정 XML`);
       const view = doc.getElementsByTagNameNS("*", "sheetView")[0];
       if (!view || view.getAttribute("zoomScale") !== "70") throw new Error(`${item.name} 확대 비율 저장 실패`);
-      if (frozenDashboardSheets.has(item.name)) {
+      if (item.name === attendanceFreezeSheet) {
+        const pane = doc.getElementsByTagNameNS("*", "pane")[0];
+        if (!pane
+          || pane.getAttribute("xSplit") !== "13"
+          || pane.getAttribute("ySplit") !== "6"
+          || pane.getAttribute("topLeftCell") !== "N7") {
+          throw new Error("상담사근태 6행·M열 고정 저장 실패");
+        }
+      } else if (frozenDashboardSheets.has(item.name)) {
         const pane = doc.getElementsByTagNameNS("*", "pane")[0];
         if (!pane || pane.getAttribute("ySplit") !== "7") throw new Error(`${item.name} 7행 고정 저장 실패`);
       }
