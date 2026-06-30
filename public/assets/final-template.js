@@ -308,7 +308,10 @@ function buildIssueSummarySheet(workbook, result, ctx, year, monthNo) {
     }
   }
 
-  const completedPlanKeys = new Set(result.workflowOverrides?.planMismatchCompletedKeys || []);
+  const completedPlanKeys = new Set([
+    ...(result.workflowOverrides?.dailyCompletedKeys || []),
+    ...(result.workflowOverrides?.planMismatchCompletedKeys || []),
+  ]);
   const resolvedMismatchKeys = new Set((result.mismatchRows || [])
     .filter((item) => item.resolved)
     .map((item) => `${normalizeId(item.employeeId)}|${item.date}`));
@@ -1084,7 +1087,7 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
   const uniqueStores = new Set(rows.map((row) => row.member.storeName || row.store || "").filter(Boolean)).size;
   const matrix = Array.from({ length: 7 }, () => Array(13).fill(""));
   matrix[0][0] = `${year}년 ${monthNo}월 출근 미등록`;
-  matrix[1][0] = `사번·발생일 기준 증빙 관리 · K열에 O 입력 · 기준일 ${result.cutoffDate || `${year}-${String(monthNo).padStart(2, "0")}-${String(new Date(year, monthNo, 0).getDate()).padStart(2, "0")}`}`;
+  matrix[1][0] = `K열에 O 입력 후 재업로드하면 같은 사번·발생일의 출근 미등록과 계획&근태 상이가 함께 제거됩니다. · 기준일 ${result.cutoffDate || `${year}-${String(monthNo).padStart(2, "0")}-${String(new Date(year, monthNo, 0).getDate()).padStart(2, "0")}`}`;
 
   const cards = [
     [0, "총 미등록 건수", `${rows.length}건`],
@@ -1295,7 +1298,7 @@ function buildPlanAttendanceMatchSheet(workbook, result, ctx, year, monthNo) {
   const completed = rows.filter(r=>r.resolved).length;
   const matrix=Array.from({length:7},()=>Array(14).fill(""));
   matrix[0][0]=`${year}년 ${monthNo}월 계획 & 근태 상이 인원`;
-  matrix[1][0]="처리 완료한 행은 M열에 O 입력 후 증빙 최종본으로 다시 업로드하면 전체 요약본에서 제외됩니다.";
+  matrix[1][0]="M열에 O 입력 후 재업로드하면 같은 사번·발생일의 계획&근태 상이와 출근 미등록이 함께 제거되며, 휴무 관련 건은 휴무 초과자에도 연동됩니다.";
   const cards=[[0,"총 상이 건수",rows.length],[2,"근무인데 출근기록 없음",rows.filter(r=>r.category==="근무인데 출근기록 없음"&&!r.resolved).length],[4,"휴무·휴가인데 출근기록 있음",rows.filter(r=>r.category==="휴무·휴가인데 출근기록 있음"&&!r.resolved).length],[6,"검토 필요",rows.filter(r=>r.category==="검토 필요"&&!r.resolved).length],[8,"처리 완료",completed]];
   for(const [c,l,v] of cards){matrix[2][c]=l;matrix[3][c]=`${v}건`;}
   matrix[2][10]="구분 색상 안내";matrix[3][10]="● 근무인데 출근기록 없음";matrix[3][12]="● 휴무·휴가인데 출근기록 있음";matrix[4][10]="● 검토 필요";matrix[4][12]="● 처리 완료";
@@ -1543,7 +1546,7 @@ function buildDayoffSubstituteSheet(workbook, result, ctx, year, monthNo) {
   const adjustCount = rows.filter((row) => row.judgmentType === "adjust" && !row.resolved).length;
   const matrix = Array.from({ length: 7 }, () => Array(19).fill(""));
   matrix[0][0] = `${year}년 ${monthNo}월 기본 휴무 초과자`;
-  matrix[1][0] = "이월 잔여와 당월 발생을 합산한 뒤 휴무·대체(보상) 사용량을 비교합니다. 서로 전환 가능하면 조율 필요, 전체 잔여가 부족하면 확인 요청으로 표시합니다. 처리한 행은 R열에 O 입력합니다.";
+  matrix[1][0] = "이월 잔여와 당월 발생을 합산해 비교합니다. R열에 O 입력 후 재업로드하면 같은 사번·회사·월의 휴무 초과와 휴무 관련 계획&근태 상이가 함께 제거됩니다.";
 
   const cards = [
     [0, "총 대상 인원", `${rows.length}명`],

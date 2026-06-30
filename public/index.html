@@ -12,7 +12,7 @@
     <header class="topbar">
       <div>
         <p class="eyebrow">ATTENDANCE MANAGEMENT</p>
-        <h1>전자랜드 · 홈플러스 근태 관리 <span class="version-tag">v43</span></h1>
+        <h1>전자랜드 · 홈플러스 근태 관리 <span class="version-tag">v44</span></h1>
       </div>
       <div class="topbar-actions">
         <span id="storageBadge" class="badge neutral">저장 방식 확인 중</span>
@@ -74,42 +74,54 @@
 
             <div class="field-group">
               <label class="field-label">계획표 엑셀</label>
-              <label class="dropzone" id="planDropzone">
-                <input id="planFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
-                <span class="drop-icon">P</span>
-                <strong id="planFileName">계획표를 선택하거나 끌어놓기</strong>
-                <small>매장명 · 사번 · 이름 · 01일~31일 열 자동 인식</small>
-              </label>
+              <div class="upload-box">
+                <label class="dropzone" id="planDropzone">
+                  <input id="planFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
+                  <span class="drop-icon">P</span>
+                  <strong id="planFileName">계획표를 선택하거나 끌어놓기</strong>
+                  <small>매장명 · 사번 · 이름 · 01일~31일 열 자동 인식</small>
+                </label>
+                <button id="planFileClear" class="file-clear-button hidden" type="button" aria-label="계획표 파일 제거">파일 제거</button>
+              </div>
             </div>
 
             <div class="field-group">
               <label class="field-label">실제 근태 엑셀</label>
-              <label class="dropzone" id="attendanceDropzone">
-                <input id="attendanceFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
-                <span class="drop-icon">A</span>
-                <strong id="attendanceFileName">근태표를 선택하거나 끌어놓기</strong>
-                <small>근무일자 · 사번 · 실제/변경 출근시간 · 실제 근태 자동 인식</small>
-              </label>
+              <div class="upload-box">
+                <label class="dropzone" id="attendanceDropzone">
+                  <input id="attendanceFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
+                  <span class="drop-icon">A</span>
+                  <strong id="attendanceFileName">근태표를 선택하거나 끌어놓기</strong>
+                  <small>근무일자 · 사번 · 실제/변경 출근시간 · 실제 근태 자동 인식</small>
+                </label>
+                <button id="attendanceFileClear" class="file-clear-button hidden" type="button" aria-label="실제 근태표 파일 제거">파일 제거</button>
+              </div>
             </div>
 
             <div class="field-group optional-upload">
               <label class="field-label">연차신청현황 엑셀 <span class="optional-label">선택</span></label>
-              <label class="dropzone compact-dropzone" id="annualDropzone">
-                <input id="annualFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
-                <span class="drop-icon">L</span>
-                <strong id="annualFileName">연차신청현황 파일 선택</strong>
-                <small>사번+휴가일자를 근무계획의 연차·반차와 대조합니다.</small>
-              </label>
+              <div class="upload-box">
+                <label class="dropzone compact-dropzone" id="annualDropzone">
+                  <input id="annualFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
+                  <span class="drop-icon">L</span>
+                  <strong id="annualFileName">연차신청현황 파일 선택</strong>
+                  <small>사번+휴가일자를 근무계획의 연차·반차와 대조합니다.</small>
+                </label>
+                <button id="annualFileClear" class="file-clear-button hidden" type="button" aria-label="연차신청현황 파일 제거">파일 제거</button>
+              </div>
             </div>
 
             <div class="field-group optional-upload">
               <label class="field-label">증빙 반영·비교 최종본 <span class="optional-label">선택</span></label>
-              <label class="dropzone compact-dropzone" id="referenceDropzone">
-                <input id="referenceFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
-                <span class="drop-icon">C</span>
-                <strong id="referenceFileName">증빙 O 입력 최종본 선택</strong>
-                <small>출근 미등록 시트 K열 O와 ‘인력 변동 확인’ 시트의 퇴사·경로이동·육아휴직·휴직 입력값을 함께 인식합니다. 마감본끼리 비교는 ‘월 마감 비교’ 메뉴에서 진행합니다.</small>
-              </label>
+              <div class="upload-box">
+                <label class="dropzone compact-dropzone" id="referenceDropzone">
+                  <input id="referenceFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
+                  <span class="drop-icon">C</span>
+                  <strong id="referenceFileName">증빙 O 입력 최종본 선택</strong>
+                  <small>출근 미등록 K열·계획&근태 상이 M열·휴무 초과자 R열 중 한 곳에 O를 입력하면 연결된 중복 건을 함께 완료합니다. 인력 변동 입력값도 같이 인식합니다.</small>
+                </label>
+                <button id="referenceFileClear" class="file-clear-button hidden" type="button" aria-label="증빙 최종본 파일 제거">파일 제거</button>
+              </div>
             </div>
 
             <button id="analyzeButton" class="btn primary full" type="button">근태 종합 분석</button>
@@ -534,6 +546,6 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-  <script type="module" src="./assets/app.js?v=43"></script>
+  <script type="module" src="./assets/app.js?v=44"></script>
 </body>
 </html>

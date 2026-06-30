@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=43";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=44";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -50,6 +50,10 @@ async function init() {
   setupDropzone("attendanceDropzone", "attendanceFile", setAttendanceFile);
   setupDropzone("annualDropzone", "annualFile", setAnnualFile);
   setupDropzone("referenceDropzone", "referenceFile", setReferenceFile);
+  setupFileClear("planFileClear", "planFile", setPlanFile, "계획표");
+  setupFileClear("attendanceFileClear", "attendanceFile", setAttendanceFile, "실제 근태표");
+  setupFileClear("annualFileClear", "annualFile", setAnnualFile, "연차신청현황");
+  setupFileClear("referenceFileClear", "referenceFile", setReferenceFile, "증빙 최종본");
   setupDropzone("closureBaseDropzone", "closureBaseFile", setClosureBaseFile);
   setupDropzone("closureTargetDropzone", "closureTargetFile", setClosureTargetFile);
   await checkBackend();
@@ -199,24 +203,46 @@ function setupDropzone(zoneId, inputId, setter) {
   zone.addEventListener("drop", (event) => setter(event.dataTransfer.files?.[0] || null));
 }
 
+function setupFileClear(buttonId, inputId, setter, label) {
+  const button = $(`#${buttonId}`);
+  const input = $(`#${inputId}`);
+  if (!button || !input) return;
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    input.value = "";
+    setter(null);
+    showToast(`${label} 파일을 제거했습니다.`);
+  });
+}
+
+function syncSelectedFileUi(dropzoneId, clearButtonId, file) {
+  $(`#${dropzoneId}`)?.classList.toggle("has-file", Boolean(file));
+  $(`#${clearButtonId}`)?.classList.toggle("hidden", !file);
+}
+
 function setPlanFile(file) {
   state.planFile = file;
   $("#planFileName").textContent = file ? file.name : "계획표를 선택하거나 끌어놓기";
+  syncSelectedFileUi("planDropzone", "planFileClear", file);
 }
 
 function setAttendanceFile(file) {
   state.attendanceFile = file;
   $("#attendanceFileName").textContent = file ? file.name : "근태표를 선택하거나 끌어놓기";
+  syncSelectedFileUi("attendanceDropzone", "attendanceFileClear", file);
 }
 
 function setAnnualFile(file) {
   state.annualFile = file;
   $("#annualFileName").textContent = file ? file.name : "연차신청현황 파일 선택";
+  syncSelectedFileUi("annualDropzone", "annualFileClear", file);
 }
 
 function setReferenceFile(file) {
   state.referenceFile = file;
   $("#referenceFileName").textContent = file ? file.name : "증빙 O 입력 최종본 선택";
+  syncSelectedFileUi("referenceDropzone", "referenceFileClear", file);
 }
 
 function setClosureBaseFile(file) {
@@ -270,8 +296,12 @@ async function analyzeFiles() {
     const finalCorrectionSummary = parsedReference?.month === targetMonth
       ? applyReferenceDailyCorrections(plan, attendance, parsedReference, targetMonth, cutoffDate)
       : { appliedCount: 0, clockCount: 0, statusCount: 0, clearedCount: 0 };
-    const evidenceOverrides = parsedReference?.evidenceKeys || [];
     const workflowOverrides = parsedReference?.workflowOverrides || emptyWorkflowOverrides();
+    // 출근 미등록 K열뿐 아니라 계획&근태 상이 M열에서 출근 미입력 건을 O 처리해도 동일한 출근 증빙으로 반영합니다.
+    const evidenceOverrides = [...new Set([
+      ...(parsedReference?.evidenceKeys || []),
+      ...(workflowOverrides.attendanceEvidenceKeys || []),
+    ])];
     const personnelOverrides = mergePersonnelOverrides(personnelCheckData?.items || [], parsedReference?.personnelOverrides || [], targetMonth, route);
     const excludedPersonnelIds = personnelExcludedIds(personnelOverrides, targetMonth, route);
     const result = compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, ledger: state.priorLedger, evidenceKeys: evidenceOverrides });
@@ -326,7 +356,15 @@ async function analyzeFiles() {
     const correctionMessage = finalCorrectionSummary.appliedCount
       ? ` · 수정 최종본 ${finalCorrectionSummary.appliedCount}건 재반영`
       : "";
-    showToast(`분석 완료: 출근기록 없음 ${result.missingRows.length}건 · 휴무·휴가 출근 ${result.unexpectedRows.length}건 · 불일치 ${result.mismatchRows.length}건${correctionMessage}`);
+    const linkedDailyCount = new Set([
+      ...(workflowOverrides.dailyCompletedKeys || []),
+      ...(workflowOverrides.planMismatchCompletedKeys || []),
+    ]).size;
+    const linkedMonthCount = new Set(workflowOverrides.dayoffCompletedKeys || []).size;
+    const workflowMessage = linkedDailyCount || linkedMonthCount
+      ? ` · 처리 O 연동 일자 ${linkedDailyCount}건${linkedMonthCount ? ` / 휴무월 ${linkedMonthCount}건` : ""}`
+      : "";
+    showToast(`분석 완료: 출근기록 없음 ${result.missingRows.length}건 · 휴무·휴가 출근 ${result.unexpectedRows.length}건 · 불일치 ${result.mismatchRows.length}건${correctionMessage}${workflowMessage}`);
   } catch (error) {
     console.error(error);
     showToast(error.message || "분석 중 오류가 발생했습니다.");
@@ -1410,6 +1448,9 @@ function parseEvidenceOverrides(sheets) {
 
 function emptyWorkflowOverrides() {
   return {
+    // v44: 어느 일 단위 시트에서 O를 입력해도 같은 사번·같은 날짜의 모든 이상 건을 함께 완료합니다.
+    dailyCompletedKeys: [],
+    attendanceEvidenceKeys: [],
     resolvedIssueKeys: [],
     planMismatchCompletedKeys: [],
     dayoffCompletedKeys: [],
@@ -1438,6 +1479,8 @@ function isDayoffLinkedPlan(value) {
 function parseWorkflowOverrides(sheets, targetMonth = "", defaultRoute = "") {
   const result = emptyWorkflowOverrides();
   const issueSet = new Set();
+  const dailySet = new Set();
+  const attendanceEvidenceSet = new Set();
   const planSet = new Set();
   const dayoffKeySet = new Set();
   const dayoffIdSet = new Set();
@@ -1470,6 +1513,8 @@ function parseWorkflowOverrides(sheets, targetMonth = "", defaultRoute = "") {
   scanSheet(/출근\s*미등록|증빙/, ["증빙여부(O입력)", "증빙여부(O 입력)", "증빙여부", "출근증빙", "증빙"], ({ employeeId, date }) => {
     if (!date) return;
     const dailyKey = `${employeeId}|${date}`;
+    dailySet.add(dailyKey);
+    attendanceEvidenceSet.add(dailyKey);
     planSet.add(dailyKey);
     issueSet.add(`${dailyKey}|missing_clock_in`);
   });
@@ -1478,8 +1523,10 @@ function parseWorkflowOverrides(sheets, targetMonth = "", defaultRoute = "") {
     if (!date) return;
     const dailyKey = `${employeeId}|${date}`;
     const issueType = workflowIssueType(typeText, planStatus);
+    dailySet.add(dailyKey);
     planSet.add(dailyKey);
     issueSet.add(`${dailyKey}|${issueType}`);
+    if (issueType === "missing_clock_in") attendanceEvidenceSet.add(dailyKey);
     if (isDayoffLinkedPlan(planStatus) && targetMonth && defaultRoute) {
       dayoffKeySet.add(`${employeeId}|${defaultRoute}|${targetMonth}`);
       dayoffIdSet.add(employeeId);
@@ -1493,6 +1540,8 @@ function parseWorkflowOverrides(sheets, targetMonth = "", defaultRoute = "") {
 
   scanSheet(/매니저별.*이상.*근태/, ["전달체크(O입력)", "전달체크(O 입력)", "전달체크", "전달여부", "전달완료"], ({ employeeId }) => managerSet.add(employeeId));
 
+  result.dailyCompletedKeys = [...dailySet];
+  result.attendanceEvidenceKeys = [...attendanceEvidenceSet];
   result.resolvedIssueKeys = [...issueSet];
   result.planMismatchCompletedKeys = [...planSet];
   result.dayoffCompletedKeys = [...dayoffKeySet];
@@ -1503,7 +1552,11 @@ function parseWorkflowOverrides(sheets, targetMonth = "", defaultRoute = "") {
 
 function applyWorkflowOverrides(result, overrides = emptyWorkflowOverrides(), context = {}) {
   const issueSet = new Set(overrides.resolvedIssueKeys || []);
-  const legacyDailySet = new Set(overrides.planMismatchCompletedKeys || []);
+  // v44 신규 키. v43에서 만들어진 파일은 planMismatchCompletedKeys로도 그대로 호환합니다.
+  const dailySet = new Set([
+    ...(overrides.dailyCompletedKeys || []),
+    ...(overrides.planMismatchCompletedKeys || []),
+  ]);
   const dayoffKeySet = new Set(overrides.dayoffCompletedKeys || []);
   const dayoffIdSet = new Set((overrides.dayoffCompletedIds || []).map(normalizeEmployeeId));
   const route = context.route || result.route || "";
@@ -1511,8 +1564,8 @@ function applyWorkflowOverrides(result, overrides = emptyWorkflowOverrides(), co
   const useLegacyDayoffIds = dayoffKeySet.size === 0;
   const issueKeyOf = (row) => `${normalizeEmployeeId(row.employeeId)}|${row.date}|${row.issueType || "mismatch"}`;
   const dailyKeyOf = (row) => `${normalizeEmployeeId(row.employeeId)}|${row.date}`;
-  const useLegacyDailyKeys = issueSet.size === 0;
-  const isResolved = (row) => issueSet.has(issueKeyOf(row)) || (useLegacyDailyKeys && legacyDailySet.has(dailyKeyOf(row)));
+  // 같은 날짜가 출근 미등록·계획&근태 상이에 중복되면 어느 한쪽의 O만으로 모두 제거합니다.
+  const isResolved = (row) => dailySet.has(dailyKeyOf(row)) || issueSet.has(issueKeyOf(row));
   const isDayoffResolved = (row) => {
     const employeeId = normalizeEmployeeId(row.employeeId);
     return dayoffKeySet.has(`${employeeId}|${route}|${targetMonth}`) || (useLegacyDayoffIds && dayoffIdSet.has(employeeId));
@@ -1688,7 +1741,10 @@ function compareReferenceFinal(reference, result, targetMonth, cutoffDate, workf
       && date.startsWith(`${targetMonth}-`)
       && date <= cutoffDate;
   });
-  const completedPlanKeys = new Set(result.workflowOverrides?.planMismatchCompletedKeys || []);
+  const completedPlanKeys = new Set([
+    ...(result.workflowOverrides?.dailyCompletedKeys || []),
+    ...(result.workflowOverrides?.planMismatchCompletedKeys || []),
+  ]);
   const keys = new Set([...generated.keys(), ...referenceKeys]);
   for (const key of keys) {
     // 계획&근태 상이 시트에서 O 처리한 사번·일자는 비교 차이와 전체 요약에 다시 올리지 않습니다.
