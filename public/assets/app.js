@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=39";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=40";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -1973,7 +1973,19 @@ function appendWorkforceMatchingIssues(result, workforce, plan, route, targetMon
 }
 
 function assembleResultCollections(base) {
-  const excessRows = base.employeeSummaries.filter((row) => Number(row.baseExcess || 0) > 0 || Number(row.priorDayoffExcess || 0) > 0);
+  const excessRows = base.employeeSummaries.filter((row) => {
+    const basicUsed = Number(row.basicDayoffUsed || 0);
+    const baseAllowance = Number(row.baseAllowance || 0);
+    const explicitLeaveUsed = Number(row.explicitSubDayoffUsed || 0) + Number(row.compensationLeaveUsed || 0);
+    const grantTotal = Number(row.combinedAvailable || 0);
+    const dayoffExcess = Math.max(0, basicUsed - baseAllowance);
+    const substituteExcess = Math.max(0, explicitLeaveUsed - grantTotal);
+    const combinedDeficit = Math.max(0, basicUsed + explicitLeaveUsed - baseAllowance - grantTotal);
+    return dayoffExcess > 0
+      || substituteExcess > 0
+      || combinedDeficit > 0
+      || Number(row.priorDayoffExcess || 0) > 0;
+  });
   return {
     ...base,
     missingPeople: uniquePeople(base.missingRows), unexpectedPeople: uniquePeople(base.unexpectedRows), mismatchPeople: uniquePeople(base.mismatchRows),

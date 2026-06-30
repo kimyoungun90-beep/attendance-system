@@ -1322,40 +1322,82 @@ function buildDayoffSubstituteSheet(workbook, result, ctx, year, monthNo) {
   const regions = ["서울", "경인", "충청", "경북", "경남", "전라"];
   const rows = [...(result.dayoffExcessRows || [])].map((row) => {
     const member = findMember(ctx, row.employeeId, row.store) || {};
+    const openingBalance = roundHalf(row.openingCarryoverTotal || 0);
+    const totalGrant = roundHalf(row.combinedAvailable || 0);
+    const currentGrant = roundHalf(Math.max(0, totalGrant - openingBalance));
+    const basicAllowance = roundHalf(row.baseAllowance || 0);
+    const dayoffUsed = roundHalf(row.basicDayoffUsed || 0);
+    const explicitLeaveUsed = roundHalf(Number(row.explicitSubDayoffUsed || 0) + Number(row.compensationLeaveUsed || 0));
+    const totalOffUsed = roundHalf(dayoffUsed + explicitLeaveUsed);
+    const dayoffExcess = roundHalf(Math.max(0, dayoffUsed - basicAllowance));
+    const substituteExcess = roundHalf(Math.max(0, explicitLeaveUsed - totalGrant));
+    const remainingAfterUse = roundHalf(totalGrant - explicitLeaveUsed - dayoffExcess);
+    const combinedRemaining = roundHalf(basicAllowance + totalGrant - totalOffUsed);
+
+    let judgmentType = "normal";
+    let judgment = "이상 없음";
+    if (combinedRemaining < 0) {
+      judgmentType = "danger";
+      judgment = `휴무 초과 확인 요청 · ${daysText(Math.abs(combinedRemaining))} 부족`;
+    } else if (dayoffExcess > 0) {
+      judgmentType = "adjust";
+      judgment = `휴무 ${daysText(dayoffExcess)} 초과 · 대체(보상) 조율 필요`;
+    } else if (substituteExcess > 0) {
+      judgmentType = "adjust";
+      judgment = `대체(보상) ${daysText(substituteExcess)} 초과 · 휴무 조율 필요`;
+    }
+
     return {
       ...row,
       member,
       regionGroup: normalizeDashboardRegion(member.region2 || member.region1 || row.region || "", member.storeName || row.store || ""),
       resolved: Boolean(row.dayoffResolved),
+      openingBalance,
+      currentGrant,
+      totalGrant,
+      basicAllowance,
+      dayoffUsed,
+      explicitLeaveUsed,
+      totalOffUsed,
+      dayoffExcess,
+      substituteExcess,
+      remainingAfterUse,
+      combinedRemaining,
+      judgment,
+      judgmentType,
     };
   }).sort((a, b) => regions.indexOf(a.regionGroup) - regions.indexOf(b.regionGroup)
     || String(a.name).localeCompare(String(b.name), "ko"));
 
-  const unresolved = rows.filter((row) => !row.resolved
-    && (Number(row.dayoffReplacementShortage || 0) > 0 || Number(row.priorDayoffReplacementShortage || 0) > 0)).length;
-  const matrix = Array.from({ length: 7 }, () => Array(21).fill(""));
+  const dangerCount = rows.filter((row) => row.judgmentType === "danger" && !row.resolved).length;
+  const adjustCount = rows.filter((row) => row.judgmentType === "adjust" && !row.resolved).length;
+  const matrix = Array.from({ length: 7 }, () => Array(19).fill(""));
   matrix[0][0] = `${year}년 ${monthNo}월 기본 휴무 초과자`;
-  matrix[1][0] = "이월 잔여는 전월까지 사용 후 이번 달 시작 시점에 남은 대체휴무·보상휴가입니다. 처리한 행은 T열에 O 입력합니다.";
+  matrix[1][0] = "이월 잔여와 당월 발생을 합산한 뒤 휴무·대체(보상) 사용량을 비교합니다. 서로 전환 가능하면 조율 필요, 전체 잔여가 부족하면 확인 요청으로 표시합니다. 처리한 행은 R열에 O 입력합니다.";
+
   const cards = [
-    [0, "총 초과 인원", `${rows.length}명`],
-    [2, "당월 휴무 초과", daysText(rows.reduce((sum, row) => sum + Number(row.baseExcess || 0), 0))],
-    [4, "당월 대체 사용", daysText(rows.reduce((sum, row) => sum + Number(row.dayoffReplacementUsed || 0), 0))],
-    [6, "확인 요청", `${unresolved}명`],
-    [8, "처리 완료", `${rows.filter((row) => row.resolved).length}명`],
+    [0, "총 대상 인원", `${rows.length}명`],
+    [2, "휴무 초과", `${rows.filter((row) => row.dayoffExcess > 0).length}명`],
+    [4, "대체 초과", `${rows.filter((row) => row.substituteExcess > 0).length}명`],
+    [6, "조율 필요", `${adjustCount}명`],
+    [8, "확인 요청", `${dangerCount}명`],
   ];
   for (const [col, label, value] of cards) {
     matrix[2][col] = label;
     matrix[3][col] = value;
   }
+
   matrix[2][10] = "구분 색상 안내";
-  matrix[3][10] = "● 이월 대체·보상 잔여";
-  matrix[3][15] = "● 휴무초과 확인 요청";
-  matrix[4][10] = "● 휴무초과 대체 완료";
-  matrix[4][15] = "● 처리 완료";
+  matrix[3][10] = "● 이월·당월 발생/합계";
+  matrix[3][14] = "● 휴무초과 확인 요청";
+  matrix[4][10] = "● 조율 필요";
+  matrix[4][14] = "● 이상 없음";
+
   matrix[6] = [
-    "No", "지역장", "매니저", "지역", "매장명", "이름", "사번", "휴무수", "기본휴무",
-    "이월 대체잔여", "이월 보상잔여", "이월 합계", "당월초과", "당월 대체사용", "당월 미대체",
-    "전월초과", "전월 대체사용", "전월 미대체", "판정", "처리여부(O 입력)", "처리상태",
+    "No", "지역장", "매니저", "지역", "매장명", "이름", "사번", "기본휴무",
+    "이월 대체(보상)잔여", "당월 대체 발생", "이월+당월 대체(보상) 합계",
+    "당월 휴무 사용 개수", "휴무+대체(보상)사용 개수", "휴무 초과 개수",
+    "대체 초과 개수", "당월 사용 후 잔여 대체(보상)", "판정", "처리여부(O 입력)", "처리상태",
   ];
 
   const regionRows = [];
@@ -1365,78 +1407,74 @@ function buildDayoffSubstituteSheet(workbook, result, ctx, year, monthNo) {
     const group = rows.filter((row) => row.regionGroup === region);
     const regionRow = matrix.length;
     matrix.push([
-      `▼  ${region} (총 ${group.length}명)`, "", "", "", "", "", "", "", "",
-      `이월 ${daysText(group.reduce((sum, row) => sum + Number(row.openingCarryoverTotal || 0), 0))}  |  확인 ${group.filter((row) => !row.resolved && (Number(row.dayoffReplacementShortage || 0) > 0 || Number(row.priorDayoffReplacementShortage || 0) > 0)).length}명  |  완료 ${group.filter((row) => row.resolved).length}명`,
-      "", "", "", "", "", "", "", "", "", "", "",
+      `▼  ${region} (총 ${group.length}명)`, "", "", "", "", "", "", "",
+      `이월 ${daysText(group.reduce((sum, row) => sum + Number(row.openingBalance || 0), 0))}  |  당월 발생 ${daysText(group.reduce((sum, row) => sum + Number(row.currentGrant || 0), 0))}  |  조율 ${group.filter((row) => row.judgmentType === "adjust" && !row.resolved).length}명  |  확인 ${group.filter((row) => row.judgmentType === "danger" && !row.resolved).length}명`,
+      "", "", "", "", "", "", "", "", "", "",
     ]);
     regionRows.push({ row: regionRow, region });
+
     for (const row of group) {
-      const currentShort = roundHalf(row.dayoffReplacementShortage || 0);
-      const priorShort = roundHalf(row.priorDayoffReplacementShortage || 0);
-      const short = currentShort > 0 || priorShort > 0;
-      const judgment = short
-        ? "휴무초과 확인 요청"
-        : (Number(row.baseExcess || 0) > 0 || Number(row.priorDayoffExcess || 0) > 0 ? "휴무초과 대체 완료" : "정상");
       const r = matrix.length;
       matrix.push([
         no++, row.member.regionalManager || "", row.member.manager || "", region,
         row.member.storeName || row.store || "", row.name || row.member.employeeName || "", normalizeId(row.employeeId),
-        roundHalf(row.basicDayoffUsed || 0), roundHalf(row.baseAllowance || 0),
-        roundHalf(row.openingCarryoverSubstitute || 0), roundHalf(row.openingCarryoverCompensation || 0), roundHalf(row.openingCarryoverTotal || 0),
-        roundHalf(row.baseExcess || 0), roundHalf(row.dayoffReplacementUsed || 0), currentShort,
-        roundHalf(row.priorDayoffExcess || 0), roundHalf(row.priorDayoffReplacementUsed || 0), priorShort,
-        judgment, row.resolved ? "O" : "", row.resolved ? "처리 완료" : "미처리",
+        row.basicAllowance, row.openingBalance, row.currentGrant, row.totalGrant,
+        row.dayoffUsed, row.totalOffUsed, row.dayoffExcess, row.substituteExcess,
+        row.remainingAfterUse, row.judgment, row.resolved ? "O" : "", row.resolved ? "처리 완료" : "미처리",
       ]);
-      dataRows.push({ row: r, short, resolved: row.resolved });
+      dataRows.push({ row: r, ...row });
     }
   }
 
   const sh = XLSX.utils.aoa_to_sheet(matrix);
   sh["!merges"] = [
-    { s: { r: 0, c: 0 }, e: { r: 0, c: 20 } },
-    { s: { r: 1, c: 0 }, e: { r: 1, c: 20 } },
+    { s: { r: 0, c: 0 }, e: { r: 0, c: 18 } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: 18 } },
     { s: { r: 2, c: 0 }, e: { r: 2, c: 1 } }, { s: { r: 3, c: 0 }, e: { r: 4, c: 1 } },
     { s: { r: 2, c: 2 }, e: { r: 2, c: 3 } }, { s: { r: 3, c: 2 }, e: { r: 4, c: 3 } },
     { s: { r: 2, c: 4 }, e: { r: 2, c: 5 } }, { s: { r: 3, c: 4 }, e: { r: 4, c: 5 } },
     { s: { r: 2, c: 6 }, e: { r: 2, c: 7 } }, { s: { r: 3, c: 6 }, e: { r: 4, c: 7 } },
     { s: { r: 2, c: 8 }, e: { r: 2, c: 9 } }, { s: { r: 3, c: 8 }, e: { r: 4, c: 9 } },
-    { s: { r: 2, c: 10 }, e: { r: 2, c: 20 } },
-    { s: { r: 3, c: 10 }, e: { r: 3, c: 14 } }, { s: { r: 3, c: 15 }, e: { r: 3, c: 20 } },
-    { s: { r: 4, c: 10 }, e: { r: 4, c: 14 } }, { s: { r: 4, c: 15 }, e: { r: 4, c: 20 } },
+    { s: { r: 2, c: 10 }, e: { r: 2, c: 18 } },
+    { s: { r: 3, c: 10 }, e: { r: 3, c: 13 } }, { s: { r: 3, c: 14 }, e: { r: 3, c: 18 } },
+    { s: { r: 4, c: 10 }, e: { r: 4, c: 13 } }, { s: { r: 4, c: 14 }, e: { r: 4, c: 18 } },
   ];
   for (const item of regionRows) {
     sh["!merges"].push(
-      { s: { r: item.row, c: 0 }, e: { r: item.row, c: 8 } },
-      { s: { r: item.row, c: 9 }, e: { r: item.row, c: 20 } },
+      { s: { r: item.row, c: 0 }, e: { r: item.row, c: 7 } },
+      { s: { r: item.row, c: 8 }, e: { r: item.row, c: 18 } },
     );
   }
+
   sh["!cols"] = [
     { wch: 6 }, { wch: 11 }, { wch: 11 }, { wch: 9 }, { wch: 18 }, { wch: 11 }, { wch: 13 },
-    { wch: 9 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 11 }, { wch: 10 }, { wch: 12 },
-    { wch: 11 }, { wch: 10 }, { wch: 12 }, { wch: 11 }, { wch: 24 }, { wch: 16 }, { wch: 12 },
+    { wch: 10 }, { wch: 15 }, { wch: 13 }, { wch: 18 }, { wch: 14 }, { wch: 18 },
+    { wch: 12 }, { wch: 12 }, { wch: 18 }, { wch: 32 }, { wch: 16 }, { wch: 12 },
   ];
   sh["!rows"] = matrix.map((_, index) => ({
-    hpt: index === 0 ? 34 : index === 1 ? 24 : index >= 2 && index <= 4 ? 28 : index === 5 ? 8 : index === 6 ? 34 : regionRows.some((item) => item.row === index) ? 26 : 26,
+    hpt: index === 0 ? 34 : index === 1 ? 30 : index >= 2 && index <= 4 ? 28 : index === 5 ? 8 : index === 6 ? 42 : regionRows.some((item) => item.row === index) ? 26 : 27,
   }));
   sh["!freeze"] = { xSplit: 0, ySplit: 7, topLeftCell: "A8", activePane: "bottomLeft", state: "frozen" };
   sh["!views"] = [{ showGridLines: false, zoomScale: 70, zoomScaleNormal: 70 }];
-  styleDashboardShell(sh, matrix.length, 21, cards, regionRows);
+
+  styleDashboardShell(sh, matrix.length, 19, cards, regionRows);
   applyLegendBlocks(sh, [
-    { row: 3, startCol: 10, endCol: 14, fill: "FFE4F0FF", font: "FF2F75B5" },
-    { row: 3, startCol: 15, endCol: 20, fill: "FFFFE4E6", font: "FFC00000" },
-    { row: 4, startCol: 10, endCol: 14, fill: "FFE2F0D9", font: "FF375623" },
-    { row: 4, startCol: 15, endCol: 20, fill: "FFF3FBF6", font: "FF107C41" },
+    { row: 3, startCol: 10, endCol: 13, fill: "FFDDEBF7", font: "FF1F4E78" },
+    { row: 3, startCol: 14, endCol: 18, fill: "FFF4CCCC", font: "FF9C0006" },
+    { row: 4, startCol: 10, endCol: 13, fill: "FFFFE699", font: "FF9C6500" },
+    { row: 4, startCol: 14, endCol: 18, fill: "FFE2F0D9", font: "FF107C41" },
   ]);
 
   dataRows.forEach((item, index) => {
-    styleCellRange(sh, item.row, 0, item.row, 20, {
+    styleCellRange(sh, item.row, 0, item.row, 18, {
       fill: { patternType: "solid", fgColor: { rgb: index % 2 ? "FFF9FBFD" : "FFFFFFFF" } },
       font: { name: "맑은 고딕", sz: 9, color: { rgb: "FF1F2937" } },
       alignment: { horizontal: "center", vertical: "center", wrapText: true },
       border: thinBorder("FFDCE3EC"),
     });
-    // 전월 사용 후 이번 달로 넘어온 대체·보상 잔여를 파란색 계열로 표시합니다.
-    for (const col of [9, 10, 11]) {
+
+    // 이월·당월 발생·합계
+    for (const col of [8, 9, 10]) {
       const address = XLSX.utils.encode_cell({ r: item.row, c: col });
       if (sh[address]) sh[address].s = {
         ...(sh[address].s || {}),
@@ -1446,36 +1484,53 @@ function buildDayoffSubstituteSheet(workbook, result, ctx, year, monthNo) {
         border: thinBorder("FFDCE3EC"),
       };
     }
-    for (const col of [13, 16]) {
+
+    // 휴무·대체 초과값
+    for (const col of [13, 14]) {
       const address = XLSX.utils.encode_cell({ r: item.row, c: col });
-      if (sh[address]) sh[address].s = {
+      if (!sh[address]) continue;
+      const hasExcess = Number(sh[address].v || 0) > 0;
+      sh[address].s = {
         ...(sh[address].s || {}),
-        fill: { patternType: "solid", fgColor: { rgb: "FFD9EAD3" } },
-        font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: "FF375623" } },
+        fill: { patternType: "solid", fgColor: { rgb: hasExcess ? "FFFFE699" : "FFF3FBF6" } },
+        font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: hasExcess ? "FF9C6500" : "FF107C41" } },
         alignment: { horizontal: "center", vertical: "center" },
         border: thinBorder("FFDCE3EC"),
       };
     }
-    for (const col of [14, 17]) {
-      const address = XLSX.utils.encode_cell({ r: item.row, c: col });
-      if (sh[address] && Number(sh[address].v) > 0) sh[address].s = {
-        ...(sh[address].s || {}),
-        fill: { patternType: "solid", fgColor: { rgb: "FFF4CCCC" } },
-        font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: "FF9C0006" } },
+
+    const remainingAddress = XLSX.utils.encode_cell({ r: item.row, c: 15 });
+    if (sh[remainingAddress]) {
+      const palette = item.combinedRemaining < 0
+        ? { fill: "FFF4CCCC", font: "FF9C0006" }
+        : item.remainingAfterUse < 0
+          ? { fill: "FFFFE699", font: "FF9C6500" }
+          : { fill: "FFE2F0D9", font: "FF107C41" };
+      sh[remainingAddress].s = {
+        ...(sh[remainingAddress].s || {}),
+        fill: { patternType: "solid", fgColor: { rgb: palette.fill } },
+        font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: palette.font } },
         alignment: { horizontal: "center", vertical: "center" },
         border: thinBorder("FFDCE3EC"),
       };
     }
-    const judge = XLSX.utils.encode_cell({ r: item.row, c: 18 });
+
+    const judge = XLSX.utils.encode_cell({ r: item.row, c: 16 });
+    const judgePalette = item.judgmentType === "danger"
+      ? { fill: "FFF4CCCC", font: "FF9C0006" }
+      : item.judgmentType === "adjust"
+        ? { fill: "FFFFE699", font: "FF9C6500" }
+        : { fill: "FFE2F0D9", font: "FF107C41" };
     sh[judge].s = {
       ...(sh[judge].s || {}),
-      fill: { patternType: "solid", fgColor: { rgb: item.short ? "FFF4CCCC" : "FFD9EAD3" } },
-      font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: item.short ? "FF9C0006" : "FF375623" } },
+      fill: { patternType: "solid", fgColor: { rgb: judgePalette.fill } },
+      font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: judgePalette.font } },
       alignment: { horizontal: "center", vertical: "center", wrapText: true },
       border: thinBorder("FFDCE3EC"),
     };
-    const mark = XLSX.utils.encode_cell({ r: item.row, c: 19 });
-    const status = XLSX.utils.encode_cell({ r: item.row, c: 20 });
+
+    const mark = XLSX.utils.encode_cell({ r: item.row, c: 17 });
+    const status = XLSX.utils.encode_cell({ r: item.row, c: 18 });
     const excelRow = item.row + 1;
     sh[mark] = sh[mark] || { t: "s", v: item.resolved ? "O" : "" };
     sh[mark].s = {
@@ -1487,12 +1542,13 @@ function buildDayoffSubstituteSheet(workbook, result, ctx, year, monthNo) {
     };
     sh[status] = {
       t: "s", v: item.resolved ? "처리 완료" : "미처리",
-      f: `IF(OR(UPPER(TRIM(T${excelRow}))="O",T${excelRow}="○",T${excelRow}="ㅇ"),"처리 완료","미처리")`,
+      f: `IF(OR(UPPER(TRIM(R${excelRow}))="O",R${excelRow}="○",R${excelRow}="ㅇ"),"처리 완료","미처리")`,
       s: sh[status]?.s || {},
     };
     applyProcessStatusStyle(sh, status, item.resolved ? "처리 완료" : "미처리");
   });
-  setRef(sh, matrix.length, 21);
+
+  setRef(sh, matrix.length, 19);
   workbook.Sheets["휴무 초과자"] = sh;
   if (!workbook.SheetNames.includes("휴무 초과자")) workbook.SheetNames.push("휴무 초과자");
 }
@@ -2680,7 +2736,7 @@ async function applyLiveEvidenceConditionalFormatting(buffer, result) {
     const configs=[
       ["출근 미등록",[{sqref:"K8:K1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(K8))="O",K8="○",K8="ㅇ")'}]},{sqref:"M8:M1000",rules:[{dxfId:dxf.completed,formula:'$M8="처리 완료"'},{dxfId:dxf.pending,formula:'$M8="미처리"'}]}]],
       ["계획&근태 상이 인원",[{sqref:"M8:M1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(M8))="O",M8="○",M8="ㅇ")'}]},{sqref:"N8:N1000",rules:[{dxfId:dxf.completed,formula:'$N8="처리 완료"'},{dxfId:dxf.pending,formula:'$N8="미처리"'}]}]],
-      ["휴무 초과자",[{sqref:"T8:T1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(T8))="O",T8="○",T8="ㅇ")'}]},{sqref:"U8:U1000",rules:[{dxfId:dxf.completed,formula:'$U8="처리 완료"'},{dxfId:dxf.pending,formula:'$U8="미처리"'}]}]],
+      ["휴무 초과자",[{sqref:"R8:R1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(R8))="O",R8="○",R8="ㅇ")'}]},{sqref:"S8:S1000",rules:[{dxfId:dxf.completed,formula:'$S8="처리 완료"'},{dxfId:dxf.pending,formula:'$S8="미처리"'}]}]],
       ["매니저별 이상 근태",[{sqref:"L8:L1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(L8))="O",L8="○",L8="ㅇ")'}]},{sqref:"M8:M1000",rules:[{dxfId:dxf.completed,formula:'$M8="전달 완료"'},{dxfId:dxf.pending,formula:'$M8="미전달"'}]}]],
       ["해당 월 연차 등록 현황 및 일자",[{sqref:"O8:O1000",rules:[
         {dxfId:dxf.annualApproved,formula:'$O8="승인 완료"'},
