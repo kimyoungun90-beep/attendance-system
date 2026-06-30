@@ -195,7 +195,45 @@ export async function onRequestGet(context) {
       dayoffReplacementCompensationUsed: roundHalf(row.dayoff_replacement_compensation_used),
     };
   }
-  return json({ lotsByEmployee, balances, annualLeaveBefore, currentGrants, settlementGrants, autoUseDates, previousMonth, previousMonthFacts });
+
+  // 월 경계에 걸친 주차를 다음 달 분석에서 이어 계산할 수 있도록
+  // 직전 월의 일별 계획·실제 출근 스냅샷을 함께 내려보냅니다.
+  // 별도 테이블을 만들지 않고 기존 월 마감 employee facts의 daily_statuses_json을 사용합니다.
+  const previousMonthCutoff = closureCutoffByMonth.get(previousMonth) || "";
+  const previousMonthDailyFacts = allFacts
+    .filter((row) => String(row.month || "") === previousMonth)
+    .map((row) => {
+      let dailyStatuses = [];
+      try {
+        const parsed = JSON.parse(row.daily_statuses_json || "[]");
+        if (Array.isArray(parsed)) dailyStatuses = parsed;
+      } catch (_) {
+        dailyStatuses = [];
+      }
+      dailyStatuses = dailyStatuses
+        .filter((item) => /^\d{4}-\d{2}-\d{2}$/.test(String(item?.date || "")))
+        .filter((item) => !previousMonthCutoff || String(item.date) <= previousMonthCutoff)
+        .map((item) => ({
+          date: String(item.date || ""),
+          planStatus: String(item.planStatus || "공백"),
+          hasClockIn: Boolean(item.hasClockIn),
+          actualStatus: String(item.actualStatus || ""),
+          evidenced: Boolean(item.evidenced),
+        }));
+      return {
+        employeeId: normalizeEmployeeId(row.employee_id),
+        name: String(row.employee_name || ""),
+        store: String(row.store || ""),
+        cutoffDate: previousMonthCutoff,
+        dailyStatuses,
+      };
+    })
+    .filter((row) => row.employeeId && row.dailyStatuses.length);
+
+  return json({
+    lotsByEmployee, balances, annualLeaveBefore, currentGrants, settlementGrants, autoUseDates,
+    previousMonth, previousMonthFacts, previousMonthCutoff, previousMonthDailyFacts,
+  });
 }
 
 

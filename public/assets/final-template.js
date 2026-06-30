@@ -47,6 +47,7 @@ export async function buildFinalTemplateWorkbook(result) {
   buildAnnualComparisonSheet(workbook, result, year, monthNo);
   buildIssueSummarySheet(workbook, result, context, year, monthNo);
   buildManagerRequestSheet(workbook, result, year, monthNo);
+  buildWeeklyAttendanceCheckSheet(workbook, result, year, monthNo);
   buildAnnualLedgerSheet(workbook, result, context, year, monthNo);
   buildPersonnelStatusSheet(workbook, result, year, monthNo);
   fillPlanSheet(workbook.Sheets["근무 계획"], result, context, daysInMonth);
@@ -59,6 +60,7 @@ export async function buildFinalTemplateWorkbook(result) {
     "휴무 초과자",
     "전체 요약본",
     "매니저별 이상 근태",
+    "주 근태 확인자",
     "해당 월 연차 등록 현황 및 일자",
     "연차 누적 현황",
     "인력 변동 확인",
@@ -681,6 +683,172 @@ function buildManagerRequestSheet(workbook, result, year, monthNo) {
   setRef(sh, matrix.length, 13);
   workbook.Sheets["매니저별 이상 근태"] = sh;
   if (!workbook.SheetNames.includes("매니저별 이상 근태")) workbook.SheetNames.push("매니저별 이상 근태");
+}
+
+
+function buildWeeklyAttendanceCheckSheet(workbook, result, year, monthNo) {
+  const weekly = result.weeklyAttendanceChecks || { weeks: [], rows: [], highCount: 0, lowCount: 0, partialWeeks: [] };
+  const weeks = weekly.weeks || [];
+  const rows = weekly.rows || [];
+  const regions = ["서울", "경인", "충청", "경북", "경남", "전라"];
+  const weekStartCol = 7;
+  const countCol = weekStartCol + weeks.length;
+  const noteCol = countCol + 1;
+  const colCount = Math.max(14, noteCol + 1);
+  const matrix = Array.from({ length: 7 }, () => Array(colCount).fill(""));
+
+  matrix[0][0] = `${year}년 ${monthNo}월 주 근태 확인자`;
+  matrix[1][0] = "월~일 실제 출근기록을 기준으로 주 6회 이상 또는 주 3회 이하를 확인합니다. 월 경계 주차는 전월 월 마감 일별자료와 합산하며, 끝나지 않은 주차는 누적 중으로 표시합니다.";
+  const completedWeekCount = weeks.filter((week) => !(weekly.partialWeeks || []).includes(week.label)).length;
+  const cards = [
+    [0, "총 확인 인원", `${rows.length}명`],
+    [2, "주 6회 이상", `${Number(weekly.highCount || 0)}명`],
+    [4, "주 3회 이하", `${Number(weekly.lowCount || 0)}명`],
+    [6, "완료 주차", `${completedWeekCount}개`],
+    [8, "누적 중 주차", `${(weekly.partialWeeks || []).length}개`],
+  ];
+  for (const [col, label, value] of cards) { matrix[2][col] = label; matrix[3][col] = value; }
+  matrix[2][10] = "구분 색상 안내";
+  matrix[3][10] = "● 주 6회 이상";
+  matrix[3][12] = "● 주 3회 이하";
+  matrix[4][10] = "● 누적 중 주차";
+  matrix[4][12] = "● 월 경계 누적 완료";
+
+  matrix[6] = ["No", "지역장", "매니저", "지역", "매장명", "이름", "사번"];
+  weeks.forEach((week, index) => {
+    matrix[6][weekStartCol + index] = `${week.label}\n${shortWeekRange(week.startDate, week.endDate)}`;
+  });
+  matrix[6][countCol] = "이상 주차 수";
+  matrix[6][noteCol] = "주차별 계획·근태 비고";
+
+  const regionRows = [];
+  const dataRows = [];
+  let no = 1;
+  for (const region of regions) {
+    const group = rows.filter((row) => row.regionGroup === region);
+    const regionRow = matrix.length;
+    const high = group.filter((row) => row.weekResults.some((week) => week.category === "6회 이상")).length;
+    const low = group.filter((row) => row.weekResults.some((week) => week.category === "3회 이하")).length;
+    const regionData = Array(colCount).fill("");
+    regionData[0] = `▼  ${region} (총 ${group.length}명)`;
+    regionData[Math.min(weekStartCol, colCount - 1)] = `6회 이상 ${high}명  |  3회 이하 ${low}명`;
+    matrix.push(regionData);
+    regionRows.push({ row: regionRow, region });
+
+    for (const row of group) {
+      const values = Array(colCount).fill("");
+      values[0] = no++;
+      values[1] = row.regionalManager || "";
+      values[2] = row.manager || "";
+      values[3] = region;
+      values[4] = row.store || "";
+      values[5] = row.name || "";
+      values[6] = normalizeId(row.employeeId);
+      weeks.forEach((week, index) => {
+        const resultWeek = row.weekResults.find((item) => item.label === week.label);
+        if (resultWeek?.category) values[weekStartCol + index] = `✓ ${resultWeek.category}\n(${resultWeek.attendanceCount}회)`;
+      });
+      values[countCol] = row.flaggedCount || 0;
+      values[noteCol] = row.note || "";
+      const rowIndex = matrix.length;
+      matrix.push(values);
+      dataRows.push({ row: rowIndex, weekResults: row.weekResults || [] });
+    }
+  }
+
+  const sh = XLSX.utils.aoa_to_sheet(matrix);
+  sh["!merges"] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: colCount - 1 } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: colCount - 1 } },
+    { s: { r: 2, c: 0 }, e: { r: 2, c: 1 } }, { s: { r: 3, c: 0 }, e: { r: 4, c: 1 } },
+    { s: { r: 2, c: 2 }, e: { r: 2, c: 3 } }, { s: { r: 3, c: 2 }, e: { r: 4, c: 3 } },
+    { s: { r: 2, c: 4 }, e: { r: 2, c: 5 } }, { s: { r: 3, c: 4 }, e: { r: 4, c: 5 } },
+    { s: { r: 2, c: 6 }, e: { r: 2, c: 7 } }, { s: { r: 3, c: 6 }, e: { r: 4, c: 7 } },
+    { s: { r: 2, c: 8 }, e: { r: 2, c: 9 } }, { s: { r: 3, c: 8 }, e: { r: 4, c: 9 } },
+    { s: { r: 2, c: 10 }, e: { r: 2, c: colCount - 1 } },
+  ];
+  if (colCount >= 14) {
+    sh["!merges"].push(
+      { s: { r: 3, c: 10 }, e: { r: 3, c: 11 } },
+      { s: { r: 3, c: 12 }, e: { r: 3, c: colCount - 1 } },
+      { s: { r: 4, c: 10 }, e: { r: 4, c: 11 } },
+      { s: { r: 4, c: 12 }, e: { r: 4, c: colCount - 1 } },
+    );
+  }
+  for (const item of regionRows) {
+    sh["!merges"].push(
+      { s: { r: item.row, c: 0 }, e: { r: item.row, c: Math.min(6, colCount - 1) } },
+      { s: { r: item.row, c: Math.min(7, colCount - 1) }, e: { r: item.row, c: colCount - 1 } },
+    );
+  }
+
+  sh["!cols"] = [
+    { wch: 6 }, { wch: 11 }, { wch: 11 }, { wch: 9 }, { wch: 18 }, { wch: 11 }, { wch: 13 },
+    ...weeks.map(() => ({ wch: 14 })), { wch: 12 }, { wch: 70 },
+  ];
+  while (sh["!cols"].length < colCount) sh["!cols"].push({ wch: 10 });
+  sh["!rows"] = matrix.map((_, index) => ({
+    hpt: index === 0 ? 34 : index === 1 ? 30 : index >= 2 && index <= 4 ? 28 : index === 5 ? 8 : index === 6 ? 38 : regionRows.some((item) => item.row === index) ? 26 : 48,
+  }));
+  sh["!freeze"] = { xSplit: 0, ySplit: 7, topLeftCell: "A8", activePane: "bottomLeft", state: "frozen" };
+  sh["!views"] = [{ showGridLines: false, zoomScale: 70, zoomScaleNormal: 70 }];
+
+  styleDashboardShell(sh, matrix.length, colCount, cards, regionRows);
+  applyLegendBlocks(sh, [
+    { row: 3, startCol: 10, endCol: 11, fill: "FFF4CCCC", font: "FF9C0006" },
+    { row: 3, startCol: 12, endCol: colCount - 1, fill: "FFFFE699", font: "FF9C6500" },
+    { row: 4, startCol: 10, endCol: 11, fill: "FFDDEBF7", font: "FF1F4E78" },
+    { row: 4, startCol: 12, endCol: colCount - 1, fill: "FFE2F0D9", font: "FF375623" },
+  ]);
+
+  // 끝나지 않은 주차 머리글은 누적 중임을 알 수 있도록 하늘색으로 표시합니다.
+  weeks.forEach((week, index) => {
+    if (!(weekly.partialWeeks || []).includes(week.label)) return;
+    const address = XLSX.utils.encode_cell({ r: 6, c: weekStartCol + index });
+    if (sh[address]) sh[address].s = {
+      ...(sh[address].s || {}),
+      fill: { patternType: "solid", fgColor: { rgb: "FF2F75B5" } },
+      font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: "FFFFFFFF" } },
+      alignment: { horizontal: "center", vertical: "center", wrapText: true },
+      border: thinBorder("FF8EA6C3"),
+    };
+  });
+
+  dataRows.forEach((item, index) => {
+    styleCellRange(sh, item.row, 0, item.row, colCount - 1, {
+      fill: { patternType: "solid", fgColor: { rgb: index % 2 ? "FFF9FBFD" : "FFFFFFFF" } },
+      font: { name: "맑은 고딕", sz: 9, color: { rgb: "FF1F2937" } },
+      alignment: { horizontal: "center", vertical: "center", wrapText: true },
+      border: thinBorder("FFDCE3EC"),
+    });
+    weeks.forEach((week, weekIndex) => {
+      const resultWeek = item.weekResults.find((entry) => entry.label === week.label);
+      const address = XLSX.utils.encode_cell({ r: item.row, c: weekStartCol + weekIndex });
+      if (!sh[address] || !resultWeek?.category) return;
+      const high = resultWeek.category === "6회 이상";
+      sh[address].s = {
+        ...(sh[address].s || {}),
+        fill: { patternType: "solid", fgColor: { rgb: high ? "FFF4CCCC" : "FFFFE699" } },
+        font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: high ? "FF9C0006" : "FF9C6500" } },
+        alignment: { horizontal: "center", vertical: "center", wrapText: true },
+        border: thinBorder("FFDCE3EC"),
+      };
+    });
+    const noteAddress = XLSX.utils.encode_cell({ r: item.row, c: noteCol });
+    if (sh[noteAddress]) sh[noteAddress].s.alignment = { horizontal: "left", vertical: "center", wrapText: true };
+  });
+
+  setRef(sh, matrix.length, colCount);
+  workbook.Sheets["주 근태 확인자"] = sh;
+  if (!workbook.SheetNames.includes("주 근태 확인자")) workbook.SheetNames.push("주 근태 확인자");
+}
+
+function shortWeekRange(startDate, endDate) {
+  const parse = (value) => {
+    const match = String(value || "").match(/^\d{4}-(\d{2})-(\d{2})$/);
+    return match ? `${Number(match[1])}/${Number(match[2])}` : value;
+  };
+  return `${parse(startDate)}~${parse(endDate)}`;
 }
 
 function buildPersonnelStatusSheet(workbook, result, year, monthNo) {
@@ -2761,7 +2929,7 @@ async function applyWorkbookOpenViewSettings(buffer) {
     if (!workbookXml || !relsXml) return buffer;
 
     const frozenDashboardSheets = new Set([
-      "계획&근태 상이 인원", "출근 미등록", "휴무 초과자", "전체 요약본", "매니저별 이상 근태", "해당 월 연차 등록 현황 및 일자", "인력 변동 확인",
+      "계획&근태 상이 인원", "출근 미등록", "휴무 초과자", "전체 요약본", "매니저별 이상 근태", "주 근태 확인자", "해당 월 연차 등록 현황 및 일자", "인력 변동 확인",
     ]);
     const sheetTags = workbookXml.match(/<sheet\b[^>]*\/?\s*>/g) || [];
     const changedPaths = [];

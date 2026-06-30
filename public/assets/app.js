@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=40";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=41";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -286,6 +286,13 @@ async function analyzeFiles() {
       ? compareReferenceFinal(parsedReference, result, targetMonth, cutoffDate, workforce)
       : emptyReferenceComparison();
     const managerRequests = buildManagerRequests(result, annualComparison, workforce, targetMonth, workflowOverrides);
+    const weeklyAttendanceChecks = buildWeeklyAttendanceChecks({
+      employeeFacts: result.employeeFacts || [],
+      previousMonthDailyFacts: state.priorLedger.previousMonthDailyFacts || [],
+      targetMonth,
+      cutoffDate,
+      workforce,
+    });
     state.result = {
       ...result,
       route,
@@ -306,6 +313,7 @@ async function analyzeFiles() {
       personnelChecks: personnelOverrides,
       personnelOverrides: (parsedReference?.personnelOverrides || []).map((item) => ({ ...item, sourceType: "evidence" })),
       managerRequests,
+      weeklyAttendanceChecks,
       analyzedAt: new Date().toISOString(),
       workforce,
     };
@@ -339,6 +347,8 @@ async function loadPriorLedger(route, month) {
       autoUseDates: data.autoUseDates || [],
       previousMonth: data.previousMonth || "",
       previousMonthFacts: data.previousMonthFacts || {},
+      previousMonthCutoff: data.previousMonthCutoff || "",
+      previousMonthDailyFacts: data.previousMonthDailyFacts || [],
     };
   } catch (error) {
     showToast(`${error.message}. 이번 분석은 저장된 이전 월 누적을 제외하고 계산합니다.`);
@@ -347,7 +357,10 @@ async function loadPriorLedger(route, month) {
 }
 
 function emptyLedger() {
-  return { lotsByEmployee: {}, annualLeaveBefore: {}, currentGrants: [], settlementGrants: [], autoUseDates: [], previousMonth: "", previousMonthFacts: {} };
+  return {
+    lotsByEmployee: {}, annualLeaveBefore: {}, currentGrants: [], settlementGrants: [], autoUseDates: [],
+    previousMonth: "", previousMonthFacts: {}, previousMonthCutoff: "", previousMonthDailyFacts: [],
+  };
 }
 
 async function fileToWorkbookSheets(file) {
@@ -1529,6 +1542,159 @@ function buildManagerRequests(result, annualComparison, workforce, targetMonth, 
       message: `${manager} 매니저님, ${store} ${name} 상담사의 ${group.issues.join(", ")} 항목이 확인됩니다. 근무계획·근태·연차 신청내역 확인 후 수정 바랍니다.`,
     };
   }).sort((a, b) => a.regionalManager.localeCompare(b.regionalManager, "ko") || a.manager.localeCompare(b.manager, "ko") || a.store.localeCompare(b.store, "ko") || a.name.localeCompare(b.name, "ko"));
+}
+
+
+function buildWeeklyAttendanceChecks({ employeeFacts = [], previousMonthDailyFacts = [], targetMonth, cutoffDate, workforce }) {
+  const weeks = weeksOverlappingMonth(targetMonth);
+  const workforceMap = workforceMetaMap(workforce);
+  const dailyByEmployee = new Map();
+  const employees = new Map();
+
+  const addDaily = (employeeIdValue, daily, fallback = {}) => {
+    const employeeId = normalizeEmployeeId(employeeIdValue);
+    const date = String(daily?.date || "");
+    if (!employeeId || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return;
+    if (!dailyByEmployee.has(employeeId)) dailyByEmployee.set(employeeId, new Map());
+    dailyByEmployee.get(employeeId).set(date, {
+      date,
+      planStatus: normalizePlanCode(daily?.planStatus || "공백"),
+      hasClockIn: Boolean(daily?.hasClockIn),
+      actualStatus: String(daily?.actualStatus || ""),
+      evidenced: Boolean(daily?.evidenced),
+    });
+    if (!employees.has(employeeId)) employees.set(employeeId, { employeeId, name: fallback.name || "", store: fallback.store || "" });
+  };
+
+  for (const fact of previousMonthDailyFacts || []) {
+    for (const daily of fact.dailyStatuses || []) addDaily(fact.employeeId, daily, fact);
+  }
+  for (const fact of employeeFacts || []) {
+    const employeeId = normalizeEmployeeId(fact.employeeId);
+    if (!employeeId) continue;
+    employees.set(employeeId, { employeeId, name: fact.name || "", store: fact.store || "" });
+    for (const daily of fact.dailyStatuses || []) addDaily(employeeId, daily, fact);
+  }
+
+  const rows = [];
+  for (const [employeeId, employee] of employees.entries()) {
+    // 대상 월 근무계획에 존재하는 직원만 시트에 포함합니다.
+    if (!(employeeFacts || []).some((fact) => normalizeEmployeeId(fact.employeeId) === employeeId)) continue;
+    const dailyMap = dailyByEmployee.get(employeeId) || new Map();
+    const meta = workforceMap.get(employeeId) || {};
+    const weekResults = [];
+    for (const week of weeks) {
+      const dates = datesBetween(week.startDate, week.endDate);
+      const available = dates.map((date) => dailyMap.get(date)).filter(Boolean);
+      const counted = available.filter((daily) => daily.date <= cutoffDate && daily.hasClockIn).length;
+      const observedDays = available.filter((daily) => daily.date <= cutoffDate).length;
+      const weekFinished = cutoffDate >= week.endDate;
+      const fullCoverage = available.length === 7;
+      let category = "";
+      if (counted >= 6) category = "6회 이상";
+      else if (weekFinished && fullCoverage && counted <= 3) category = "3회 이하";
+      const planSequence = dates.map((date) => weeklyDisplayStatus(dailyMap.get(date), date, cutoffDate));
+      weekResults.push({
+        ...week,
+        attendanceCount: counted,
+        observedDays,
+        fullCoverage,
+        weekFinished,
+        category,
+        note: `${week.label}(${formatKoreanDate(week.startDate)}~${formatKoreanDate(week.endDate)}) ${planSequence.join(" / ")}`,
+      });
+    }
+    const flagged = weekResults.filter((week) => week.category);
+    if (!flagged.length) continue;
+    rows.push({
+      employeeId,
+      name: meta.name || employee.name || "",
+      store: meta.store || employee.store || "",
+      regionalManager: meta.regionalManager || "",
+      manager: meta.manager || "",
+      region: meta.region || "",
+      regionGroup: normalizeDashboardRegion(meta.region || "", meta.store || employee.store || ""),
+      weekResults,
+      flaggedCount: flagged.length,
+      note: flagged.map((week) => week.note).join("\n"),
+    });
+  }
+
+  const regionOrder = ["서울", "경인", "충청", "경북", "경남", "전라"];
+  rows.sort((a, b) => regionOrder.indexOf(a.regionGroup) - regionOrder.indexOf(b.regionGroup)
+    || String(a.manager).localeCompare(String(b.manager), "ko")
+    || String(a.store).localeCompare(String(b.store), "ko")
+    || String(a.name).localeCompare(String(b.name), "ko"));
+
+  return {
+    weeks,
+    rows,
+    highCount: rows.filter((row) => row.weekResults.some((week) => week.category === "6회 이상")).length,
+    lowCount: rows.filter((row) => row.weekResults.some((week) => week.category === "3회 이하")).length,
+    partialWeeks: weeks.filter((week) => cutoffDate < week.endDate).map((week) => week.label),
+  };
+}
+
+function weeksOverlappingMonth(targetMonth) {
+  const [year, month] = String(targetMonth || "").split("-").map(Number);
+  if (!year || !month) return [];
+  const monthStart = new Date(Date.UTC(year, month - 1, 1));
+  const monthEnd = new Date(Date.UTC(year, month, 0));
+  let cursor = mondayOfUtcDate(monthStart);
+  const lastMonday = mondayOfUtcDate(monthEnd);
+  const weeks = [];
+  while (cursor <= lastMonday) {
+    const end = new Date(cursor); end.setUTCDate(end.getUTCDate() + 6);
+    weeks.push({
+      label: `W${String(isoWeekNumber(cursor)).padStart(2, "0")}`,
+      startDate: utcDateText(cursor),
+      endDate: utcDateText(end),
+    });
+    cursor = new Date(cursor); cursor.setUTCDate(cursor.getUTCDate() + 7);
+  }
+  return weeks;
+}
+
+function mondayOfUtcDate(date) {
+  const result = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const day = result.getUTCDay() || 7;
+  result.setUTCDate(result.getUTCDate() - day + 1);
+  return result;
+}
+
+function isoWeekNumber(date) {
+  const target = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const dayNumber = target.getUTCDay() || 7;
+  target.setUTCDate(target.getUTCDate() + 4 - dayNumber);
+  const yearStart = new Date(Date.UTC(target.getUTCFullYear(), 0, 1));
+  return Math.ceil((((target - yearStart) / 86400000) + 1) / 7);
+}
+
+function utcDateText(date) {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
+}
+
+function datesBetween(startDate, endDate) {
+  const dates = [];
+  let cursor = new Date(`${startDate}T00:00:00Z`);
+  const end = new Date(`${endDate}T00:00:00Z`);
+  while (cursor <= end) {
+    dates.push(utcDateText(cursor));
+    cursor = new Date(cursor); cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return dates;
+}
+
+function weeklyDisplayStatus(daily, date, cutoffDate) {
+  if (!daily) return "미집계";
+  if (date <= cutoffDate && daily.hasClockIn) return "출근";
+  const planStatus = normalizePlanCode(daily.planStatus || "공백");
+  return planStatus || "공백";
+}
+
+function formatKoreanDate(dateText) {
+  const [, month, day] = String(dateText || "").match(/^\d{4}-(\d{2})-(\d{2})$/) || [];
+  return month && day ? `${Number(month)}월 ${Number(day)}일` : dateText;
 }
 
 function normalizeWorkbookInput(value) {
