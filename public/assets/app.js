@@ -853,14 +853,22 @@ function compareAnnualApplications(parsed, plan, attendance, targetMonth, cutoff
     const plannedAnnual = annualLeaveValue(planStatus) > 0;
     const planKind = annualLeaveValue(planStatus) === 0.5 ? "반차" : planStatus === "연차" ? "연차" : "";
     const approved = hasApplication && isApprovedAnnualApplication({ applicationStatus, requestedKind });
-    if (plannedAnnual && hasApplication && requestedKind === planKind && approved && !hasClockIn) {
-      return { category: "동일", result: "계획·신청 동일", needsReview: false, sortOrder: 1 };
+    const sameApproved = plannedAnnual && hasApplication && requestedKind === planKind && approved;
+
+    if (sameApproved && planKind === "연차" && !hasClockIn) {
+      return { category: "동일", result: "계획 연차 / 신청 연차 동일", needsReview: false, sortOrder: 1 };
+    }
+    if (sameApproved && planKind === "반차" && hasClockIn) {
+      return { category: "동일", result: "계획 반차 / 신청 반차 동일(출근기록 있음)", needsReview: false, sortOrder: 1 };
     }
     if (plannedAnnual && hasClockIn) {
-      return { category: "계획 연차·출근", result: "계획 연차·반차이나 출근기록 있음", needsReview: true, sortOrder: 3 };
+      return { category: "계획 연차·출근", result: planKind === "반차" ? "계획 반차인데 출근기록 있음(정상 여부 확인)" : "계획 연차인데 출근기록 있음", needsReview: true, sortOrder: 3 };
     }
     if (plannedAnnual && !hasApplication) {
       return { category: "계획 연차·신청 없음", result: "계획 연차·반차 / 신청내역 없음", needsReview: true, sortOrder: 2 };
+    }
+    if (plannedAnnual && hasApplication && (!approved || requestedKind !== planKind)) {
+      return { category: "계획 연차·신청 다름", result: `계획 ${planStatus} / 신청서 ${requestedKind}`, needsReview: true, sortOrder: 2 };
     }
     if (planStatus === "공백" && hasApplication) {
       return { category: "계획 공백·신청 있음", result: `계획 공백 / 신청서 ${requestedKind}`, needsReview: true, sortOrder: 4 };
@@ -1474,7 +1482,7 @@ function buildManagerRequests(result, annualComparison, workforce, targetMonth, 
       regionalManager: meta.regionalManager || "", manager, region: meta.region || "", store, employeeId, name,
       issueCount: group.issues.length, issueText: group.issues.join(" / "), delivered,
       status: delivered ? "전달 완료" : "미전달",
-      message: `${manager} 매니저님, ${store} ${name} 상담사(${employeeId})의 ${group.issues.join(", ")} 항목이 확인됩니다. 근무계획·근태·연차 신청내역 확인 후 수정 바랍니다.`,
+      message: `${manager} 매니저님, ${store} ${name} 상담사의 ${group.issues.join(", ")} 항목이 확인됩니다. 근무계획·근태·연차 신청내역 확인 후 수정 바랍니다.`,
     };
   }).sort((a, b) => a.regionalManager.localeCompare(b.regionalManager, "ko") || a.manager.localeCompare(b.manager, "ko") || a.store.localeCompare(b.store, "ko") || a.name.localeCompare(b.name, "ko"));
 }
