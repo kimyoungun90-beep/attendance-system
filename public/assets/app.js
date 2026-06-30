@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=41";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=43";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -267,6 +267,9 @@ async function analyzeFiles() {
     state.priorLedger = await loadPriorLedger(route, targetMonth);
 
     const parsedReference = referenceWorkbook ? parseReferenceFinalWorkbook(referenceWorkbook, targetMonth, route) : null;
+    const finalCorrectionSummary = parsedReference?.month === targetMonth
+      ? applyReferenceDailyCorrections(plan, attendance, parsedReference, targetMonth, cutoffDate)
+      : { appliedCount: 0, clockCount: 0, statusCount: 0, clearedCount: 0 };
     const evidenceOverrides = parsedReference?.evidenceKeys || [];
     const workflowOverrides = parsedReference?.workflowOverrides || emptyWorkflowOverrides();
     const personnelOverrides = mergePersonnelOverrides(personnelCheckData?.items || [], parsedReference?.personnelOverrides || [], targetMonth, route);
@@ -274,7 +277,7 @@ async function analyzeFiles() {
     const result = compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, ledger: state.priorLedger, evidenceKeys: evidenceOverrides });
     appendWorkforceMatchingIssues(result, workforce, plan, route, targetMonth, excludedPersonnelIds);
     applyEvidenceOverrides(result, evidenceOverrides);
-    applyWorkflowOverrides(result, workflowOverrides);
+    applyWorkflowOverrides(result, workflowOverrides, { route, targetMonth });
     const parsedAnnual = annualWorkbook
       ? parseAnnualApplications(annualWorkbook, targetMonth)
       : annualApplicationsToParsed(annualLedger?.applications || [], targetMonth);
@@ -308,6 +311,7 @@ async function analyzeFiles() {
       annualLedger: annualLedger || null,
       annualApplications: parsedAnnual?.rows || [],
       referenceComparison,
+      finalCorrectionSummary,
       evidenceOverrides,
       workflowOverrides,
       personnelChecks: personnelOverrides,
@@ -319,7 +323,10 @@ async function analyzeFiles() {
     };
 
     renderResult();
-    showToast(`분석 완료: 출근기록 없음 ${result.missingRows.length}건 · 휴무·휴가 출근 ${result.unexpectedRows.length}건 · 불일치 ${result.mismatchRows.length}건`);
+    const correctionMessage = finalCorrectionSummary.appliedCount
+      ? ` · 수정 최종본 ${finalCorrectionSummary.appliedCount}건 재반영`
+      : "";
+    showToast(`분석 완료: 출근기록 없음 ${result.missingRows.length}건 · 휴무·휴가 출근 ${result.unexpectedRows.length}건 · 불일치 ${result.mismatchRows.length}건${correctionMessage}`);
   } catch (error) {
     console.error(error);
     showToast(error.message || "분석 중 오류가 발생했습니다.");
@@ -429,10 +436,6 @@ function tryParsePlanSheet(sheet, targetMonth) {
     employment: findHeaderIndex(headers, ["재직상태", "근무상태", "재직여부"]),
   };
 
-  if (columns.store < 0 && headers.length > 0) columns.store = 0;
-  if (columns.employeeId < 0 && headers.length > 1) columns.employeeId = 1;
-  if (columns.name < 0 && headers.length > 3) columns.name = 3;
-
   const dayColumns = new Map();
   rawHeaders.forEach((header, index) => {
     const day = parsePlanHeaderDay(header, targetMonth);
@@ -506,12 +509,6 @@ function tryParseAttendanceSheet(sheet, targetMonth) {
       "근무구분", "실제근무구분", "(실제)근태", "처리근태",
     ]),
   };
-
-  // 사용 중인 근태표의 고정 구조(A 이름, B 근무일자, C 출근시간, D 사번, E 퇴근시간) 보조 인식.
-  if (columns.name < 0 && headers.length > 0) columns.name = 0;
-  if (columns.date < 0 && headers.length > 1) columns.date = 1;
-  if (columns.actualIn < 0 && headers.length > 2) columns.actualIn = 2;
-  if (columns.employeeId < 0 && headers.length > 3) columns.employeeId = 3;
 
   if (columns.date < 0 || columns.employeeId < 0) throw new Error("날짜 또는 사번 열 없음");
   if (columns.actualIn < 0 && columns.changedIn < 0 && columns.actualStatus < 0) throw new Error("출근시간 또는 실제 근태 열 없음");
@@ -1013,10 +1010,138 @@ function parseReferenceFinalWorkbook(sheets, targetMonth = "", defaultRoute = ""
     values,
     employeeCount: employees.size,
     evidenceKeys: parseEvidenceOverrides(normalizedSheets),
-    workflowOverrides: parseWorkflowOverrides(normalizedSheets),
+    workflowOverrides: parseWorkflowOverrides(normalizedSheets, targetMonth || month, defaultRoute),
     personnelOverrides: parsePersonnelOverridesFromWorkbook(normalizedSheets, targetMonth || month, defaultRoute),
     sheetNames: normalizedSheets.map((sheet) => sheet.sheetName),
   };
+}
+
+
+function isClockDisplayValue(value) {
+  const raw = text(value).trim();
+  return /^\d{1,2}:\d{2}(?::\d{2})?$/.test(raw);
+}
+
+function effectiveClockValue(attendanceValue) {
+  return cleanClockValue(attendanceValue?.actualIn) || cleanClockValue(attendanceValue?.changedIn) || "";
+}
+
+function finalComparableDisplay(value) {
+  const raw = text(value).trim();
+  if (!raw) return "";
+  if (isClockDisplayValue(raw)) return raw.slice(0, 5);
+  const normalized = normalizeActualCode(raw);
+  if (comparableCode(normalized) === "근무") return "출근";
+  return normalized || raw;
+}
+
+function generatedDailyDisplay(planStatus, attendanceValue) {
+  const clock = effectiveClockValue(attendanceValue);
+  if (attendanceValue?.hasClockIn) return clock || "출근";
+  const actual = normalizeActualCode(attendanceValue?.actualStatus);
+  if (actual) return comparableCode(actual) === "근무" ? "출근" : actual;
+  if (planStatus === "공백") return "출ㆍ계 미입력";
+  if (["근무", "근무A", "근무B", "근무C", "교육", "오전반차", "오후반차"].includes(planStatus)) return "출근 미입력";
+  return planStatus;
+}
+
+function chooseReferencePlanRow(plans, referenceItem, attendanceValue) {
+  if (!Array.isArray(plans) || plans.length <= 1) return plans?.[0] || null;
+  const candidates = [referenceItem?.store, attendanceValue?.location].map(normalizeStore).filter(Boolean);
+  for (const candidate of candidates) {
+    const matched = plans.find((row) => {
+      const store = normalizeStore(row?.store);
+      return store && (store.includes(candidate) || candidate.includes(store));
+    });
+    if (matched) return matched;
+  }
+  return plans[0];
+}
+
+function applyReferenceDailyCorrections(plan, attendance, reference, targetMonth, cutoffDate) {
+  const planRowsById = groupBy(plan.rows || [], (row) => normalizeEmployeeId(row.employeeId));
+  const attendanceMap = buildAttendanceMap(attendance.rows || []);
+  const replacementByKey = new Map();
+  const summary = { appliedCount: 0, clockCount: 0, statusCount: 0, clearedCount: 0 };
+
+  for (const [key, item] of reference.values || []) {
+    const [employeeIdRaw, date] = String(key).split("|");
+    const employeeId = normalizeEmployeeId(employeeIdRaw);
+    if (!employeeId || !date?.startsWith(`${targetMonth}-`)) continue;
+    const day = Number(date.slice(-2));
+    const plans = planRowsById.get(employeeId) || [];
+    if (!plans.length || !day) continue;
+
+    const currentAttendance = attendanceMap.get(`${employeeId}|${date}`) || emptyAttendanceValue();
+    const selectedPlan = chooseReferencePlanRow(plans, item, currentAttendance);
+    if (!selectedPlan) continue;
+    const currentPlan = normalizePlanCode(selectedPlan?.plans?.[day]);
+    const generated = finalComparableDisplay(generatedDailyDisplay(currentPlan, currentAttendance));
+    const rawReference = text(item?.value).trim();
+    const referenceDisplay = finalComparableDisplay(rawReference);
+    if (rawReference === "#NAME?") continue;
+
+    // v42 최종본의 기존 "출근" 표시는 원본의 실제 출근시간과 동일한 정상 출근으로 봅니다.
+    // 따라서 단순 재등록만으로 실제 시간이 "출근"으로 되돌아가지 않으며, 사용자가 시간을 직접 고친 경우만 확정값으로 반영됩니다.
+    if (!isClockDisplayValue(rawReference) && comparableCode(normalizeActualCode(rawReference)) === "근무" && currentAttendance.hasClockIn) continue;
+    if (generated === referenceDisplay) continue;
+
+    // 미입력 문구는 오류를 그대로 유지하기 위한 표시이므로 확정값으로 덮어쓰지 않습니다.
+    if (rawReference.includes("미입력")) continue;
+
+    const normalized = normalizeActualCode(rawReference);
+    const clockValue = isClockDisplayValue(rawReference) ? rawReference.slice(0, 5) : "";
+    let forceClockIn = false;
+    let finalDisplay = rawReference;
+    let finalPlan = currentPlan;
+    let actualStatus = "";
+
+    if (clockValue || comparableCode(normalized) === "근무") {
+      forceClockIn = true;
+      finalDisplay = clockValue || "출근";
+      actualStatus = "출근";
+      summary.clockCount += 1;
+    } else if (["오전반차", "오후반차", "반일근무"].includes(normalized)) {
+      finalPlan = normalized === "반일근무" ? "오전반차" : normalized;
+      forceClockIn = true;
+      finalDisplay = normalized;
+      actualStatus = normalized;
+      summary.statusCount += 1;
+    } else if (normalized) {
+      finalPlan = normalized;
+      forceClockIn = false;
+      finalDisplay = normalized;
+      actualStatus = normalized;
+      summary.statusCount += 1;
+    } else {
+      finalPlan = "공백";
+      forceClockIn = false;
+      finalDisplay = "";
+      summary.clearedCount += 1;
+    }
+
+    selectedPlan.plans[day] = finalPlan === "공백" ? "" : finalPlan;
+    replacementByKey.set(`${employeeId}|${date}`, {
+      employeeId,
+      name: item?.name || selectedPlan?.name || "",
+      date,
+      actualIn: clockValue,
+      changedIn: "",
+      location: item?.store || selectedPlan?.store || "",
+      actualStatus,
+      finalOverride: true,
+      forceClockIn,
+      finalDisplay,
+    });
+    summary.appliedCount += 1;
+  }
+
+  if (replacementByKey.size) {
+    attendance.rows = (attendance.rows || []).filter((row) => !replacementByKey.has(`${normalizeEmployeeId(row.employeeId)}|${row.date}`));
+    attendance.rows.push(...replacementByKey.values());
+    attendance.hasActualStatusColumn = true;
+  }
+  return summary;
 }
 
 
@@ -1086,6 +1211,7 @@ function parseFinalLeaveImportWorkbook(sheets, targetMonth, route) {
       basicDayoffDates: [],
       substituteEvents: [],
       compensationEvents: [],
+      annualLeaveEvents: [],
       workedDates: [],
       dailyStatuses: [],
       importedOpeningBalancePresent: false,
@@ -1104,12 +1230,16 @@ function parseFinalLeaveImportWorkbook(sheets, targetMonth, route) {
       const hasClockIn = finalImportWorkedValue(rawValue, normalized);
       const substituteDays = substitutePlanValue(normalized);
       const compensationDays = compensationPlanValue(normalized);
+      const annualDays = annualLeaveValue(normalized);
       if (normalized === "휴무") current.basicDayoffDates.push(date);
       if (substituteDays > 0) current.substituteEvents.push({
         date, days: substituteDays, source: "이전 최종본 상담사근태", planStatus: normalized,
       });
       if (compensationDays > 0) current.compensationEvents.push({
         date, days: compensationDays, source: "이전 최종본 상담사근태", planStatus: normalized,
+      });
+      if (annualDays > 0) current.annualLeaveEvents.push({
+        date, days: annualDays, source: "이전 최종본 상담사근태", planStatus: normalized,
       });
       if (hasClockIn) current.workedDates.push(date);
       current.dailyStatuses.push({
@@ -1149,10 +1279,10 @@ function parseFinalLeaveImportWorkbook(sheets, targetMonth, route) {
       substituteNeeded,
       compensationLeaveUsed: compensationNeeded,
       compensationNeeded,
-      annualLeaveUsed: 0,
+      annualLeaveUsed: roundHalf(row.annualLeaveEvents.reduce((sum, event) => sum + Number(event.days || 0), 0)),
       substituteEvents: dedupeUsageEvents(row.substituteEvents),
       compensationEvents: dedupeUsageEvents(row.compensationEvents),
-      annualLeaveEvents: [],
+      annualLeaveEvents: dedupeUsageEvents(row.annualLeaveEvents),
       workedDates: [...new Set(row.workedDates)].sort(),
       occurrenceSubstituteDates: [],
       occurrenceRestDays: 0,
@@ -1201,6 +1331,7 @@ function finalImportWorkedValue(rawValue, normalizedValue) {
   if (!raw || raw === "#NAME?" || raw === "미입력" || raw.includes("미입력")) return false;
   if (substitutePlanValue(normalizedValue) > 0 || compensationPlanValue(normalizedValue) > 0) return false;
   if (["휴무", "연차", "공가", "휴가", "무급휴가", "경조"].includes(normalizedValue)) return false;
+  if (["오전반차", "오후반차", "반일근무"].includes(normalizedValue)) return true;
   if (/^\d{1,2}:\d{2}(?::\d{2})?$/.test(raw)) return true;
   return comparableCode(normalizedValue) === "근무";
 }
@@ -1278,18 +1409,41 @@ function parseEvidenceOverrides(sheets) {
 }
 
 function emptyWorkflowOverrides() {
-  return { planMismatchCompletedKeys: [], dayoffCompletedIds: [], managerDeliveredIds: [] };
+  return {
+    resolvedIssueKeys: [],
+    planMismatchCompletedKeys: [],
+    dayoffCompletedKeys: [],
+    dayoffCompletedIds: [],
+    managerDeliveredIds: [],
+  };
 }
 
 function isWorkflowApproved(value) {
   const mark = String(value ?? "").trim().toUpperCase().replace(/\s+/g, "");
-  return ["O", "○", "ㅇ", "Y", "YES", "TRUE", "완료", "처리완료", "전달완료"].includes(mark);
+  return ["O", "○", "ㅇ", "Y", "YES", "TRUE", "완료", "처리완료", "전달완료", "증빙완료"].includes(mark);
 }
 
-function parseWorkflowOverrides(sheets) {
+function workflowIssueType(value, planStatus = "") {
+  const raw = `${value || ""} ${planStatus || ""}`.replace(/\s+/g, "");
+  if (raw.includes("출근미입력") || raw.includes("근무인데출근기록없음") || raw.includes("근무계획·출근기록없음")) return "missing_clock_in";
+  if (raw.includes("휴무·휴가인데출근기록있음") || raw.includes("출근기록있음")) return "unexpected_clock_in";
+  return "mismatch";
+}
+
+function isDayoffLinkedPlan(value) {
+  const raw = normalizeActualCode(value);
+  return raw === "휴무" || substitutePlanValue(raw) > 0 || compensationPlanValue(raw) > 0;
+}
+
+function parseWorkflowOverrides(sheets, targetMonth = "", defaultRoute = "") {
   const result = emptyWorkflowOverrides();
-  const planSet = new Set(); const dayoffSet = new Set(); const managerSet = new Set();
-  const scan = (pattern, markNames, handler) => {
+  const issueSet = new Set();
+  const planSet = new Set();
+  const dayoffKeySet = new Set();
+  const dayoffIdSet = new Set();
+  const managerSet = new Set();
+
+  const scanSheet = (pattern, markNames, handler) => {
     for (const sheet of (sheets || []).filter((item) => pattern.test(String(item.sheetName || "")))) {
       const matrix = sheet.matrix || [];
       const headerIndex = findFlexibleHeaderRow(matrix, (headers) => findHeaderIndex(headers, ["사번", "사원번호", "제니엘사번"]) >= 0 && findHeaderIndex(headers, markNames) >= 0);
@@ -1298,26 +1452,82 @@ function parseWorkflowOverrides(sheets) {
       const idCol = findHeaderIndex(headers, ["사번", "사원번호", "제니엘사번"]);
       const dateCol = findHeaderIndex(headers, ["발생일", "근무일자", "일자", "날짜"]);
       const markCol = findHeaderIndex(headers, markNames);
+      const typeCol = findHeaderIndex(headers, ["구분", "대조구분", "판정", "결과"]);
+      const planCol = findHeaderIndex(headers, ["근무계획", "계획", "계획근태"]);
       for (const row of matrix.slice(headerIndex + 1)) {
         const employeeId = normalizeEmployeeId(row[idCol]);
         if (!looksLikeEmployeeId(employeeId) || !isWorkflowApproved(row[markCol])) continue;
-        handler(employeeId, dateCol >= 0 ? parseReferenceFinalDate(row[dateCol]) : "");
+        handler({
+          employeeId,
+          date: dateCol >= 0 ? parseReferenceFinalDate(row[dateCol]) : "",
+          typeText: typeCol >= 0 ? text(row[typeCol]) : "",
+          planStatus: planCol >= 0 ? text(row[planCol]) : "",
+        });
       }
     }
   };
-  scan(/계획.*근태.*상이/, ["처리여부(O입력)", "처리여부(O 입력)", "처리체크", "완료여부", "처리완료"], (id, date) => { if (date) planSet.add(`${id}|${date}`); });
-  scan(/휴무\s*초과/, ["처리여부(O입력)", "처리여부(O 입력)", "처리체크", "완료여부", "처리완료"], (id) => dayoffSet.add(id));
-  scan(/매니저별.*이상.*근태/, ["전달체크(O입력)", "전달체크(O 입력)", "전달체크", "전달여부", "전달완료"], (id) => managerSet.add(id));
-  result.planMismatchCompletedKeys = [...planSet]; result.dayoffCompletedIds = [...dayoffSet]; result.managerDeliveredIds = [...managerSet];
+
+  scanSheet(/출근\s*미등록|증빙/, ["증빙여부(O입력)", "증빙여부(O 입력)", "증빙여부", "출근증빙", "증빙"], ({ employeeId, date }) => {
+    if (!date) return;
+    const dailyKey = `${employeeId}|${date}`;
+    planSet.add(dailyKey);
+    issueSet.add(`${dailyKey}|missing_clock_in`);
+  });
+
+  scanSheet(/계획.*근태.*상이/, ["처리여부(O입력)", "처리여부(O 입력)", "처리체크", "완료여부", "처리완료"], ({ employeeId, date, typeText, planStatus }) => {
+    if (!date) return;
+    const dailyKey = `${employeeId}|${date}`;
+    const issueType = workflowIssueType(typeText, planStatus);
+    planSet.add(dailyKey);
+    issueSet.add(`${dailyKey}|${issueType}`);
+    if (isDayoffLinkedPlan(planStatus) && targetMonth && defaultRoute) {
+      dayoffKeySet.add(`${employeeId}|${defaultRoute}|${targetMonth}`);
+      dayoffIdSet.add(employeeId);
+    }
+  });
+
+  scanSheet(/휴무\s*초과/, ["처리여부(O입력)", "처리여부(O 입력)", "처리체크", "완료여부", "처리완료"], ({ employeeId }) => {
+    dayoffIdSet.add(employeeId);
+    if (targetMonth && defaultRoute) dayoffKeySet.add(`${employeeId}|${defaultRoute}|${targetMonth}`);
+  });
+
+  scanSheet(/매니저별.*이상.*근태/, ["전달체크(O입력)", "전달체크(O 입력)", "전달체크", "전달여부", "전달완료"], ({ employeeId }) => managerSet.add(employeeId));
+
+  result.resolvedIssueKeys = [...issueSet];
+  result.planMismatchCompletedKeys = [...planSet];
+  result.dayoffCompletedKeys = [...dayoffKeySet];
+  result.dayoffCompletedIds = [...dayoffIdSet];
+  result.managerDeliveredIds = [...managerSet];
   return result;
 }
 
-function applyWorkflowOverrides(result, overrides = emptyWorkflowOverrides()) {
-  const planSet = new Set(overrides.planMismatchCompletedKeys || []);
-  const dayoffSet = new Set((overrides.dayoffCompletedIds || []).map(normalizeEmployeeId));
-  for (const row of result.mismatchRows || []) row.resolved = planSet.has(`${normalizeEmployeeId(row.employeeId)}|${row.date}`);
-  for (const row of result.employeeSummaries || []) row.dayoffResolved = dayoffSet.has(normalizeEmployeeId(row.employeeId));
-  for (const row of result.employeeFacts || []) row.dayoffResolved = dayoffSet.has(normalizeEmployeeId(row.employeeId));
+function applyWorkflowOverrides(result, overrides = emptyWorkflowOverrides(), context = {}) {
+  const issueSet = new Set(overrides.resolvedIssueKeys || []);
+  const legacyDailySet = new Set(overrides.planMismatchCompletedKeys || []);
+  const dayoffKeySet = new Set(overrides.dayoffCompletedKeys || []);
+  const dayoffIdSet = new Set((overrides.dayoffCompletedIds || []).map(normalizeEmployeeId));
+  const route = context.route || result.route || "";
+  const targetMonth = context.targetMonth || result.targetMonth || "";
+  const useLegacyDayoffIds = dayoffKeySet.size === 0;
+  const issueKeyOf = (row) => `${normalizeEmployeeId(row.employeeId)}|${row.date}|${row.issueType || "mismatch"}`;
+  const dailyKeyOf = (row) => `${normalizeEmployeeId(row.employeeId)}|${row.date}`;
+  const useLegacyDailyKeys = issueSet.size === 0;
+  const isResolved = (row) => issueSet.has(issueKeyOf(row)) || (useLegacyDailyKeys && legacyDailySet.has(dailyKeyOf(row)));
+  const isDayoffResolved = (row) => {
+    const employeeId = normalizeEmployeeId(row.employeeId);
+    return dayoffKeySet.has(`${employeeId}|${route}|${targetMonth}`) || (useLegacyDayoffIds && dayoffIdSet.has(employeeId));
+  };
+
+  result.missingRows = (result.missingRows || []).filter((row) => !isResolved(row));
+  result.unexpectedRows = (result.unexpectedRows || []).filter((row) => !isResolved(row) && !(isDayoffResolved(row) && isDayoffLinkedPlan(row.planStatus)));
+  result.mismatchRows = (result.mismatchRows || []).filter((row) => !isResolved(row) && !(isDayoffResolved(row) && isDayoffLinkedPlan(row.planStatus)));
+  for (const row of result.employeeSummaries || []) row.dayoffResolved = isDayoffResolved(row);
+  for (const row of result.employeeFacts || []) row.dayoffResolved = isDayoffResolved(row);
+  result.dayoffExcessRows = (result.dayoffExcessRows || []).filter((row) => !isDayoffResolved(row));
+  result.missingPeople = uniquePeople(result.missingRows);
+  result.unexpectedPeople = uniquePeople(result.unexpectedRows);
+  result.mismatchPeople = uniquePeople(result.mismatchRows);
+  result.dayoffExcessPeople = result.dayoffExcessRows.length;
   result.workflowOverrides = overrides;
   return result;
 }
@@ -1382,18 +1592,28 @@ function applyEvidenceOverrides(result, evidenceKeys = []) {
 function finalDisplayValue(planStatus, attendanceValue) {
   const planMissing = planStatus === "공백";
   const clockMissing = !attendanceValue?.hasClockIn;
+  const clock = effectiveClockValue(attendanceValue);
+  if (attendanceValue?.finalOverride && text(attendanceValue.finalDisplay)) {
+    const forced = text(attendanceValue.finalDisplay).trim();
+    if (isClockDisplayValue(forced)) return forced.slice(0, 5);
+    const normalized = normalizeActualCode(forced);
+    if (comparableCode(normalized) === "근무") return clock || "출근";
+    return normalized || forced;
+  }
   if (planMissing && clockMissing) return "출ㆍ계 미입력";
+  // 실제 출근시간이 있으면 상태문구 대신 원본 시간을 표시합니다.
+  if (attendanceValue?.hasClockIn) return clock || "출근";
   const actual = normalizeActualCode(attendanceValue?.actualStatus);
   if (actual) return comparableCode(actual) === "근무" ? "출근" : actual;
-  // 근무계획이 비어 있어도 실제 출근시간이 있으면 정상 출근으로 인정합니다.
-  if (attendanceValue?.hasClockIn) return "출근";
   if (["근무", "근무A", "근무B", "근무C", "교육", "오전반차", "오후반차"].includes(planStatus)) return "출근 미입력";
   return planStatus;
 }
 
 function normalizeFinalCompareValue(value) {
-  const raw = normalizeActualCode(value);
-  if (!raw) return text(value);
+  const display = text(value).trim();
+  if (isClockDisplayValue(display)) return display.slice(0, 5);
+  const raw = normalizeActualCode(display);
+  if (!raw) return display;
   return comparableCode(raw) === "근무" ? "출근" : raw;
 }
 
@@ -1725,11 +1945,8 @@ function findPlanHeaderRow(matrix, targetMonth) {
     if (index > 0) dayCount = Math.max(dayCount, (matrix[index - 1] || []).filter((cell) => parsePlanHeaderDay(cell, targetMonth)).length);
     if (index + 1 < matrix.length) dayCount = Math.max(dayCount, (matrix[index + 1] || []).filter((cell) => parsePlanHeaderDay(cell, targetMonth)).length);
 
-    const knownLayoutMatches = matrix.slice(index + 1, index + 12).filter((dataRow) => (
-      looksLikeEmployeeId(dataRow?.[1]) && text(dataRow?.[3])
-    )).length;
-    const score = (employeeId >= 0 ? 20 : 0) + (name >= 0 ? 15 : 0) + (store >= 0 ? 5 : 0) + Math.min(dayCount, 31) + knownLayoutMatches * 2;
-    const valid = (employeeId >= 0 && name >= 0 && dayCount >= 1) || (dayCount >= 5 && knownLayoutMatches >= 2);
+    const score = (employeeId >= 0 ? 20 : 0) + (name >= 0 ? 15 : 0) + (store >= 0 ? 5 : 0) + Math.min(dayCount, 31);
+    const valid = employeeId >= 0 && name >= 0 && dayCount >= 1;
     if (valid && score > best.score) best = { index, score };
   }
   return best.index;
@@ -1743,12 +1960,8 @@ function findAttendanceHeaderRow(matrix, targetMonth) {
     const employeeId = findHeaderIndex(headers, ["사번", "사원번호", "직원번호", "사원ID", "사번ID", "EMPLOYEEID", "EMPLOYEENO"]);
     const date = findHeaderIndex(headers, ["근무일자", "근무일", "근태일자", "일자", "날짜"]);
     const clock = findHeaderIndex(headers, ["(실제)출근시간", "실제출근시간", "출근시간", "출근시각", "출근"]);
-    const knownLayoutMatches = matrix.slice(index + 1, index + 15).filter((dataRow) => {
-      const parsedDate = parseDateCell(dataRow?.[1]);
-      return looksLikeEmployeeId(dataRow?.[3]) && parsedDate && (!targetMonth || parsedDate.startsWith(targetMonth));
-    }).length;
-    const score = (employeeId >= 0 ? 20 : 0) + (date >= 0 ? 20 : 0) + (clock >= 0 ? 5 : 0) + knownLayoutMatches * 3;
-    const valid = (employeeId >= 0 && date >= 0) || knownLayoutMatches >= 2;
+    const score = (employeeId >= 0 ? 20 : 0) + (date >= 0 ? 20 : 0) + (clock >= 0 ? 5 : 0);
+    const valid = employeeId >= 0 && date >= 0;
     if (valid && score > best.score) best = { index, score };
   }
   return best.index;
@@ -1823,6 +2036,10 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
         planStatus: planCode,
         hasClockIn: Boolean(attendanceValue.hasClockIn),
         actualStatus: attendanceValue.actualStatus || "",
+        actualIn: attendanceValue.actualIn || "",
+        changedIn: attendanceValue.changedIn || "",
+        displayStatus: displayedStatus,
+        finalOverride: Boolean(attendanceValue.finalOverride),
         evidenced: Boolean(attendanceValue.evidenced),
       });
       if (attendanceValue.evidenced) evidenceDates.push(date);
@@ -1843,7 +2060,7 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       if (substituteDays > 0) explicitSubstituteEvents.push({ date, days: substituteDays, source: "표기 대체휴무", planStatus: displayedStatus });
       const compensationDays = compensationPlanValue(displayedStatus);
       if (compensationDays > 0) compensationEvents.push({ date, days: compensationDays, source: "표기 보상휴가", planStatus: displayedStatus });
-      const annualDays = annualLeaveValue(planCode);
+      const annualDays = annualLeaveValue(displayedStatus);
       if (annualDays > 0) annualLeaveEvents.push({ date, days: annualDays, planStatus: planCode });
       if (attendanceValue.hasClockIn) workedDates.push(date);
     }
@@ -1870,7 +2087,10 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       const attendanceValue = withEvidenceAttendance(attendanceMap.get(`${person.employeeId}|${date}`) || emptyAttendanceValue(), evidenceSet.has(evidenceKey));
       let hasPrimaryIssue = false;
 
-      if (planStatus === "공백" && attendanceValue.hasClockIn) {
+      if (attendanceValue.finalOverride && !String(attendanceValue.finalDisplay || "").includes("미입력")) {
+        // 같은 달 수정 최종본에서 실제로 변경된 날짜 셀은 최종 확정값으로 사용합니다.
+        hasPrimaryIssue = true;
+      } else if (planStatus === "공백" && attendanceValue.hasClockIn) {
         // 계획이 비어 있어도 실제 출근시간·변경 출근시간·실제근태 출근이 확인되면 정상 출근으로 인정합니다.
         // 출근 미등록, 계획&근태 상이, 전체 요약본, 매니저별 이상 근태에는 넣지 않습니다.
         // 일반 불일치 비교도 건너뛰도록 처리 완료 상태로 표시합니다.
@@ -2322,13 +2542,17 @@ function buildAttendanceMap(rows) {
     const changedIn = cleanClockValue(row.changedIn);
     const actualStatus = cleanPlaceholderValue(row.actualStatus);
     const actualStatusIsWork = comparableCode(normalizeActualCode(actualStatus)) === "근무";
+    const finalOverride = Boolean(row.finalOverride);
+    const forcedClock = finalOverride ? Boolean(row.forceClockIn) : null;
     map.set(key, {
-      // 출근시간뿐 아니라 실제근태가 출근·근무·정상으로 기록된 경우도 출근으로 인정합니다.
-      hasClockIn: existing.hasClockIn || Boolean(actualIn || changedIn) || actualStatusIsWork,
-      actualIn: actualIn || existing.actualIn,
-      changedIn: changedIn || existing.changedIn,
+      // 수정 최종본의 확정값은 원본 출근행보다 뒤에서 덮어쓰며, 그 외에는 기존 원본값을 병합합니다.
+      hasClockIn: finalOverride ? forcedClock : (existing.hasClockIn || Boolean(actualIn || changedIn) || actualStatusIsWork),
+      actualIn: finalOverride ? actualIn : (actualIn || existing.actualIn),
+      changedIn: finalOverride ? changedIn : (changedIn || existing.changedIn),
       location: cleanPlaceholderValue(row.location) || existing.location,
-      actualStatus: actualStatus || existing.actualStatus,
+      actualStatus: finalOverride ? actualStatus : (actualStatus || existing.actualStatus),
+      finalOverride: finalOverride || Boolean(existing.finalOverride),
+      finalDisplay: finalOverride ? text(row.finalDisplay) : (existing.finalDisplay || ""),
     });
   }
   return map;
@@ -2347,7 +2571,7 @@ function withEvidenceAttendance(attendanceValue, evidenced) {
 }
 
 function emptyAttendanceValue() {
-  return { hasClockIn: false, actualIn: "", changedIn: "", location: "", actualStatus: "" };
+  return { hasClockIn: false, actualIn: "", changedIn: "", location: "", actualStatus: "", finalOverride: false, finalDisplay: "" };
 }
 
 function makeIssueRow({ issueType, missingType = "", route, person, date, dateObject, planStatus, attendanceValue, result, reason }) {
@@ -2397,6 +2621,7 @@ function makeMismatchRow({ issueType = "", missingType = "", route, person, date
 }
 
 function evaluateMismatch(planStatus, attendanceValue, hasActualStatusColumn) {
+  if (attendanceValue?.finalOverride) return null;
   if (planStatus === "기타") {
     return { result: "검토 필요", reason: "기타는 자동 단정하지 않고 계획·실제 근태 확인이 필요함" };
   }
@@ -3068,7 +3293,13 @@ async function saveClosure() {
     matchRate: result.matchRate,
     issueRows: [...result.missingRows, ...result.unexpectedRows],
     mismatchRows: result.mismatchRows,
-    employeeFacts: result.employeeFacts,
+    employeeFacts: (result.employeeFacts || []).map((row) => ({
+      ...row,
+      dailyStatuses: [
+        ...(row.dailyStatuses || []),
+        ...(row.dayoffResolved ? [{ date: result.targetMonth, workflowType: "dayoff_excess", resolved: true }] : []),
+      ],
+    })),
   };
 
   try {

@@ -191,6 +191,7 @@ function buildContext(result, daysInMonth) {
     const compensationShortageDateSet = new Set(resolveLeaveShortageDates(
       summary.compensationEvents || [], Number(summary.compensationShortage || 0), summary.compensationShortageDates || [],
     ));
+    const dayoffExcessDateSet = new Set((summary.baseExcessEvents || []).map((event) => String(event?.date || "")).filter(Boolean));
     for (let day = 1; day <= daysInMonth; day += 1) {
       const date = `${result.targetMonth}-${String(day).padStart(2, "0")}`;
       const planStatus = normalizePlan(person.plan?.plans?.[day]);
@@ -207,7 +208,8 @@ function buildContext(result, daysInMonth) {
         planStatus,
         attendance: finalAttendance,
         evidence,
-        display: evidence ? "출근" : dailyDisplay(planStatus, finalAttendance),
+        display: dailyDisplay(planStatus, finalAttendance),
+        dayoffExcess: dayoffExcessDateSet.has(date),
         substituteShortage: substituteShortageDateSet.has(date),
         compensationShortage: compensationShortageDateSet.has(date),
         // 근무 계획의 단순 미입력은 O로 해소하지만, 휴무·연차 등 계획 상이는 유지합니다.
@@ -1888,17 +1890,19 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
         if (!String(item?.display || "").includes("미입력")) applyIssueStyle(sheet, address, item.issues);
         issueCount += 1;
       }
-      // 대체휴무·보상휴가의 실제 초과 사용일은 일반 경고색보다 진한 빨간색을 우선 적용합니다.
-      if (item?.substituteShortage || item?.compensationShortage) applyLeaveShortageStyle(sheet, address);
-      // 증빙 O는 계획 상이 여부와 무관하게 상담사근태 셀을 최종 확정색으로 표시합니다.
-      if (item?.evidence) applyEvidenceWorkStyle(sheet, address);
+      // 반차는 실제 출근시간을 표시하되 연두색으로 구분합니다.
+      if (["오전반차", "오후반차"].includes(item?.planStatus) && item?.attendance?.hasClockIn) applyHalfDayClockStyle(sheet, address);
+      // 근무 외 계획인데 실제 출근한 경우는 노란색으로 표시합니다. 교육·반차는 정상 출근 범주라 제외됩니다.
+      if (NON_WORK_CODES.has(item?.planStatus) && item?.attendance?.hasClockIn) applyUnexpectedClockStyle(sheet, address);
+      // 휴무·대체휴무·보상휴가 초과 사용일은 다른 색상보다 주황색을 우선 적용합니다.
+      if (item?.dayoffExcess || item?.substituteShortage || item?.compensationShortage) applyLeaveShortageStyle(sheet, address);
       if (NON_WORK_CODES.has(item?.planStatus) && item?.attendance?.hasClockIn) clockCorrection += 1;
     }
 
     const planValues = Object.values(daily).map((item) => item.planStatus);
     const displayValues = Object.values(daily).map((item) => item?.display || "");
     const registeredCount = displayValues.filter((value) => value && !String(value).includes("미입력")).length;
-    const displayedWorkCount = displayValues.filter((value) => value === "출근").length;
+    const displayedWorkCount = Object.values(daily).filter((item) => Boolean(item?.attendance?.hasClockIn)).length;
     const plannedDayoffCount = planValues.filter((value) => value === "휴무").length;
     const displayedDayoffCount = displayValues.filter((value) => value === "휴무").length;
     const educationCount = planValues.filter((value) => value === "교육").length;
@@ -1937,7 +1941,7 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
 
     // '출근 미입력'·'계획 미입력'·'출ㆍ계 미입력'처럼 미입력이 포함된 모든 셀은 총 등록 현황에서 제외합니다.
     setFormula(sheet, addr(0), `COUNTIFS(${dailyRange},"<>",${dailyRange},"<>*미입력*")`, registeredCount);
-    setFormula(sheet, addr(1), `COUNTIF(${dailyRange},"출근")`, displayedWorkCount);
+    setFormula(sheet, addr(1), `COUNTIF(${dailyRange},"출근")+COUNTIF(${dailyRange},"??:??")`, displayedWorkCount);
     setValue(sheet, addr(2), baseAllowance);
     setFormula(sheet, addr(3), `COUNTIF(${dailyRange},"휴무")`, displayedDayoffCount);
     setFormula(sheet, addr(4), `MAX(0,${addr(3)}-${addr(2)})`, displayedDayoffExcess);
@@ -2298,15 +2302,22 @@ function makeMissingPlanRow(plan, person) {
 }
 
 function dailyDisplay(planStatus, attendance) {
+  if (attendance?.finalOverride && attendance?.finalDisplay) return String(attendance.finalDisplay);
   const planMissing = planStatus === "공백";
   const clockMissing = !attendance.hasClockIn;
   if (planMissing && clockMissing) return "출ㆍ계 미입력";
   const actual = normalizeActual(attendance.actualStatus);
+  if (attendance.hasClockIn) return effectiveClockDisplay(attendance) || (actual && actual !== "근무" ? actual : "출근");
   if (actual) return actual === "근무" ? "출근" : actual;
-  // 계획이 비어 있어도 실제 출근기록이 있으면 정상 출근으로 표시합니다.
-  if (attendance.hasClockIn) return "출근";
   if (["근무", "근무A", "근무B", "근무C", "교육", "오전반차", "오후반차"].includes(planStatus)) return "출근 미입력";
   return planStatus;
+}
+
+function effectiveClockDisplay(attendance) {
+  const raw = cleanClock(attendance?.actualIn) || cleanClock(attendance?.changedIn);
+  const match = String(raw || "").match(/(?:^|\s)(\d{1,2}):(\d{2})(?::\d{2})?/);
+  if (!match) return "";
+  return `${String(Number(match[1])).padStart(2, "0")}:${match[2]}`;
 }
 
 function evidenceMissingType(row) {
@@ -2354,21 +2365,27 @@ function buildAttendanceMap(rows) {
     const actualIn = cleanClock(row.actualIn);
     const changedIn = cleanClock(row.changedIn);
     const actualStatus = cleanPlaceholder(row.actualStatus);
+    const finalOverride = Boolean(row.finalOverride);
+    const forceClockIn = Boolean(row.forceClockIn);
+    const finalDisplay = cleanPlaceholder(row.finalDisplay);
     const actualStatusIsWork = normalizeActual(actualStatus) === "근무";
     map.set(key, {
       // 출근시간 또는 실제근태의 출근·근무·정상 값 중 하나라도 있으면 실제 출근으로 표시합니다.
-      hasClockIn: existing.hasClockIn || Boolean(actualIn || changedIn) || actualStatusIsWork,
+      hasClockIn: finalOverride ? forceClockIn : (existing.hasClockIn || Boolean(actualIn || changedIn) || actualStatusIsWork),
       actualIn: actualIn || existing.actualIn,
       changedIn: changedIn || existing.changedIn,
       actualStatus: actualStatus || existing.actualStatus,
       location: cleanPlaceholder(row.location) || existing.location,
+      finalOverride: finalOverride || existing.finalOverride,
+      forceClockIn: finalOverride ? forceClockIn : existing.forceClockIn,
+      finalDisplay: finalDisplay || existing.finalDisplay,
     });
   }
   return map;
 }
 
 function emptyAttendance() {
-  return { hasClockIn: false, actualIn: "", changedIn: "", actualStatus: "", location: "" };
+  return { hasClockIn: false, actualIn: "", changedIn: "", actualStatus: "", location: "", finalOverride: false, forceClockIn: false, finalDisplay: "" };
 }
 
 function cleanClock(value) {
@@ -2561,17 +2578,15 @@ function applyStatusStyle(sheet, address, value) {
   let fill = null;
   let fontColor = "FF000000";
   let bold = false;
-  if (text === "출근") fill = "FFE2F0D9";
-  else if (text === "출근 미입력") { fill = "FFF33E0D"; fontColor = "FFFFFFFF"; bold = true; }
+  if (text === "출근 미입력") { fill = "FFF33E0D"; fontColor = "FFFFFFFF"; bold = true; }
   else if (text === "계획 미입력") { fill = "FFFFC000"; fontColor = "FF7F4100"; bold = true; }
-  else if (text === "출ㆍ계 미입력") { fill = "FFC00000"; fontColor = "FFFFFFFF"; bold = true; }
+  else if (text === "출ㆍ계 미입력") { fill = "FFFF0000"; fontColor = "FFFFFFFF"; bold = true; }
   else if (text === "미입력") { fill = "FFF33E0D"; fontColor = "FFFFFFFF"; bold = true; }
-  else if (text === "휴무") fill = "FFE7E6E6";
-  else if (text.includes("대체휴일") || text === "대체휴무") { fill = "FFA9D08E"; fontColor = "FF000000"; }
-  else if (text.includes("보상휴가")) { fill = "FF548235"; fontColor = "FFFFFFFF"; bold = true; }
-  else if (["연차", "공가", "휴가", "경조", "무급휴가"].includes(text)) fill = "FFDDEBF7";
-  else if (["오전반차", "오후반차", "반일근무"].includes(text)) fill = "FFFFF2CC";
-  else if (text === "교육") fill = "FFDDEBF7";
+  else if (text === "휴무") fill = "FFDDEBF7";
+  else if (text.includes("대체휴일") || text === "대체휴무" || text.includes("보상휴가")) { fill = "FF2F5597"; fontColor = "FFFFFFFF"; bold = true; }
+  else if (["연차", "오전반차", "오후반차", "반일근무"].includes(text)) fill = "FFC6E0B4";
+  else if (["공가", "휴가", "경조", "무급휴가", "교육"].includes(text)) fill = "FFDDEBF7";
+  // 정상 출근시간(예: 09:03)과 구버전 출근 표시는 기본 흰색을 유지합니다.
   if (!fill) return;
   const base = sheet[address].s ? clone(sheet[address].s) : {};
   sheet[address].s = {
@@ -2581,25 +2596,37 @@ function applyStatusStyle(sheet, address, value) {
   };
 }
 
-function applyLeaveShortageStyle(sheet, address) {
+function applyHalfDayClockStyle(sheet, address) {
   if (!sheet[address]) return;
   const base = sheet[address].s ? clone(sheet[address].s) : {};
   sheet[address].s = {
     ...base,
-    fill: { patternType: "solid", fgColor: { rgb: "FFC00000" } },
-    font: { ...(base.font || {}), name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FFFFFFFF" } },
+    fill: { patternType: "solid", fgColor: { rgb: "FFC6E0B4" } },
+    font: { ...(base.font || {}), name: "맑은 고딕", sz: 10, bold: false, color: { rgb: "FF000000" } },
     alignment: { ...(base.alignment || {}), horizontal: "center", vertical: "center", wrapText: true },
     border: thinBorder("FFB7C3D0"),
   };
 }
 
-function applyEvidenceWorkStyle(sheet, address) {
+function applyUnexpectedClockStyle(sheet, address) {
   if (!sheet[address]) return;
   const base = sheet[address].s ? clone(sheet[address].s) : {};
   sheet[address].s = {
     ...base,
-    fill: { patternType: "solid", fgColor: { rgb: "FFA9D08E" } },
-    font: { ...(base.font || {}), name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FF000000" } },
+    fill: { patternType: "solid", fgColor: { rgb: "FFFFE699" } },
+    font: { ...(base.font || {}), name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FF7F6000" } },
+    alignment: { ...(base.alignment || {}), horizontal: "center", vertical: "center", wrapText: true },
+    border: thinBorder("FFB7C3D0"),
+  };
+}
+
+function applyLeaveShortageStyle(sheet, address) {
+  if (!sheet[address]) return;
+  const base = sheet[address].s ? clone(sheet[address].s) : {};
+  sheet[address].s = {
+    ...base,
+    fill: { patternType: "solid", fgColor: { rgb: "FFF4B183" } },
+    font: { ...(base.font || {}), name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FF9C5700" } },
     alignment: { ...(base.alignment || {}), horizontal: "center", vertical: "center", wrapText: true },
     border: thinBorder("FFB7C3D0"),
   };
@@ -2920,7 +2947,6 @@ async function applyLiveEvidenceConditionalFormatting(buffer, result) {
     ];
     const changed=[];
     for(const [sheetName,rules] of configs){const path=findWorksheetPath(workbookXml,relsXml,sheetName);if(!path)continue;const xml=await zip.file(path)?.async("string");if(!xml)continue;const updated=addWorksheetConditionalFormatting(xml,rules);parseXmlOrThrow(updated,`${sheetName} XML`);zip.file(path,updated);changed.push([path,sheetName]);}
-    const attendancePath=findWorksheetPath(workbookXml,relsXml,"상담사근태");if(attendancePath){const xml=await zip.file(attendancePath)?.async("string");if(xml){const [year,month]=String(result?.targetMonth||"").split("-").map(Number);const days=year&&month?new Date(year,month,0).getDate():31;const lastCol=XLSX.utils.encode_col(14+days-1);const formula=`(COUNTIFS('출근 미등록'!$G$8:$G$1000,$I7,'출근 미등록'!$H$8:$H$1000,O$5,'출근 미등록'!$K$8:$K$1000,"O")+COUNTIFS('출근 미등록'!$G$8:$G$1000,$I7,'출근 미등록'!$H$8:$H$1000,O$5,'출근 미등록'!$K$8:$K$1000,"○")+COUNTIFS('출근 미등록'!$G$8:$G$1000,$I7,'출근 미등록'!$H$8:$H$1000,O$5,'출근 미등록'!$K$8:$K$1000,"ㅇ"))>0`;const updated=addWorksheetConditionalFormatting(xml,[{sqref:`O7:${lastCol}500`,rules:[{dxfId:dxf.attendance,formula}]}]);parseXmlOrThrow(updated,"상담사근태 XML");zip.file(attendancePath,updated);changed.push([attendancePath,"상담사근태"]);}}
     parseXmlOrThrow(dxf.xml,"styles.xml");zip.file(stylesPath,dxf.xml);const candidate=await zip.generateAsync({type:"arraybuffer",compression:"DEFLATE"});const verify=await JSZip.loadAsync(candidate);parseXmlOrThrow(await verify.file(stylesPath)?.async("string")||"","저장 후 styles.xml");for(const[path,name]of changed)parseXmlOrThrow(await verify.file(path)?.async("string")||"",`저장 후 ${name} XML`);return candidate;
   } catch(error){console.warn("실시간 처리 색상 규칙 적용 실패 · 기본 파일로 저장",error);return buffer;}
 }
