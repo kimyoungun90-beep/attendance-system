@@ -797,24 +797,34 @@ function buildAnnualComparisonSheet(workbook, result, year, monthNo) {
     .map((r) => ({ ...r, regionGroup: normalizeDashboardRegion(r.region || "", r.store || "") }))
     .sort((a, b) => Number(a.sortOrder || 9) - Number(b.sortOrder || 9)
       || regions.indexOf(a.regionGroup) - regions.indexOf(b.regionGroup)
-      || String(a.date).localeCompare(String(b.date)));
+      || String(a.date).localeCompare(String(b.date))
+      || String(a.name || "").localeCompare(String(b.name || ""), "ko"));
+
+  const approvalDisplay = (row) => {
+    if (row.needsReview) return "확인 요청";
+    const status = String(row.applicationStatus || "").replace(/\s+/g, "");
+    if (status.startsWith("승인") || status.includes("완료")) return "승인 완료";
+    return "승인 대기";
+  };
+  const isAttendanceReview = (row) => row.category === "출근 기록 확인";
+  const isPlanRequestReview = (row) => ["계획·신청 다름", "계획 연차·신청 없음"].includes(row.category);
 
   const matrix = Array.from({ length: 7 }, () => Array(15).fill(""));
   matrix[0][0] = `${year}년 ${monthNo}월 연차 등록 현황 및 일자`;
-  matrix[1][0] = "계획과 신청이 맞는 연차는 하늘색, 계획과 신청이 다르거나 신청이 없으면 주황색, 계획이나 신청이 있는데 출근하면 빨간색으로 표시됩니다. 오전·오후 반차는 출근기록이 있어야 정상입니다.";
+  matrix[1][0] = "계획·신청이 같으면 하늘색입니다. 하루 연차는 미출근, 오전·오후 반차는 출근기록이 있어야 정상입니다. 계획·신청 불일치는 주황색, 신청 누락·출근기록 오류는 빨간색입니다.";
   const cards = [
     [0, "전체 대조", `${rows.length}건`],
     [2, "동일", `${rows.filter((r) => !r.needsReview).length}건`],
     [4, "계획 연차·신청 없음", `${rows.filter((r) => r.category === "계획 연차·신청 없음").length}건`],
-    [6, "계획 연차·출근", `${rows.filter((r) => r.category === "계획 연차·출근").length}건`],
-    [8, "기타 확인 요청", `${rows.filter((r) => r.needsReview && !["계획 연차·신청 없음", "계획 연차·출근"].includes(r.category)).length}건`],
+    [6, "출근 기록 확인", `${rows.filter(isAttendanceReview).length}건`],
+    [8, "계획·신청 확인", `${rows.filter(isPlanRequestReview).length}건`],
   ];
   for (const [c, l, v] of cards) { matrix[2][c] = l; matrix[3][c] = v; }
   matrix[2][10] = "구분 색상 안내";
-  matrix[3][10] = "● 동일";
-  matrix[3][13] = "● 신청/계획 확인";
-  matrix[4][10] = "● 출근 기록 확인";
-  matrix[4][13] = "● 확인 요청";
+  matrix[3][10] = "● 계획·신청 동일";
+  matrix[3][13] = "● 계획·신청 확인";
+  matrix[4][10] = "● 출근·신청 누락 확인";
+  matrix[4][13] = "● 확인 완료";
   matrix[6] = ["No", "휴가일자", "지역장", "매니저", "지역", "매장명", "이름", "사번", "신청구분", "신청일수", "근무계획", "실제근태", "대조구분", "신청상태", "확인상태"];
 
   const regionRows = [], dataRows = [];
@@ -822,20 +832,38 @@ function buildAnnualComparisonSheet(workbook, result, year, monthNo) {
   for (const region of regions) {
     const group = rows.filter((r) => r.regionGroup === region);
     const rr = matrix.length;
-    matrix.push([`▼  ${region} (총 ${group.length}건)`, "", "", "", "", "", "", "", `동일 ${group.filter((r) => !r.needsReview).length}건  |  확인요청 ${group.filter((r) => r.needsReview).length}건`, "", "", "", "", "", ""]);
+    matrix.push([
+      `▼  ${region} (총 ${group.length}건)`, "", "", "", "", "", "", "",
+      `동일 ${group.filter((r) => !r.needsReview).length}건  |  확인요청 ${group.filter((r) => r.needsReview).length}건`, "", "", "", "", "", "",
+    ]);
     regionRows.push({ row: rr, region });
     for (const row of group) {
       const r = matrix.length;
-      matrix.push([no++, row.date || "", row.regionalManager || "", row.manager || "", region, row.store || "", row.name || "", normalizeId(row.employeeId), row.requestedKind || "-", row.requestedDays || 0, row.planStatus || "공백", row.actualStatus || "미출근", row.category || row.result || "", row.applicationStatus || "-", row.needsReview ? "확인 요청" : "동일"]);
-      dataRows.push({ row: r, needsReview: row.needsReview, category: row.category, planStatus: row.planStatus, requestedKind: row.requestedKind, actualStatus: row.actualStatus });
+      const confirmationStatus = approvalDisplay(row);
+      matrix.push([
+        no++, row.date || "", row.regionalManager || "", row.manager || "", region, row.store || "", row.name || "", normalizeId(row.employeeId),
+        row.requestedKind || "-", row.requestedDays || 0, row.planStatus || "공백", row.actualStatus || "미출근",
+        row.category || row.result || "", row.applicationStatus || "-", confirmationStatus,
+      ]);
+      dataRows.push({ row: r, needsReview: row.needsReview, category: row.category, confirmationStatus });
     }
   }
 
   const sh = XLSX.utils.aoa_to_sheet(matrix);
-  sh["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 14 } }, { s: { r: 1, c: 0 }, e: { r: 1, c: 14 } }, { s: { r: 2, c: 0 }, e: { r: 2, c: 1 } }, { s: { r: 3, c: 0 }, e: { r: 4, c: 1 } }, { s: { r: 2, c: 2 }, e: { r: 2, c: 3 } }, { s: { r: 3, c: 2 }, e: { r: 4, c: 3 } }, { s: { r: 2, c: 4 }, e: { r: 2, c: 5 } }, { s: { r: 3, c: 4 }, e: { r: 4, c: 5 } }, { s: { r: 2, c: 6 }, e: { r: 2, c: 7 } }, { s: { r: 3, c: 6 }, e: { r: 4, c: 7 } }, { s: { r: 2, c: 8 }, e: { r: 2, c: 9 } }, { s: { r: 3, c: 8 }, e: { r: 4, c: 9 } }, { s: { r: 2, c: 10 }, e: { r: 2, c: 14 } }, { s: { r: 3, c: 10 }, e: { r: 3, c: 12 } }, { s: { r: 3, c: 13 }, e: { r: 3, c: 14 } }, { s: { r: 4, c: 10 }, e: { r: 4, c: 12 } }, { s: { r: 4, c: 13 }, e: { r: 4, c: 14 } }];
+  sh["!merges"] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: 14 } }, { s: { r: 1, c: 0 }, e: { r: 1, c: 14 } },
+    { s: { r: 2, c: 0 }, e: { r: 2, c: 1 } }, { s: { r: 3, c: 0 }, e: { r: 4, c: 1 } },
+    { s: { r: 2, c: 2 }, e: { r: 2, c: 3 } }, { s: { r: 3, c: 2 }, e: { r: 4, c: 3 } },
+    { s: { r: 2, c: 4 }, e: { r: 2, c: 5 } }, { s: { r: 3, c: 4 }, e: { r: 4, c: 5 } },
+    { s: { r: 2, c: 6 }, e: { r: 2, c: 7 } }, { s: { r: 3, c: 6 }, e: { r: 4, c: 7 } },
+    { s: { r: 2, c: 8 }, e: { r: 2, c: 9 } }, { s: { r: 3, c: 8 }, e: { r: 4, c: 9 } },
+    { s: { r: 2, c: 10 }, e: { r: 2, c: 14 } },
+    { s: { r: 3, c: 10 }, e: { r: 3, c: 12 } }, { s: { r: 3, c: 13 }, e: { r: 3, c: 14 } },
+    { s: { r: 4, c: 10 }, e: { r: 4, c: 12 } }, { s: { r: 4, c: 13 }, e: { r: 4, c: 14 } },
+  ];
   for (const x of regionRows) sh["!merges"].push({ s: { r: x.row, c: 0 }, e: { r: x.row, c: 7 } }, { s: { r: x.row, c: 8 }, e: { r: x.row, c: 14 } });
-  sh["!cols"] = [{ wch: 6 }, { wch: 13 }, { wch: 11 }, { wch: 11 }, { wch: 9 }, { wch: 18 }, { wch: 11 }, { wch: 13 }, { wch: 12 }, { wch: 10 }, { wch: 17 }, { wch: 12 }, { wch: 26 }, { wch: 12 }, { wch: 12 }];
-  sh["!rows"] = matrix.map((_, i) => ({ hpt: i === 0 ? 34 : i === 1 ? 24 : i >= 2 && i <= 4 ? 28 : i === 5 ? 8 : i === 6 ? 32 : regionRows.some((x) => x.row === i) ? 26 : 25 }));
+  sh["!cols"] = [{ wch: 6 }, { wch: 13 }, { wch: 11 }, { wch: 11 }, { wch: 9 }, { wch: 18 }, { wch: 11 }, { wch: 13 }, { wch: 12 }, { wch: 10 }, { wch: 17 }, { wch: 12 }, { wch: 28 }, { wch: 12 }, { wch: 13 }];
+  sh["!rows"] = matrix.map((_, i) => ({ hpt: i === 0 ? 34 : i === 1 ? 26 : i >= 2 && i <= 4 ? 28 : i === 5 ? 8 : i === 6 ? 32 : regionRows.some((x) => x.row === i) ? 26 : 25 }));
   sh["!freeze"] = { xSplit: 0, ySplit: 7, topLeftCell: "A8", activePane: "bottomLeft", state: "frozen" };
   sh["!views"] = [{ showGridLines: false, zoomScale: 70, zoomScaleNormal: 70 }];
 
@@ -844,7 +872,7 @@ function buildAnnualComparisonSheet(workbook, result, year, monthNo) {
     { row: 3, startCol: 10, endCol: 12, fill: "FFDDEBF7", font: "FF1F4E78" },
     { row: 3, startCol: 13, endCol: 14, fill: "FFFFE699", font: "FF9C6500" },
     { row: 4, startCol: 10, endCol: 12, fill: "FFF4CCCC", font: "FF9C0006" },
-    { row: 4, startCol: 13, endCol: 14, fill: "FFF3FBF6", font: "FF107C41" },
+    { row: 4, startCol: 13, endCol: 14, fill: "FFE2F0D9", font: "FF107C41" },
   ]);
 
   dataRows.forEach((x, i) => {
@@ -854,11 +882,11 @@ function buildAnnualComparisonSheet(workbook, result, year, monthNo) {
       alignment: { horizontal: "center", vertical: "center", wrapText: true },
       border: thinBorder("FFDCE3EC"),
     });
-    const cat = XLSX.utils.encode_cell({ r: x.row, c: 12 });
-    const status = XLSX.utils.encode_cell({ r: x.row, c: 14 });
-    applyAnnualCategoryStyle(sh, cat, x.category, x.needsReview);
-    applyAnnualCategoryStyle(sh, status, x.category, x.needsReview);
+    // 예시 시안처럼 이름(G열)과 대조구분(M열)을 같은 색 계열로 표시합니다.
+    for (const col of [6, 12]) applyAnnualCategoryStyle(sh, XLSX.utils.encode_cell({ r: x.row, c: col }), x.category, x.needsReview);
+    applyAnnualApprovalStatusStyle(sh, XLSX.utils.encode_cell({ r: x.row, c: 14 }), x.confirmationStatus);
   });
+
   setRef(sh, matrix.length, 15);
   workbook.Sheets["해당 월 연차 등록 현황 및 일자"] = sh;
   if (!workbook.SheetNames.includes("해당 월 연차 등록 현황 및 일자")) workbook.SheetNames.push("해당 월 연차 등록 현황 및 일자");
@@ -1255,10 +1283,32 @@ function applyManagerDeliveryStatusStyle(sheet, address, status) {
 
 function applyAnnualCategoryStyle(sheet, address, category, needsReview) {
   if (!sheet[address]) return;
-  let palette = { fill: "FFF3FBF6", font: "FF107C41" };
-  if (!needsReview || category === "동일") palette = { fill: "FFDDEBF7", font: "FF1F4E78" };
-  else if (category === "계획 연차·출근") palette = { fill: "FFF4CCCC", font: "FF9C0006" };
-  else palette = { fill: "FFFFE699", font: "FF9C6500" };
+  let palette;
+  if (!needsReview || category === "동일") {
+    palette = { fill: "FFDDEBF7", font: "FF1F4E78" }; // 계획·신청 동일 · 하늘색
+  } else if (["계획 연차·신청 없음", "출근 기록 확인"].includes(category)) {
+    palette = { fill: "FFF4CCCC", font: "FF9C0006" }; // 신청 누락 또는 출근기록 오류 · 빨간색
+  } else {
+    palette = { fill: "FFFFE699", font: "FF9C6500" }; // 계획·신청 불일치 · 주황색
+  }
+  sheet[address].s = {
+    ...(sheet[address].s || {}),
+    fill: { patternType: "solid", fgColor: { rgb: palette.fill } },
+    font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: palette.font } },
+    alignment: { horizontal: "center", vertical: "center", wrapText: true },
+    border: thinBorder("FFDCE3EC"),
+  };
+}
+
+function applyAnnualApprovalStatusStyle(sheet, address, status) {
+  if (!sheet[address]) return;
+  const palette = status === "승인 완료"
+    ? { fill: "FFDDEBF7", font: "FF1F4E78" }
+    : status === "승인 대기"
+      ? { fill: "FFFFE699", font: "FF9C6500" }
+      : status === "확인 완료"
+        ? { fill: "FFE2F0D9", font: "FF107C41" }
+        : { fill: "FFF4CCCC", font: "FF9C0006" };
   sheet[address].s = {
     ...(sheet[address].s || {}),
     fill: { patternType: "solid", fgColor: { rgb: palette.fill } },
@@ -2632,6 +2682,12 @@ async function applyLiveEvidenceConditionalFormatting(buffer, result) {
       ["계획&근태 상이 인원",[{sqref:"M8:M1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(M8))="O",M8="○",M8="ㅇ")'}]},{sqref:"N8:N1000",rules:[{dxfId:dxf.completed,formula:'$N8="처리 완료"'},{dxfId:dxf.pending,formula:'$N8="미처리"'}]}]],
       ["휴무 초과자",[{sqref:"T8:T1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(T8))="O",T8="○",T8="ㅇ")'}]},{sqref:"U8:U1000",rules:[{dxfId:dxf.completed,formula:'$U8="처리 완료"'},{dxfId:dxf.pending,formula:'$U8="미처리"'}]}]],
       ["매니저별 이상 근태",[{sqref:"L8:L1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(L8))="O",L8="○",L8="ㅇ")'}]},{sqref:"M8:M1000",rules:[{dxfId:dxf.completed,formula:'$M8="전달 완료"'},{dxfId:dxf.pending,formula:'$M8="미전달"'}]}]],
+      ["해당 월 연차 등록 현황 및 일자",[{sqref:"O8:O1000",rules:[
+        {dxfId:dxf.annualApproved,formula:'$O8="승인 완료"'},
+        {dxfId:dxf.annualWaiting,formula:'$O8="승인 대기"'},
+        {dxfId:dxf.annualReview,formula:'$O8="확인 요청"'},
+        {dxfId:dxf.completed,formula:'$O8="확인 완료"'}
+      ]}]],
     ];
     const changed=[];
     for(const [sheetName,rules] of configs){const path=findWorksheetPath(workbookXml,relsXml,sheetName);if(!path)continue;const xml=await zip.file(path)?.async("string");if(!xml)continue;const updated=addWorksheetConditionalFormatting(xml,rules);parseXmlOrThrow(updated,`${sheetName} XML`);zip.file(path,updated);changed.push([path,sheetName]);}
@@ -2764,8 +2820,11 @@ function appendConditionalDxfs(stylesXml) {
   const formats = [
     { font: "FF107C41", fill: "FFC6E0B4" }, // 처리 완료 · 연녹색
     { font: "FFC00000", fill: "FFF4CCCC" }, // 미처리 · 연분홍색
-    { font: "FF107C41", fill: "FFD9EAD3" }, // K열 O · 연한 민트색
+    { font: "FF107C41", fill: "FFD9EAD3" }, // O 입력 · 연한 민트색
     { font: "FF000000", fill: "FFA9D08E" }, // 상담사근태 확정 출근
+    { font: "FF1F4E78", fill: "FFDDEBF7" }, // 연차 승인 완료 · 하늘색
+    { font: "FF9C6500", fill: "FFFFE699" }, // 연차 승인 대기 · 노란색
+    { font: "FF9C0006", fill: "FFF4CCCC" }, // 연차 확인 요청 · 빨간색
   ];
   for (const format of formats) dxfs.appendChild(createDxfNode(doc, namespace, format));
   dxfs.setAttribute("count", String(start + formats.length));
@@ -2776,6 +2835,9 @@ function appendConditionalDxfs(stylesXml) {
     pending: start + 1,
     evidence: start + 2,
     attendance: start + 3,
+    annualApproved: start + 4,
+    annualWaiting: start + 5,
+    annualReview: start + 6,
   };
 }
 
@@ -2790,14 +2852,10 @@ function createDxfNode(doc, namespace, format) {
 
   const fill = doc.createElementNS(namespace, "fill");
   const patternFill = doc.createElementNS(namespace, "patternFill");
-  // 조건부서식의 단색 채우기는 patternType=solid + fgColor로 기록해야
-  // O 입력 직후에도 Excel에서 검은색이 아닌 지정 색상으로 즉시 변경됩니다.
-  patternFill.setAttribute("patternType", "solid");
-  const foreground = doc.createElementNS(namespace, "fgColor");
-  foreground.setAttribute("rgb", format.fill);
+  // Excel이 직접 만든 조건부서식 DXF와 동일하게 bgColor만 기록합니다.
+  // 기존 solid+fgColor 방식은 일부 Excel 환경에서 검은색 채우기로 표시됐습니다.
   const background = doc.createElementNS(namespace, "bgColor");
-  background.setAttribute("indexed", "64");
-  patternFill.appendChild(foreground);
+  background.setAttribute("rgb", format.fill);
   patternFill.appendChild(background);
   fill.appendChild(patternFill);
   dxf.appendChild(fill);

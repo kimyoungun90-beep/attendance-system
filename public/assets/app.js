@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=35";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=37";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -850,31 +850,47 @@ function compareAnnualApplications(parsed, plan, attendance, targetMonth, cutoff
     return withEvidenceAttendance(raw, evidenceSet.has(`${normalizeEmployeeId(employeeId)}|${date}`));
   };
   const classify = ({ planStatus, requestedKind, applicationStatus, hasClockIn, hasApplication = true }) => {
-    const plannedAnnual = annualLeaveValue(planStatus) > 0;
-    const planKind = annualLeaveValue(planStatus) === 0.5 ? "반차" : planStatus === "연차" ? "연차" : "";
-    const approved = hasApplication && isApprovedAnnualApplication({ applicationStatus, requestedKind });
-    const sameApproved = plannedAnnual && hasApplication && requestedKind === planKind && approved;
+    const plannedDays = annualLeaveValue(planStatus);
+    const plannedAnnual = plannedDays > 0;
+    const planKind = plannedDays === 0.5 ? "반차" : planStatus === "연차" ? "연차" : "";
+    const samePlanAndRequest = plannedAnnual && hasApplication && requestedKind === planKind;
 
-    if (sameApproved && planKind === "연차" && !hasClockIn) {
-      return { category: "동일", result: "계획 연차 / 신청 연차 동일", needsReview: false, sortOrder: 1 };
+    // 승인 여부(대기/승인)는 계획·신청 일치 판정과 분리합니다.
+    // 대기 상태라도 계획과 신청 종류가 같고 실제근태 조건이 맞으면 '동일'입니다.
+    if (samePlanAndRequest && planKind === "연차" && !hasClockIn) {
+      return { category: "동일", result: "계획 연차·신청 동일", needsReview: false, sortOrder: 1 };
     }
-    if (sameApproved && planKind === "반차" && hasClockIn) {
-      return { category: "동일", result: "계획 반차 / 신청 반차 동일(출근기록 있음)", needsReview: false, sortOrder: 1 };
+    // 오전·오후 반차는 실제 출근기록이 있어야 정상입니다.
+    if (samePlanAndRequest && planKind === "반차" && hasClockIn) {
+      return { category: "동일", result: "계획 반차·신청 동일", needsReview: false, sortOrder: 1 };
     }
-    if (plannedAnnual && hasClockIn) {
-      return { category: "계획 연차·출근", result: planKind === "반차" ? "계획 반차인데 출근기록 있음(정상 여부 확인)" : "계획 연차인데 출근기록 있음", needsReview: true, sortOrder: 3 };
+
+    // 계획과 신청 종류가 다르면 출근 여부와 관계없이 주황색 '계획·신청 다름'입니다.
+    // 예: 계획 오후반차 / 신청 연차 / 실제 출근.
+    if (plannedAnnual && hasApplication && requestedKind !== planKind) {
+      return { category: "계획·신청 다름", result: `계획 ${planStatus} / 신청서 ${requestedKind}`, needsReview: true, sortOrder: 2 };
     }
+
+    // 계획 연차·반차인데 신청서가 없으면 빨간색 확인 요청입니다.
     if (plannedAnnual && !hasApplication) {
-      return { category: "계획 연차·신청 없음", result: "계획 연차·반차 / 신청내역 없음", needsReview: true, sortOrder: 2 };
+      return { category: "계획 연차·신청 없음", result: "계획 연차·반차 / 신청내역 없음", needsReview: true, sortOrder: 3 };
     }
-    if (plannedAnnual && hasApplication && (!approved || requestedKind !== planKind)) {
-      return { category: "계획 연차·신청 다름", result: `계획 ${planStatus} / 신청서 ${requestedKind}`, needsReview: true, sortOrder: 2 };
+
+    // 하루 연차인데 출근했거나, 반차인데 출근기록이 없으면 실제근태 확인이 필요합니다.
+    if (samePlanAndRequest && ((planKind === "연차" && hasClockIn) || (planKind === "반차" && !hasClockIn))) {
+      return {
+        category: "출근 기록 확인",
+        result: planKind === "연차" ? "계획 연차·신청 동일이나 출근기록 있음" : "계획 반차·신청 동일이나 출근기록 없음",
+        needsReview: true,
+        sortOrder: 4,
+      };
     }
+
     if (planStatus === "공백" && hasApplication) {
-      return { category: "계획 공백·신청 있음", result: `계획 공백 / 신청서 ${requestedKind}`, needsReview: true, sortOrder: 4 };
+      return { category: "계획·신청 다름", result: `계획 공백 / 신청서 ${requestedKind}`, needsReview: true, sortOrder: 5 };
     }
     if (hasApplication) {
-      return { category: "계획 기타·신청 있음", result: `계획 ${planStatus} / 신청서 ${requestedKind}`, needsReview: true, sortOrder: 5 };
+      return { category: "계획·신청 다름", result: `계획 ${planStatus} / 신청서 ${requestedKind}`, needsReview: true, sortOrder: 5 };
     }
     return { category: "확인 필요", result: "연차 등록 확인 필요", needsReview: true, sortOrder: 6 };
   };
