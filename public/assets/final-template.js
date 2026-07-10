@@ -204,7 +204,6 @@ function buildContext(result, daysInMonth) {
       const attendance = attendanceByKey.get(`${person.employeeId}|${date}`) || emptyAttendance();
       const evidenceKey = `${person.employeeId}|${date}`;
       const evidence = evidenceSet.has(evidenceKey);
-      const issues = issueMap.get(`${person.employeeId}|${day}`) || [];
       const finalAttendance = evidence
         ? { ...attendance, hasClockIn: true, actualStatus: "출근", evidenced: true }
         : attendance;
@@ -212,6 +211,8 @@ function buildContext(result, daysInMonth) {
       // 단, 실제 출근기록이나 출근증빙이 있으면 기존 원칙대로 출근시간이 우선입니다.
       const approvedLeaveStatus = approvedLeaveStatusByKey.get(evidenceKey);
       const planStatus = (!finalAttendance.hasClockIn && approvedLeaveStatus) ? approvedLeaveStatus.displayStatus : rawPlanStatus;
+      const approvedLeaveResolvesMissing = Boolean(approvedLeaveStatus && !finalAttendance.hasClockIn);
+      const issues = approvedLeaveResolvesMissing ? [] : (issueMap.get(`${person.employeeId}|${day}`) || []);
       const evidenceResolvesMissing = evidence && WORK_CLOCK_CODES.has(planStatus);
       daily[day] = {
         date,
@@ -231,7 +232,7 @@ function buildContext(result, daysInMonth) {
     dailyByKey.set(person.key, daily);
   }
 
-  return { workforce, workforceById, planById, attendanceByKey, summaryById, issueMap, people, dailyByKey };
+  return { workforce, workforceById, planById, attendanceByKey, summaryById, issueMap, approvedLeaveStatusByKey, people, dailyByKey };
 }
 
 function buildApprovedLeaveStatusMap(applications = [], targetMonth = "") {
@@ -1290,6 +1291,17 @@ function buildAnnualComparisonSheet(workbook, result, year, monthNo) {
   if (!workbook.SheetNames.includes("해당 월 연차 등록 현황 및 일자")) workbook.SheetNames.push("해당 월 연차 등록 현황 및 일자");
 }
 
+function isResolvedByApprovedLeave(row = {}, ctx = {}) {
+  const employeeId = normalizeId(row.employeeId);
+  const date = String(row.date || row.leaveDate || "");
+  if (!employeeId || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+  const approved = ctx.approvedLeaveStatusByKey?.get(`${employeeId}|${date}`);
+  if (!approved) return false;
+  const attendance = ctx.attendanceByKey?.get(`${employeeId}|${date}`) || emptyAttendance();
+  // 실제 출근기록이 있으면 어차피 증빙 대상이 아니며, 승인 휴가로 미출근 사유가 설명되는 건은 증빙 시트에서 제외합니다.
+  return !attendance.hasClockIn;
+}
+
 function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
   const regionOrder = ["서울", "경인", "충청", "경북", "경남", "전라"];
   const actionSpecs = [
@@ -1316,14 +1328,16 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
   const doneFormulaForRange = (range) => `(COUNTIF(${range},"O")+COUNTIF(${range},"○")+COUNTIF(${range},"ㅇ"))`;
   const doneFormulaForRow = (excelRow) => doneFormulaForRange(`$K${excelRow}:$W${excelRow}`);
 
-  const rows = [...(result.missingRows || [])].map((row) => {
-    const member = findMember(ctx, row.employeeId, row.store) || {};
-    return {
-      ...row,
-      member,
-      region: normalizeDashboardRegion(member.region2 || member.region1 || row.region || "", member.storeName || row.store || ""),
-    };
-  });
+  const rows = [...(result.missingRows || [])]
+    .filter((row) => !isResolvedByApprovedLeave(row, ctx))
+    .map((row) => {
+      const member = findMember(ctx, row.employeeId, row.store) || {};
+      return {
+        ...row,
+        member,
+        region: normalizeDashboardRegion(member.region2 || member.region1 || row.region || "", member.storeName || row.store || ""),
+      };
+    });
 
   rows.sort((a, b) => regionOrder.indexOf(a.region) - regionOrder.indexOf(b.region)
     || String(a.name || a.member.employeeName || "").localeCompare(String(b.name || b.member.employeeName || ""), "ko")
@@ -2213,7 +2227,10 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
       // 근무 외 계획인데 실제 출근한 경우는 노란색으로 표시합니다. 교육·반차는 정상 출근 범주라 제외됩니다.
       if (NON_WORK_CODES.has(item?.planStatus) && item?.attendance?.hasClockIn) applyUnexpectedClockStyle(sheet, address);
       // 휴무·대체휴무·보상휴가 초과 사용일은 다른 색상보다 주황색을 우선 적용합니다.
-      if (item?.dayoffExcess || item?.substituteShortage || item?.compensationShortage) applyLeaveShortageStyle(sheet, address);
+      // 단, 연차신청현황에서 승인된 연차/반차가 반영된 날은 일반 연차 색상을 유지합니다.
+      const approvedAnnualLike = Boolean(item?.approvedLeaveStatus && !item?.attendance?.hasClockIn
+        && ["연차", "오전반차", "오후반차"].includes(item?.planStatus));
+      if (!approvedAnnualLike && (item?.dayoffExcess || item?.substituteShortage || item?.compensationShortage)) applyLeaveShortageStyle(sheet, address);
       if (NON_WORK_CODES.has(item?.planStatus) && item?.attendance?.hasClockIn) clockCorrection += 1;
     }
 
