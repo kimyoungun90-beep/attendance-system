@@ -355,10 +355,17 @@ function leaveApplicationStatusPriority(item = {}) {
 
 function requiresLeaveApproval(status = "") {
   const normalized = normalizePlan(status);
+  // 대체휴무·보상휴가는 근무계획/증빙 보정 기준으로 파란색 휴가 표시를 유지합니다.
+  // 잔여 부족 등 초과 사용일만 별도 빨간색 경고로 표시합니다.
+  if (isSubstituteOrCompensationStatus(normalized)) return false;
   return [
-    "연차", "오전반차", "오후반차", "출산휴가", "육아휴직", "공가", "경조",
-    "대체휴일(1일)", "대체휴일(0.5일)", "보상휴가(1일)", "보상휴가(0.5일)", "휴가",
+    "연차", "오전반차", "오후반차", "출산휴가", "육아휴직", "공가", "경조", "휴가",
   ].includes(normalized);
+}
+
+function isSubstituteOrCompensationStatus(value = "") {
+  const text = String(value || "");
+  return text.includes("대체휴일") || text.includes("대체휴무") || text.includes("보상휴가") || text.includes("보상휴무");
 }
 
 function plannedLeaveApprovalReason(planStatus = "", applicationStatus = null) {
@@ -2679,13 +2686,15 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
       }
       // 반차는 실제 출근시간을 표시하되 연두색으로 구분합니다.
       if (["오전반차", "오후반차"].includes(item?.planStatus) && item?.attendance?.hasClockIn) applyHalfDayClockStyle(sheet, address);
-      // 근무 외 계획인데 실제 출근한 경우는 노란색으로 표시합니다. 교육·반차는 정상 출근 범주라 제외됩니다.
-      if (NON_WORK_CODES.has(item?.planStatus) && item?.attendance?.hasClockIn) applyUnexpectedClockStyle(sheet, address);
-      // 휴무·대체휴무·보상휴가 초과 사용일은 다른 색상보다 주황색을 우선 적용합니다.
-      // 단, 연차신청현황에서 승인된 연차/반차가 반영된 날은 일반 연차 색상을 유지합니다.
+      // 근무 외 계획인데 실제 출근한 경우는 노란색으로 표시합니다. 교육·반차·대체/보상은 정상 예외로 둡니다.
+      // 특히 대체/보상 계획일에 실제 출근이 찍힌 경우에는 출근시간 표시를 우선하고 파란색/노란색을 적용하지 않습니다.
+      if (NON_WORK_CODES.has(item?.planStatus) && item?.attendance?.hasClockIn && !isSubstituteOrCompensationStatus(item?.planStatus)) applyUnexpectedClockStyle(sheet, address);
+      // 휴무·대체휴무·보상휴가 초과 사용일은 다른 색상보다 빨간색을 우선 적용합니다.
+      // 단, 출근시간이 찍힌 날과 연차신청현황에서 승인된 연차/반차가 반영된 날은 일반 표시를 유지합니다.
       const approvedAnnualLike = Boolean(item?.approvedLeaveStatus && !item?.attendance?.hasClockIn
         && ["연차", "오전반차", "오후반차"].includes(item?.planStatus));
-      if (!isDayoffAutoDisplay(item?.display) && !approvedAnnualLike && (item?.dayoffExcess || item?.substituteShortage || item?.compensationShortage)) applyLeaveShortageStyle(sheet, address);
+      if (!item?.attendance?.hasClockIn && !approvedAnnualLike && (item?.substituteShortage || item?.compensationShortage)) applyLeaveOveruseStyle(sheet, address);
+      else if (!isDayoffAutoDisplay(item?.display) && !approvedAnnualLike && (item?.dayoffExcess)) applyLeaveShortageStyle(sheet, address);
       if (NON_WORK_CODES.has(item?.planStatus) && item?.attendance?.hasClockIn) clockCorrection += 1;
     }
 
@@ -3422,6 +3431,18 @@ function applyLeaveShortageStyle(sheet, address) {
     font: { ...(base.font || {}), name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FF9C5700" } },
     alignment: { ...(base.alignment || {}), horizontal: "center", vertical: "center", wrapText: true },
     border: thinBorder("FFB7C3D0"),
+  };
+}
+
+function applyLeaveOveruseStyle(sheet, address) {
+  if (!sheet[address]) return;
+  const base = sheet[address].s ? clone(sheet[address].s) : {};
+  sheet[address].s = {
+    ...base,
+    fill: { patternType: "solid", fgColor: { rgb: "FFFF0000" } },
+    font: { ...(base.font || {}), name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FFFFFFFF" } },
+    alignment: { ...(base.alignment || {}), horizontal: "center", vertical: "center", wrapText: true },
+    border: thinBorder("FFC00000"),
   };
 }
 
