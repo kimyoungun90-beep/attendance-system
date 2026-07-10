@@ -196,12 +196,8 @@ export async function onRequestGet(context) {
     };
   }
 
-  // 월 경계에 걸친 주차를 다음 달 분석에서 이어 계산할 수 있도록
-  // 직전 월의 일별 계획·실제 출근 스냅샷을 함께 내려보냅니다.
-  // 별도 테이블을 만들지 않고 기존 월 마감 employee facts의 daily_statuses_json을 사용합니다.
-  const previousMonthCutoff = closureCutoffByMonth.get(previousMonth) || "";
-  const previousMonthDailyFacts = allFacts
-    .filter((row) => String(row.month || "") === previousMonth)
+  const buildDailyFactsForMonth = (snapshotMonth, cutoff) => allFacts
+    .filter((row) => String(row.month || "") === snapshotMonth)
     .map((row) => {
       let dailyStatuses = [];
       try {
@@ -212,27 +208,38 @@ export async function onRequestGet(context) {
       }
       dailyStatuses = dailyStatuses
         .filter((item) => /^\d{4}-\d{2}-\d{2}$/.test(String(item?.date || "")))
-        .filter((item) => !previousMonthCutoff || String(item.date) <= previousMonthCutoff)
+        .filter((item) => !cutoff || String(item.date) <= cutoff)
         .map((item) => ({
           date: String(item.date || ""),
           planStatus: String(item.planStatus || "공백"),
           hasClockIn: Boolean(item.hasClockIn),
           actualStatus: String(item.actualStatus || ""),
+          actualIn: String(item.actualIn || ""),
+          changedIn: String(item.changedIn || ""),
+          displayStatus: String(item.displayStatus || ""),
           evidenced: Boolean(item.evidenced),
         }));
       return {
         employeeId: normalizeEmployeeId(row.employee_id),
         name: String(row.employee_name || ""),
         store: String(row.store || ""),
-        cutoffDate: previousMonthCutoff,
+        cutoffDate: cutoff,
         dailyStatuses,
       };
     })
     .filter((row) => row.employeeId && row.dailyStatuses.length);
 
+  // 월 경계 주차는 직전 월 스냅샷으로 이어 계산하고,
+  // 같은 월에 이미 저장된 중간 확인본이 있으면 그 확정일 이전은 다시 묻지 않도록 내려보냅니다.
+  const previousMonthCutoff = closureCutoffByMonth.get(previousMonth) || "";
+  const previousMonthDailyFacts = buildDailyFactsForMonth(previousMonth, previousMonthCutoff);
+  const currentMonthCutoff = closureCutoffByMonth.get(month) || "";
+  const currentMonthDailyFacts = buildDailyFactsForMonth(month, currentMonthCutoff);
+
   return json({
     lotsByEmployee, balances, annualLeaveBefore, currentGrants, settlementGrants, autoUseDates,
     previousMonth, previousMonthFacts, previousMonthCutoff, previousMonthDailyFacts,
+    currentMonthCutoff, currentMonthDailyFacts,
   });
 }
 

@@ -50,6 +50,7 @@ export async function buildFinalTemplateWorkbook(result) {
   buildWeeklyAttendanceCheckSheet(workbook, result, year, monthNo);
   buildAnnualLedgerSheet(workbook, result, context, year, monthNo);
   buildPersonnelStatusSheet(workbook, result, year, monthNo);
+  buildHrPayrollAuditSheets(workbook, result, year, monthNo);
   fillPlanSheet(workbook.Sheets["근무 계획"], result, context, daysInMonth);
   fillAttendanceRawSheet(workbook.Sheets["근태 RAW"], result);
 
@@ -58,6 +59,10 @@ export async function buildFinalTemplateWorkbook(result) {
     "계획&근태 상이 인원",
     "출근 미등록",
     "휴무 초과자",
+    "인사팀 급여 확정표",
+    "출근 미달자 정산",
+    "연차 사용 필요자",
+    "최종 문제자",
     "전체 요약본",
     "매니저별 이상 근태",
     "주 근태 확인자",
@@ -238,6 +243,161 @@ function resolveLeaveShortageDates(events = [], shortage = 0, recordedDates = []
   }
   return [...dates].sort();
 }
+
+
+
+function buildHrPayrollAuditSheets(workbook, result, year, monthNo) {
+  const audit = result.hrPayrollAudit || { summary: {}, settlementRows: [], dailyRows: [], annualNeedRows: [], problemRows: [] };
+  const subtitle = `확인 순서: 실제 출근기록 → 출근 증빙 → 휴무 → 경조·공가 → 대체·보상 → 연차 → 최종 문제자 · 기준일 ${result.cutoffDate || ""}`;
+
+  buildAuditTableSheet(workbook, "인사팀 급여 확정표", `${year}년 ${monthNo}월 인사팀 급여 확정표`, subtitle, audit.settlementRows || [], [
+    ["지역장", (row) => row.regionalManager], ["매니저", (row) => row.manager], ["지역", (row) => row.region], ["매장명", (row) => row.store],
+    ["사번", (row) => row.employeeId], ["이름", (row) => row.name], ["기준일수", (row) => row.requiredDays], ["설명완료", (row) => row.explainedDays], ["미해결", (row) => row.remainingUnexplainedDays],
+    ["실제 출근일수", (row) => row.workedDays], ["출근 미달일", (row) => row.missingDays], ["휴무기준", (row) => row.baseAllowance], ["휴무사용", (row) => row.dayoffUsed], ["휴무초과", (row) => row.dayoffExcess],
+    ["대체차감", (row) => row.substituteReplacement], ["보상대체", (row) => row.compensationReplacement], ["대체·보상 부족", (row) => row.replacementShortage],
+    ["경조·공가", (row) => row.officialPaidDays], ["연차 승인", (row) => row.annualApprovedDays], ["연차 신청필요", (row) => row.annualNeededTotal],
+    ["연차잔여", (row) => row.annualRemaining], ["급여상태", (row) => row.payrollStatus], ["정산메모", (row) => row.note],
+  ], {
+    summaryCards: [
+      ["전체 인원", `${audit.summary?.totalPeople || 0}명`], ["급여 확정", `${audit.summary?.confirmedPeople || 0}명`], ["확인 필요", `${audit.summary?.problemPeople || 0}명`],
+      ["휴무 초과", `${audit.summary?.dayoffExcessPeople || 0}명`], ["연차 필요", `${audit.summary?.annualNeedPeople || 0}명`],
+    ],
+    statusColumn: 21,
+  });
+
+  buildAuditTableSheet(workbook, "출근 미달자 정산", `${year}년 ${monthNo}월 출근 미달자 정산`, "출근기록이 없는 날짜만 휴무 → 경조·공가 → 대체·보상 → 연차 순서로 확인합니다.", audit.dailyRows || [], [
+    ["지역장", (row) => row.regionalManager], ["매니저", (row) => row.manager], ["매장명", (row) => row.store], ["사번", (row) => row.employeeId], ["이름", (row) => row.name],
+    ["일자", (row) => row.date], ["확인순서", (row) => row.checkOrder], ["출근상태", (row) => row.attendanceStatus], ["판정값", (row) => row.sourceStatus],
+    ["연차상태", (row) => row.applicationStatus], ["필요일수", (row) => row.requestedDays], ["급여판정", (row) => row.payrollDecision],
+    ["휴가판정", (row) => row.leaveDecision], ["최종상태", (row) => row.finalStatus], ["비고", (row) => row.note],
+  ], { statusColumn: 13 });
+
+  buildAuditTableSheet(workbook, "연차 사용 필요자", `${year}년 ${monthNo}월 연차 사용 필요자`, "휴무 초과 후 대체·보상으로 해결되지 않거나, 출근 미달일이 승인 휴가로 설명되지 않는 인원입니다.", audit.annualNeedRows || [], [
+    ["지역장", (row) => row.regionalManager], ["매니저", (row) => row.manager], ["매장명", (row) => row.store], ["사번", (row) => row.employeeId], ["이름", (row) => row.name],
+    ["휴무초과", (row) => row.dayoffExcess], ["대체·보상 대체", (row) => row.replacementCovered], ["대체·보상 부족", (row) => row.replacementShortage],
+    ["초과분 연차필요", (row) => row.annualNeededFromDayoff], ["신청누락", (row) => row.annualMissingApplicationDays], ["승인필요", (row) => row.annualPendingDays],
+    ["반려확인", (row) => row.annualRejectedDays], ["미확정", (row) => row.unresolvedDays], ["총 연차확인", (row) => row.annualNeededTotal],
+    ["연차잔여", (row) => row.annualRemaining], ["급여상태", (row) => row.payrollStatus], ["비고", (row) => row.note],
+  ], { statusColumn: 15 });
+
+  buildAuditTableSheet(workbook, "최종 문제자", `${year}년 ${monthNo}월 최종 문제자`, "출근·증빙·휴무·경조/공가·대체/보상·연차 반영 후에도 급여 지급 전 확인이 필요한 인원만 남깁니다.", audit.problemRows || [], [
+    ["지역장", (row) => row.regionalManager], ["매니저", (row) => row.manager], ["매장명", (row) => row.store], ["사번", (row) => row.employeeId], ["이름", (row) => row.name],
+    ["실제 출근일수", (row) => row.workedDays], ["출근 미달일", (row) => row.missingDays], ["휴무초과", (row) => row.dayoffExcess],
+    ["대체·보상 부족", (row) => row.replacementShortage], ["경조·공가", (row) => row.officialPaidDays], ["연차확인필요", (row) => row.annualNeededTotal],
+    ["급여상태", (row) => row.payrollStatus], ["정산메모", (row) => row.note],
+  ], { statusColumn: 11 });
+}
+
+function buildAuditTableSheet(workbook, sheetName, title, subtitle, rows, columns, options = {}) {
+  const matrix = Array.from({ length: 7 }, () => Array(columns.length).fill(""));
+  matrix[0][0] = title;
+  matrix[1][0] = subtitle;
+  const cards = options.summaryCards || [
+    ["대상 건수", `${rows.length}건`],
+    ["확인 필요", `${rows.filter((row) => String(row.payrollStatus || row.finalStatus || "").includes("필요") || String(row.payrollStatus || row.finalStatus || "").includes("확인")).length}건`],
+    ["급여 확정", `${rows.filter((row) => (row.payrollStatus || row.finalStatus) === "급여확정").length}건`],
+  ];
+  cards.forEach(([label, value], index) => {
+    const col = Math.min(index * 2, Math.max(0, columns.length - 2));
+    matrix[2][col] = label;
+    matrix[3][col] = value;
+  });
+  matrix[6] = columns.map(([header]) => header);
+  for (const row of rows) matrix.push(columns.map(([, getter]) => getter(row)));
+
+  const sheet = XLSX.utils.aoa_to_sheet(matrix);
+  sheet["!merges"] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: columns.length - 1 } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: columns.length - 1 } },
+  ];
+  cards.forEach((_, index) => {
+    const col = Math.min(index * 2, Math.max(0, columns.length - 2));
+    if (col + 1 < columns.length) {
+      sheet["!merges"].push({ s: { r: 2, c: col }, e: { r: 2, c: col + 1 } });
+      sheet["!merges"].push({ s: { r: 3, c: col }, e: { r: 4, c: col + 1 } });
+    }
+  });
+  sheet["!cols"] = columns.map(([header], index) => ({ wch: Math.max(10, Math.min(index === columns.length - 1 ? 46 : 22, String(header).length * 2 + 8)) }));
+  sheet["!rows"] = matrix.map((_, index) => ({ hpt: index === 0 ? 34 : index === 1 ? 24 : index >= 2 && index <= 4 ? 28 : index === 5 ? 8 : index === 6 ? 30 : 28 }));
+  sheet["!freeze"] = { xSplit: 0, ySplit: 7, topLeftCell: "A8", activePane: "bottomLeft", state: "frozen" };
+  sheet["!views"] = [{ showGridLines: false, zoomScale: 70, zoomScaleNormal: 70 }];
+
+  styleCellRange(sheet, 0, 0, 0, columns.length - 1, {
+    fill: { patternType: "solid", fgColor: { rgb: "FF0B3B76" } },
+    font: { name: "맑은 고딕", sz: 18, bold: true, color: { rgb: "FFFFFFFF" } },
+    alignment: { horizontal: "left", vertical: "center" },
+  });
+  styleCellRange(sheet, 1, 0, 1, columns.length - 1, {
+    fill: { patternType: "solid", fgColor: { rgb: "FFF4F7FB" } },
+    font: { name: "맑은 고딕", sz: 10, color: { rgb: "FF40516B" } },
+    alignment: { horizontal: "right", vertical: "center" },
+  });
+  const cardPalettes = [
+    { fill: "FFF7FAFF", border: "FF8FB7E8", font: "FF0B5CCB" },
+    { fill: "FFFFF5F5", border: "FFF1A2A7", font: "FFC00000" },
+    { fill: "FFFFF8EF", border: "FFF4C27A", font: "FFC55A11" },
+    { fill: "FFF3F8FF", border: "FF9CC2EF", font: "FF2F75B5" },
+    { fill: "FFF3FBF6", border: "FF9FD3B2", font: "FF107C41" },
+  ];
+  cards.forEach((_, index) => {
+    const col = Math.min(index * 2, Math.max(0, columns.length - 2));
+    const palette = cardPalettes[index] || cardPalettes[0];
+    styleCellRange(sheet, 2, col, 4, Math.min(col + 1, columns.length - 1), {
+      fill: { patternType: "solid", fgColor: { rgb: palette.fill } },
+      font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FF26364D" } },
+      alignment: { horizontal: "center", vertical: "center", wrapText: true },
+      border: thinBorder(palette.border),
+    });
+    styleCellRange(sheet, 3, col, 4, Math.min(col + 1, columns.length - 1), {
+      fill: { patternType: "solid", fgColor: { rgb: palette.fill } },
+      font: { name: "맑은 고딕", sz: 19, bold: true, color: { rgb: palette.font } },
+      alignment: { horizontal: "center", vertical: "center" },
+      border: thinBorder(palette.border),
+    });
+  });
+  styleCellRange(sheet, 6, 0, 6, columns.length - 1, {
+    fill: { patternType: "solid", fgColor: { rgb: "FF0B3B76" } },
+    font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FFFFFFFF" } },
+    alignment: { horizontal: "center", vertical: "center", wrapText: true },
+    border: thinBorder("FF8EA6C3"),
+  });
+  for (let r = 7; r < matrix.length; r += 1) {
+    styleCellRange(sheet, r, 0, r, columns.length - 1, {
+      fill: { patternType: "solid", fgColor: { rgb: r % 2 ? "FFFFFFFF" : "FFF9FBFD" } },
+      font: { name: "맑은 고딕", sz: 9, color: { rgb: "FF1F2937" } },
+      alignment: { horizontal: "center", vertical: "center", wrapText: true },
+      border: thinBorder("FFDCE3EC"),
+    });
+    const statusCol = Number.isInteger(options.statusColumn) ? options.statusColumn : -1;
+    if (statusCol >= 0 && statusCol < columns.length) applyAuditStatusStyle(sheet, XLSX.utils.encode_cell({ r, c: statusCol }), matrix[r][statusCol]);
+    const noteCol = columns.length - 1;
+    const noteAddress = XLSX.utils.encode_cell({ r, c: noteCol });
+    if (sheet[noteAddress]) sheet[noteAddress].s.alignment = { horizontal: "left", vertical: "center", wrapText: true };
+  }
+  setRef(sheet, matrix.length, columns.length);
+  workbook.Sheets[sheetName] = sheet;
+  if (!workbook.SheetNames.includes(sheetName)) workbook.SheetNames.push(sheetName);
+}
+
+function applyAuditStatusStyle(sheet, address, value) {
+  if (!sheet[address]) return;
+  const textValue = String(value || "");
+  const palette = textValue === "급여확정"
+    ? { fill: "FFD9EAD3", font: "FF107C41" }
+    : textValue.includes("반려") || textValue.includes("최종")
+      ? { fill: "FFF4CCCC", font: "FF9C0006" }
+      : textValue.includes("승인") || textValue.includes("연차") || textValue.includes("확인")
+        ? { fill: "FFFFE699", font: "FF7F6000" }
+        : { fill: "FFDDEBF7", font: "FF1F4E78" };
+  sheet[address].s = {
+    ...(sheet[address].s || {}),
+    fill: { patternType: "solid", fgColor: { rgb: palette.fill } },
+    font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: palette.font } },
+    alignment: { horizontal: "center", vertical: "center", wrapText: true },
+    border: thinBorder("FFFFFFFF"),
+  };
+}
+
 
 
 function buildIssueSummarySheet(workbook, result, ctx, year, monthNo) {
@@ -703,21 +863,21 @@ function buildWeeklyAttendanceCheckSheet(workbook, result, year, monthNo) {
   const matrix = Array.from({ length: 7 }, () => Array(colCount).fill(""));
 
   matrix[0][0] = `${year}년 ${monthNo}월 주 근태 확인자`;
-  matrix[1][0] = "월~일 실제 출근기록을 기준으로 주 6회 이상 또는 주 3회 이하를 확인합니다. 월 경계 주차는 전월 월 마감 일별자료와 합산하며, 끝나지 않은 주차는 누적 중으로 표시합니다.";
+  matrix[1][0] = "월~일 실제 출근기록 기준으로 주 6회 이상, 주 6회가 될 수 있는 공백 후보, 주 3회 이하 중 공백 미확인 건을 확인합니다. 월 경계 주차는 전월 월 마감 일별자료와 합산하며, 끝나지 않은 주차는 누적 중으로 표시합니다.";
   const completedWeekCount = weeks.filter((week) => !(weekly.partialWeeks || []).includes(week.label)).length;
   const cards = [
     [0, "총 확인 인원", `${rows.length}명`],
     [2, "주 6회 이상", `${Number(weekly.highCount || 0)}명`],
-    [4, "주 3회 이하", `${Number(weekly.lowCount || 0)}명`],
-    [6, "완료 주차", `${completedWeekCount}개`],
-    [8, "누적 중 주차", `${(weekly.partialWeeks || []).length}개`],
+    [4, "주 6회 후보", `${Number(weekly.highCandidateCount || 0)}명`],
+    [6, "3회 이하 공백", `${Number(weekly.lowCount || 0)}명`],
+    [8, "완료/누적", `${completedWeekCount}개 / ${(weekly.partialWeeks || []).length}개`],
   ];
   for (const [col, label, value] of cards) { matrix[2][col] = label; matrix[3][col] = value; }
   matrix[2][10] = "구분 색상 안내";
   matrix[3][10] = "● 주 6회 이상";
-  matrix[3][12] = "● 주 3회 이하";
-  matrix[4][10] = "● 누적 중 주차";
-  matrix[4][12] = "● 월 경계 누적 완료";
+  matrix[3][12] = "● 주 6회 후보";
+  matrix[4][10] = "● 3회 이하 공백";
+  matrix[4][12] = "● 누적 중/월 경계";
 
   matrix[6] = ["No", "지역장", "매니저", "지역", "매장명", "이름", "사번"];
   weeks.forEach((week, index) => {
@@ -733,10 +893,11 @@ function buildWeeklyAttendanceCheckSheet(workbook, result, year, monthNo) {
     const group = rows.filter((row) => row.regionGroup === region);
     const regionRow = matrix.length;
     const high = group.filter((row) => row.weekResults.some((week) => week.category === "6회 이상")).length;
-    const low = group.filter((row) => row.weekResults.some((week) => week.category === "3회 이하")).length;
+    const candidate = group.filter((row) => row.weekResults.some((week) => week.category === "6회 후보")).length;
+    const low = group.filter((row) => row.weekResults.some((week) => week.category === "3회 이하 공백")).length;
     const regionData = Array(colCount).fill("");
     regionData[0] = `▼  ${region} (총 ${group.length}명)`;
-    regionData[Math.min(weekStartCol, colCount - 1)] = `6회 이상 ${high}명  |  3회 이하 ${low}명`;
+    regionData[Math.min(weekStartCol, colCount - 1)] = `6회 이상 ${high}명  |  6회 후보 ${candidate}명  |  3회 이하 공백 ${low}명`;
     matrix.push(regionData);
     regionRows.push({ row: regionRow, region });
 
@@ -831,10 +992,11 @@ function buildWeeklyAttendanceCheckSheet(workbook, result, year, monthNo) {
       const address = XLSX.utils.encode_cell({ r: item.row, c: weekStartCol + weekIndex });
       if (!sh[address] || !resultWeek?.category) return;
       const high = resultWeek.category === "6회 이상";
+      const candidate = resultWeek.category === "6회 후보";
       sh[address].s = {
         ...(sh[address].s || {}),
-        fill: { patternType: "solid", fgColor: { rgb: high ? "FFF4CCCC" : "FFFFE699" } },
-        font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: high ? "FF9C0006" : "FF9C6500" } },
+        fill: { patternType: "solid", fgColor: { rgb: high ? "FFF4CCCC" : candidate ? "FFFFE699" : "FFE2F0D9" } },
+        font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: high ? "FF9C0006" : candidate ? "FF9C6500" : "FF375623" } },
         alignment: { horizontal: "center", vertical: "center", wrapText: true },
         border: thinBorder("FFDCE3EC"),
       };
@@ -2963,7 +3125,7 @@ async function applyWorkbookOpenViewSettings(buffer) {
     if (!workbookXml || !relsXml) return buffer;
 
     const frozenDashboardSheets = new Set([
-      "계획&근태 상이 인원", "출근 미등록", "휴무 초과자", "전체 요약본", "매니저별 이상 근태", "주 근태 확인자", "해당 월 연차 등록 현황 및 일자", "인력 변동 확인",
+      "계획&근태 상이 인원", "출근 미등록", "휴무 초과자", "인사팀 급여 확정표", "출근 미달자 정산", "연차 사용 필요자", "최종 문제자", "전체 요약본", "매니저별 이상 근태", "주 근태 확인자", "해당 월 연차 등록 현황 및 일자", "인력 변동 확인",
     ]);
     const attendanceFreezeSheet = "상담사근태";
     const sheetTags = workbookXml.match(/<sheet\b[^>]*\/?\s*>/g) || [];

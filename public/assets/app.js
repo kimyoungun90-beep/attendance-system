@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=44";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=46";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -291,6 +291,7 @@ async function analyzeFiles() {
     const plan = parsePlan(planWorkbook, targetMonth);
     const attendance = parseAttendance(attendanceWorkbook, targetMonth);
     state.priorLedger = await loadPriorLedger(route, targetMonth);
+    const savedContinuationSummary = applyCurrentMonthSavedDailyCorrections(plan, attendance, state.priorLedger, targetMonth, cutoffDate);
 
     const parsedReference = referenceWorkbook ? parseReferenceFinalWorkbook(referenceWorkbook, targetMonth, route) : null;
     const finalCorrectionSummary = parsedReference?.month === targetMonth
@@ -315,6 +316,13 @@ async function analyzeFiles() {
       ? compareAnnualApplications(parsedAnnual, plan, attendance, targetMonth, cutoffDate, workforce, excludedPersonnelIds, evidenceOverrides)
       : emptyAnnualComparison();
     mergeAnnualLeaveLedger(result, annualLedger, annualComparison);
+    const hrPayrollAudit = buildHrPayrollAudit({
+      result,
+      annualApplications: parsedAnnual?.rows || [],
+      targetMonth,
+      cutoffDate,
+      route,
+    });
     const referenceComparison = parsedReference
       ? compareReferenceFinal(parsedReference, result, targetMonth, cutoffDate, workforce)
       : emptyReferenceComparison();
@@ -340,8 +348,10 @@ async function analyzeFiles() {
       annualSourceSheets: annualWorkbook || [],
       annualLedger: annualLedger || null,
       annualApplications: parsedAnnual?.rows || [],
+      hrPayrollAudit,
       referenceComparison,
       finalCorrectionSummary,
+      savedContinuationSummary,
       evidenceOverrides,
       workflowOverrides,
       personnelChecks: personnelOverrides,
@@ -353,9 +363,11 @@ async function analyzeFiles() {
     };
 
     renderResult();
-    const correctionMessage = finalCorrectionSummary.appliedCount
-      ? ` · 수정 최종본 ${finalCorrectionSummary.appliedCount}건 재반영`
-      : "";
+    const correctionMessage = [
+      finalCorrectionSummary.appliedCount ? `수정 최종본 ${finalCorrectionSummary.appliedCount}건 재반영` : "",
+      savedContinuationSummary.appliedCount ? `이전 확정 ${savedContinuationSummary.appliedCount}건 이어받음` : "",
+    ].filter(Boolean).join(" · ");
+    const correctionMessageText = correctionMessage ? ` · ${correctionMessage}` : "";
     const linkedDailyCount = new Set([
       ...(workflowOverrides.dailyCompletedKeys || []),
       ...(workflowOverrides.planMismatchCompletedKeys || []),
@@ -364,7 +376,7 @@ async function analyzeFiles() {
     const workflowMessage = linkedDailyCount || linkedMonthCount
       ? ` · 처리 O 연동 일자 ${linkedDailyCount}건${linkedMonthCount ? ` / 휴무월 ${linkedMonthCount}건` : ""}`
       : "";
-    showToast(`분석 완료: 출근기록 없음 ${result.missingRows.length}건 · 휴무·휴가 출근 ${result.unexpectedRows.length}건 · 불일치 ${result.mismatchRows.length}건${correctionMessage}${workflowMessage}`);
+    showToast(`분석 완료: 출근기록 없음 ${result.missingRows.length}건 · 휴무·휴가 출근 ${result.unexpectedRows.length}건 · 불일치 ${result.mismatchRows.length}건${correctionMessageText}${workflowMessage}`);
   } catch (error) {
     console.error(error);
     showToast(error.message || "분석 중 오류가 발생했습니다.");
@@ -394,6 +406,8 @@ async function loadPriorLedger(route, month) {
       previousMonthFacts: data.previousMonthFacts || {},
       previousMonthCutoff: data.previousMonthCutoff || "",
       previousMonthDailyFacts: data.previousMonthDailyFacts || [],
+      currentMonthCutoff: data.currentMonthCutoff || "",
+      currentMonthDailyFacts: data.currentMonthDailyFacts || [],
     };
   } catch (error) {
     showToast(`${error.message}. 이번 분석은 저장된 이전 월 누적을 제외하고 계산합니다.`);
@@ -405,6 +419,7 @@ function emptyLedger() {
   return {
     lotsByEmployee: {}, annualLeaveBefore: {}, currentGrants: [], settlementGrants: [], autoUseDates: [],
     previousMonth: "", previousMonthFacts: {}, previousMonthCutoff: "", previousMonthDailyFacts: [],
+    currentMonthCutoff: "", currentMonthDailyFacts: [],
   };
 }
 
@@ -852,6 +867,335 @@ function mergeAnnualLeaveLedger(result, dashboard, annualComparison) {
   result.annualLeavePeople = (result.employeeSummaries || []).filter((row) => Number(row.annualApproved || 0) > 0).length;
 }
 
+
+function buildHrPayrollAudit({ result, annualApplications = [], targetMonth, cutoffDate, route }) {
+  const cutoff = cutoffDate || endOfMonth(targetMonth);
+  const applicationsByKey = groupAnnualApplicationsByEmployeeDate(annualApplications || []);
+  const metaMap = workforceMetaMap(result.workforce || {});
+  const settlementRows = [];
+  const dailyRows = [];
+  const annualNeedRows = [];
+  const problemRows = [];
+  const officialCodes = new Set(["경조", "공가"]);
+
+  for (const summary of result.employeeSummaries || []) {
+    const employeeId = normalizeEmployeeId(summary.employeeId);
+    if (!employeeId) continue;
+    const meta = metaMap.get(employeeId) || {};
+    const identity = {
+      route: summary.route || route,
+      routeLabel: summary.routeLabel || ROUTE_LABELS[route] || "",
+      regionalManager: summary.regionalManager || meta.regionalManager || "",
+      manager: summary.manager || meta.manager || "",
+      region: summary.region2 || summary.region1 || meta.region || "",
+      store: summary.store || meta.store || "",
+      employeeId,
+      name: summary.name || meta.name || "",
+    };
+    const dailyStatuses = (summary.dailyStatuses || [])
+      .filter((daily) => String(daily.date || "").startsWith(`${targetMonth}-`) && String(daily.date || "") <= cutoff)
+      .sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
+    const dailyByDate = new Map(dailyStatuses.map((daily) => [String(daily.date || ""), daily]));
+    const baseExcessDates = new Set((summary.baseExcessEvents || []).map((event) => String(event.date || "")).filter(Boolean));
+
+    let workedDays = 0;
+    let missingDays = 0;
+    let recognizedDayoff = 0;
+    let directSubstitute = 0;
+    let directCompensation = 0;
+    let officialPaidDays = 0;
+    let annualApprovedDays = 0;
+    let annualPendingDays = 0;
+    let annualRejectedDays = 0;
+    let annualMissingApplicationDays = 0;
+    let unresolvedDays = 0;
+
+    for (const daily of dailyStatuses) {
+      const date = String(daily.date || "");
+      const applications = applicationsByKey.get(`${employeeId}|${date}`) || [];
+      if (daily.hasClockIn) {
+        workedDays += 1;
+        if (applications.length) {
+          const appSummary = summarizeAnnualApplications(applications);
+          dailyRows.push({
+            ...identity,
+            date,
+            checkOrder: daily.evidenced ? "2순위 출근 증빙" : "1순위 실제 출근",
+            sourceStatus: normalizeDailyPayrollStatus(daily),
+            attendanceStatus: "출근기록 있음",
+            applicationStatus: appSummary.statusLabel,
+            requestedDays: appSummary.totalDays,
+            payrollDecision: "출근 인정",
+            leaveDecision: applications.length ? "출근기록 우선 · 연차/휴가 차감 제외 확인" : "-",
+            finalStatus: "급여확정",
+            note: "계획과 상관없이 실제 근태 기록이 있으므로 출근일수에 포함",
+          });
+        }
+        continue;
+      }
+
+      missingDays += 1;
+      const status = normalizeDailyPayrollStatus(daily);
+      const dayoffExceeded = baseExcessDates.has(date);
+      let checkOrder = "";
+      let payrollDecision = "";
+      let leaveDecision = "";
+      let finalStatus = "급여확정";
+      let requestedDays = 0;
+      let appStatus = "-";
+      let note = "";
+
+      if (status === "휴무") {
+        checkOrder = "3순위 휴무";
+        recognizedDayoff += 1;
+        payrollDecision = dayoffExceeded ? "휴무 초과 확인" : "휴무 인정";
+        leaveDecision = dayoffExceeded ? "대체·보상 잔여로 대체 필요" : "기본 휴무 범위 내";
+        finalStatus = dayoffExceeded ? "대체·보상 확인" : "급여확정";
+        note = dayoffExceeded ? "기본 휴무 초과일이므로 대체휴무 → 보상휴가 → 연차 순서로 정산" : "출근기록 없는 휴무일로 인정";
+      } else if (officialCodes.has(status)) {
+        checkOrder = "4순위 경조·공가";
+        officialPaidDays += 1;
+        payrollDecision = `${status} 인정`;
+        leaveDecision = "유급 미출근 항목 확인";
+        finalStatus = "급여확정";
+        note = "출근·휴무 확인 후 경조/공가로 인정";
+      } else if (substitutePlanValue(status) > 0 || compensationPlanValue(status) > 0) {
+        checkOrder = "5순위 대체·보상";
+        const subDays = substitutePlanValue(status);
+        const compDays = compensationPlanValue(status);
+        directSubstitute = roundHalf(directSubstitute + subDays);
+        directCompensation = roundHalf(directCompensation + compDays);
+        payrollDecision = subDays > 0 ? "대체휴무 사용" : "보상휴가 사용";
+        leaveDecision = "잔여 차감 확인";
+        requestedDays = roundHalf(subDays + compDays);
+        finalStatus = "대체·보상 확인";
+        note = "출근기록 없는 대체·보상 사용일로 잔여에서 차감";
+      } else {
+        const planAnnualDays = annualLeaveValue(status);
+        const appSummary = summarizeAnnualApplications(applications);
+        checkOrder = "6순위 연차";
+        requestedDays = roundHalf(appSummary.totalDays || planAnnualDays || 1);
+        appStatus = appSummary.statusLabel;
+        if (appSummary.approvedDays > 0 && appSummary.approvedDays >= requestedDays) {
+          annualApprovedDays = roundHalf(annualApprovedDays + requestedDays);
+          payrollDecision = "연차 사용";
+          leaveDecision = "승인 연차 차감";
+          finalStatus = "급여확정";
+          note = "출근기록이 없고 승인 연차가 확인됨";
+        } else if (appSummary.approvedDays > 0) {
+          annualApprovedDays = roundHalf(annualApprovedDays + appSummary.approvedDays);
+          annualMissingApplicationDays = roundHalf(annualMissingApplicationDays + Math.max(0, requestedDays - appSummary.approvedDays));
+          payrollDecision = "연차 일부 승인";
+          leaveDecision = "부족분 신청/승인 필요";
+          finalStatus = "연차 확인 필요";
+          note = `승인 ${formatDays(appSummary.approvedDays)} / 필요 ${formatDays(requestedDays)}`;
+        } else if (appSummary.pendingDays > 0) {
+          annualPendingDays = roundHalf(annualPendingDays + requestedDays);
+          payrollDecision = "연차 승인 대기";
+          leaveDecision = "관리자 승인 필요";
+          finalStatus = "승인 필요";
+          note = "연차 신청은 있으나 승인 완료 상태가 아님";
+        } else if (appSummary.rejectedDays > 0) {
+          annualRejectedDays = roundHalf(annualRejectedDays + requestedDays);
+          payrollDecision = "연차 반려";
+          leaveDecision = "결근/무급 또는 재신청 확인";
+          finalStatus = "반려 확인";
+          note = "반려 상태라 급여 지급 전 확인 필요";
+        } else if (planAnnualDays > 0) {
+          annualMissingApplicationDays = roundHalf(annualMissingApplicationDays + planAnnualDays);
+          payrollDecision = "연차 신청 없음";
+          leaveDecision = "신청 누락";
+          finalStatus = "연차 신청 필요";
+          requestedDays = planAnnualDays;
+          note = "계획상 연차·반차이나 신청/승인 자료 없음";
+        } else {
+          unresolvedDays = roundHalf(unresolvedDays + 1);
+          annualMissingApplicationDays = roundHalf(annualMissingApplicationDays + 1);
+          payrollDecision = "미출근 사유 미확정";
+          leaveDecision = "연차 사용 필요 여부 확인";
+          finalStatus = "최종 확인 필요";
+          requestedDays = 1;
+          note = "휴무·경조·공가·대체·보상·승인 연차로 설명되지 않는 미출근일";
+        }
+      }
+
+      dailyRows.push({
+        ...identity,
+        date,
+        checkOrder,
+        sourceStatus: status,
+        attendanceStatus: "출근기록 없음",
+        applicationStatus: appStatus,
+        requestedDays,
+        payrollDecision,
+        leaveDecision,
+        finalStatus,
+        note,
+      });
+    }
+
+    const dayoffExcess = roundHalf(Math.max(0, Number(summary.baseExcess || 0)));
+    const substituteReplacement = roundHalf(Number(summary.dayoffReplacementSubstituteUsed || 0));
+    const compensationReplacement = roundHalf(Number(summary.dayoffReplacementCompensationUsed || 0));
+    const replacementCovered = roundHalf(Number(summary.dayoffReplacementUsed || 0));
+    const replacementShortage = roundHalf(Number(summary.dayoffReplacementShortage || 0));
+    const annualNeededFromDayoff = replacementShortage;
+    const annualNeededTotal = roundHalf(annualNeededFromDayoff + annualMissingApplicationDays + annualPendingDays + annualRejectedDays + unresolvedDays);
+    const requiredDays = dailyStatuses.length;
+    const explainedDays = roundHalf(workedDays + recognizedDayoff + directSubstitute + directCompensation + officialPaidDays + annualApprovedDays + replacementCovered);
+    const remainingUnexplainedDays = roundHalf(Math.max(0, requiredDays - explainedDays));
+    const hardProblems = roundHalf(annualMissingApplicationDays + annualPendingDays + annualRejectedDays + unresolvedDays + Math.max(0, annualNeededFromDayoff));
+    let payrollStatus = "급여확정";
+    if (hardProblems > 0) payrollStatus = "확인 필요";
+    if (annualNeededFromDayoff > 0 || annualMissingApplicationDays > 0) payrollStatus = "연차 신청 필요";
+    if (annualPendingDays > 0) payrollStatus = "승인 필요";
+    if (annualRejectedDays > 0) payrollStatus = "반려 확인";
+    if (unresolvedDays > 0) payrollStatus = "최종 확인 필요";
+
+    const settlement = {
+      ...identity,
+      requiredDays,
+      explainedDays,
+      remainingUnexplainedDays,
+      baseAllowance: summary.baseAllowance,
+      workedDays,
+      missingDays,
+      dayoffUsed: summary.basicDayoffUsed,
+      dayoffExcess,
+      substituteAvailable: summary.availableSubstitute,
+      compensationAvailable: summary.availableCompensation,
+      substituteReplacement,
+      compensationReplacement,
+      replacementCovered,
+      replacementShortage,
+      officialPaidDays,
+      annualApprovedDays,
+      annualPendingDays,
+      annualRejectedDays,
+      annualMissingApplicationDays,
+      annualNeededFromDayoff,
+      annualNeededTotal,
+      annualRemaining: summary.annualRemaining,
+      payrollStatus,
+      priorityFlow: "실제 출근 → 출근 증빙 → 휴무 → 경조·공가 → 대체·보상 → 연차 → 최종 문제자",
+      note: buildPayrollSettlementNote({ dayoffExcess, replacementCovered, replacementShortage, annualNeededTotal, payrollStatus }),
+    };
+    settlementRows.push(settlement);
+
+    if (annualNeededFromDayoff > 0 || annualMissingApplicationDays > 0 || annualPendingDays > 0 || annualRejectedDays > 0 || unresolvedDays > 0) {
+      annualNeedRows.push({
+        ...identity,
+        dayoffExcess,
+        replacementCovered,
+        replacementShortage,
+        annualNeededFromDayoff,
+        annualMissingApplicationDays,
+        annualPendingDays,
+        annualRejectedDays,
+        unresolvedDays,
+        annualNeededTotal,
+        annualRemaining: summary.annualRemaining,
+        payrollStatus,
+        note: settlement.note,
+      });
+    }
+    if (payrollStatus !== "급여확정") problemRows.push(settlement);
+  }
+
+  settlementRows.sort(payrollAuditSort);
+  dailyRows.sort((a, b) => payrollAuditSort(a, b) || String(a.date).localeCompare(String(b.date)));
+  annualNeedRows.sort(payrollAuditSort);
+  problemRows.sort(payrollAuditSort);
+  return {
+    summary: {
+      totalPeople: settlementRows.length,
+      confirmedPeople: settlementRows.filter((row) => row.payrollStatus === "급여확정").length,
+      problemPeople: problemRows.length,
+      dayoffExcessPeople: settlementRows.filter((row) => Number(row.dayoffExcess || 0) > 0).length,
+      annualNeedPeople: annualNeedRows.length,
+      workedDays: settlementRows.reduce((sum, row) => sum + Number(row.workedDays || 0), 0),
+    },
+    settlementRows,
+    dailyRows,
+    annualNeedRows,
+    problemRows,
+  };
+}
+
+function normalizeDailyPayrollStatus(daily) {
+  const display = normalizeActualCode(daily?.displayStatus || "");
+  if (display) return display;
+  const plan = normalizePlanCode(daily?.planStatus || "");
+  return plan || "공백";
+}
+
+function groupAnnualApplicationsByEmployeeDate(applications) {
+  const map = new Map();
+  for (const application of applications || []) {
+    const employeeId = normalizeEmployeeId(application.employeeId);
+    const date = String(application.date || application.leaveDate || "");
+    if (!employeeId || !date) continue;
+    const key = `${employeeId}|${date}`;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(application);
+  }
+  return map;
+}
+
+function summarizeAnnualApplications(applications = []) {
+  let approvedDays = 0;
+  let pendingDays = 0;
+  let rejectedDays = 0;
+  let totalDays = 0;
+  const statuses = new Set();
+  for (const item of applications || []) {
+    const days = roundHalf(Number(item.requestedDays || item.days || 0) || 0);
+    totalDays = roundHalf(totalDays + days);
+    const status = normalizeAnnualApplicationStatus(item.applicationStatus || item.status);
+    statuses.add(status);
+    if (status === "승인") approvedDays = roundHalf(approvedDays + days);
+    else if (status === "반려") rejectedDays = roundHalf(rejectedDays + days);
+    else pendingDays = roundHalf(pendingDays + days);
+  }
+  const ordered = ["승인", "미승인", "반려", "상태없음"].filter((status) => statuses.has(status));
+  return {
+    approvedDays,
+    pendingDays,
+    rejectedDays,
+    totalDays,
+    statusLabel: ordered.length ? ordered.join("/") : "-",
+  };
+}
+
+function normalizeAnnualApplicationStatus(statusValue) {
+  const raw = normalizeHeader(statusValue);
+  if (!raw) return "상태없음";
+  if (raw.includes("반려") || raw.includes("취소") || raw.includes("철회")) return "반려";
+  if (raw.startsWith("승인") || raw === "완료" || raw.includes("승인완료")) return "승인";
+  return "미승인";
+}
+
+function buildPayrollSettlementNote({ dayoffExcess, replacementCovered, replacementShortage, annualNeededTotal, payrollStatus }) {
+  const parts = [];
+  if (dayoffExcess > 0) parts.push(`휴무 초과 ${formatDays(dayoffExcess)}`);
+  if (replacementCovered > 0) parts.push(`대체·보상 대체 ${formatDays(replacementCovered)}`);
+  if (replacementShortage > 0) parts.push(`대체·보상 부족 ${formatDays(replacementShortage)}`);
+  if (annualNeededTotal > 0) parts.push(`연차 확인 필요 ${formatDays(annualNeededTotal)}`);
+  if (!parts.length) parts.push("출근일수·휴무·잔여 휴가 기준 급여 확정");
+  parts.push(payrollStatus);
+  return parts.join(" · ");
+}
+
+function payrollAuditSort(a, b) {
+  const priority = { "최종 확인 필요": 0, "반려 확인": 1, "승인 필요": 2, "연차 신청 필요": 3, "확인 필요": 4, "급여확정": 9 };
+  return (priority[a.payrollStatus] ?? 5) - (priority[b.payrollStatus] ?? 5)
+    || String(a.region || "").localeCompare(String(b.region || ""), "ko")
+    || String(a.manager || "").localeCompare(String(b.manager || ""), "ko")
+    || String(a.store || "").localeCompare(String(b.store || ""), "ko")
+    || String(a.name || "").localeCompare(String(b.name || ""), "ko");
+}
+
+
 function workforceMetaMap(workforce) {
   const map = new Map();
   for (const member of workforce?.members || []) {
@@ -1094,6 +1438,57 @@ function chooseReferencePlanRow(plans, referenceItem, attendanceValue) {
     if (matched) return matched;
   }
   return plans[0];
+}
+
+function applyCurrentMonthSavedDailyCorrections(plan, attendance, ledger, targetMonth, cutoffDate) {
+  const savedCutoff = String(ledger?.currentMonthCutoff || "");
+  if (!savedCutoff || savedCutoff >= cutoffDate) return { appliedCount: 0, cutoffDate: savedCutoff };
+  const facts = Array.isArray(ledger?.currentMonthDailyFacts) ? ledger.currentMonthDailyFacts : [];
+  if (!facts.length) return { appliedCount: 0, cutoffDate: savedCutoff };
+
+  const planRowsById = groupBy(plan.rows || [], (row) => normalizeEmployeeId(row.employeeId));
+  const replacementRows = [];
+  let appliedCount = 0;
+  for (const fact of facts) {
+    const employeeId = normalizeEmployeeId(fact.employeeId);
+    if (!employeeId) continue;
+    const plans = planRowsById.get(employeeId) || [];
+    if (!plans.length) continue;
+    const selectedPlan = chooseReferencePlanRow(plans, { store: fact.store }, emptyAttendanceValue());
+    if (!selectedPlan) continue;
+    for (const daily of fact.dailyStatuses || []) {
+      const date = String(daily?.date || "");
+      if (!date.startsWith(`${targetMonth}-`) || date > savedCutoff || date > cutoffDate) continue;
+      const day = Number(date.slice(-2));
+      if (!day) continue;
+      const displayValue = text(daily.displayStatus || daily.actualIn || daily.changedIn || daily.actualStatus || daily.planStatus || "").trim();
+      const normalized = normalizeActualCode(displayValue) || normalizePlanCode(displayValue);
+      const clockValue = cleanClockValue(daily.actualIn || daily.changedIn || (isClockDisplayValue(displayValue) ? displayValue.slice(0, 5) : ""));
+      const forceClockIn = Boolean(daily.hasClockIn || clockValue || comparableCode(normalized) === "근무");
+      const finalDisplay = forceClockIn ? (clockValue || displayValue || "출근") : (normalized || displayValue || "");
+      const finalPlan = forceClockIn ? normalizePlanCode(selectedPlan.plans?.[day]) : (normalized || "공백");
+      if (!forceClockIn && finalPlan && finalPlan !== "공백") selectedPlan.plans[day] = finalPlan;
+      replacementRows.push({
+        employeeId,
+        name: fact.name || selectedPlan.name || "",
+        date,
+        actualIn: clockValue,
+        changedIn: daily.changedIn || "",
+        location: fact.store || selectedPlan.store || "",
+        actualStatus: forceClockIn ? "출근" : (normalized || daily.actualStatus || ""),
+        finalOverride: true,
+        forceClockIn,
+        finalDisplay,
+      });
+      appliedCount += 1;
+    }
+  }
+  if (replacementRows.length) {
+    const replacementKeys = new Set(replacementRows.map((row) => `${normalizeEmployeeId(row.employeeId)}|${row.date}`));
+    attendance.rows = (attendance.rows || []).filter((row) => !replacementKeys.has(`${normalizeEmployeeId(row.employeeId)}|${row.date}`));
+    attendance.rows.push(...replacementRows);
+  }
+  return { appliedCount, cutoffDate: savedCutoff };
 }
 
 function applyReferenceDailyCorrections(plan, attendance, reference, targetMonth, cutoffDate) {
@@ -1832,9 +2227,11 @@ function buildWeeklyAttendanceChecks({ employeeFacts = [], previousMonthDailyFac
     const date = String(daily?.date || "");
     if (!employeeId || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return;
     if (!dailyByEmployee.has(employeeId)) dailyByEmployee.set(employeeId, new Map());
+    const displayStatus = normalizeActualCode(daily?.displayStatus || "") || normalizePlanCode(daily?.displayStatus || "");
     dailyByEmployee.get(employeeId).set(date, {
       date,
       planStatus: normalizePlanCode(daily?.planStatus || "공백"),
+      displayStatus: displayStatus || "",
       hasClockIn: Boolean(daily?.hasClockIn),
       actualStatus: String(daily?.actualStatus || ""),
       evidenced: Boolean(daily?.evidenced),
@@ -1862,22 +2259,34 @@ function buildWeeklyAttendanceChecks({ employeeFacts = [], previousMonthDailyFac
     for (const week of weeks) {
       const dates = datesBetween(week.startDate, week.endDate);
       const available = dates.map((date) => dailyMap.get(date)).filter(Boolean);
-      const counted = available.filter((daily) => daily.date <= cutoffDate && daily.hasClockIn).length;
-      const observedDays = available.filter((daily) => daily.date <= cutoffDate).length;
+      const effective = available.filter((daily) => daily.date <= cutoffDate);
+      const counted = effective.filter((daily) => daily.hasClockIn).length;
+      const observedDays = effective.length;
       const weekFinished = cutoffDate >= week.endDate;
       const fullCoverage = available.length === 7;
+      const unresolvedDates = effective.filter((daily) => weeklyPotentialAttendanceGap(daily));
+      const unresolvedCount = unresolvedDates.length;
+      const leaveClockDates = effective.filter((daily) => daily.hasClockIn && weeklyPlannedNonWorkStatus(daily));
       let category = "";
       if (counted >= 6) category = "6회 이상";
-      else if (weekFinished && fullCoverage && counted <= 3) category = "3회 이하";
+      else if (weekFinished && fullCoverage && counted + unresolvedCount >= 6) category = "6회 후보";
+      else if (weekFinished && fullCoverage && counted <= 3 && unresolvedCount > 0) category = "3회 이하 공백";
       const planSequence = dates.map((date) => weeklyDisplayStatus(dailyMap.get(date), date, cutoffDate));
+      const riskParts = [];
+      if (unresolvedCount > 0) riskParts.push(`확인 공백/미출근 ${unresolvedCount}일(${unresolvedDates.map((daily) => formatKoreanDate(daily.date)).join(", ")})`);
+      if (leaveClockDates.length > 0) riskParts.push(`휴무·휴가계획 출근 ${leaveClockDates.length}일(${leaveClockDates.map((daily) => `${formatKoreanDate(daily.date)} ${weeklyPlannedNonWorkStatus(daily)}`).join(", ")})`);
+      const riskNote = riskParts.length ? ` · ${riskParts.join(" · ")}` : "";
       weekResults.push({
         ...week,
         attendanceCount: counted,
         observedDays,
         fullCoverage,
         weekFinished,
+        unresolvedCount,
+        potentialAttendanceCount: counted + unresolvedCount,
+        leaveClockCount: leaveClockDates.length,
         category,
-        note: `${week.label}(${formatKoreanDate(week.startDate)}~${formatKoreanDate(week.endDate)}) ${planSequence.join(" / ")}`,
+        note: `${week.label}(${formatKoreanDate(week.startDate)}~${formatKoreanDate(week.endDate)}) 출근 ${counted}회 / 출근 가능성 ${counted + unresolvedCount}회 · ${planSequence.join(" / ")}${riskNote}`,
       });
     }
     const flagged = weekResults.filter((week) => week.category);
@@ -1906,9 +2315,32 @@ function buildWeeklyAttendanceChecks({ employeeFacts = [], previousMonthDailyFac
     weeks,
     rows,
     highCount: rows.filter((row) => row.weekResults.some((week) => week.category === "6회 이상")).length,
-    lowCount: rows.filter((row) => row.weekResults.some((week) => week.category === "3회 이하")).length,
+    highCandidateCount: rows.filter((row) => row.weekResults.some((week) => week.category === "6회 후보")).length,
+    lowCount: rows.filter((row) => row.weekResults.some((week) => week.category === "3회 이하 공백")).length,
     partialWeeks: weeks.filter((week) => cutoffDate < week.endDate).map((week) => week.label),
   };
+}
+
+function weeklyPotentialAttendanceGap(daily) {
+  if (!daily || daily.hasClockIn) return false;
+  const status = normalizePlanCode(daily.displayStatus || daily.planStatus || "공백");
+  if (weeklyRecognizedFullNonWorkStatus(status)) return false;
+  return true;
+}
+
+function weeklyRecognizedFullNonWorkStatus(statusValue) {
+  const status = normalizePlanCode(statusValue || "공백");
+  if (status === "휴무" || status === "연차" || status === "공가" || status === "경조") return true;
+  if (substitutePlanValue(status) >= 1 || compensationPlanValue(status) >= 1) return true;
+  // 반차와 교육은 실제 출근기록이 있어야 출근으로 인정되므로 여기서는 설명 완료로 보지 않습니다.
+  return false;
+}
+
+function weeklyPlannedNonWorkStatus(daily) {
+  if (!daily) return "";
+  const status = normalizePlanCode(daily.displayStatus || daily.planStatus || "공백");
+  if (weeklyRecognizedFullNonWorkStatus(status)) return status;
+  return "";
 }
 
 function weeksOverlappingMonth(targetMonth) {
