@@ -305,16 +305,6 @@ function buildAuditTableSheet(workbook, sheetName, title, subtitle, rows, column
   matrix[6] = columns.map(([header]) => header);
   for (const row of rows) matrix.push(columns.map(([, getter]) => getter(row)));
 
-
-  const manualTitleRow = matrix.length;
-  matrix.push(["▼ 수기 입력 영역", "", "", "", "", "", "", "", "", "", "", "", "계획이 휴무/공백인데 출근 증빙을 받은 경우 이름·발생일 입력 후 L열 출근확인에 O", ""]);
-  const manualRows = [];
-  for (let i = 0; i < 30; i += 1) {
-    const rowIndex = matrix.length;
-    matrix.push([`수기${String(i + 1).padStart(2, "0")}`, "", "", "", "", "", "", "", "수기입력", "수기 출근증빙", "", "", "", "미처리"]);
-    manualRows.push(rowIndex);
-  }
-
   const sheet = XLSX.utils.aoa_to_sheet(matrix);
   sheet["!merges"] = [
     { s: { r: 0, c: 0 }, e: { r: 0, c: columns.length - 1 } },
@@ -586,10 +576,6 @@ function buildIssueSummarySheet(workbook, result, ctx, year, monthNo) {
     { s: { r: 3, c: 12 }, e: { r: 3, c: 13 } },
     { s: { r: 4, c: 12 }, e: { r: 4, c: 13 } },
   ];
-  sheet["!merges"].push(
-    { s: { r: manualTitleRow, c: 0 }, e: { r: manualTitleRow, c: 11 } },
-    { s: { r: manualTitleRow, c: 12 }, e: { r: manualTitleRow, c: 13 } },
-  );
   for (const item of regionRows) {
     sheet["!merges"].push(
       { s: { r: item.row, c: 0 }, e: { r: item.row, c: 7 } },
@@ -1319,6 +1305,15 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
     }
   }
 
+  const manualTitleRow = matrix.length;
+  matrix.push(["▼ 수기 입력 영역", "", "", "", "", "", "", "", "", "", "", "", "계획이 휴무/공백인데 출근 증빙을 받은 경우 이름·발생일 입력 후 L열 출근확인에 O", ""]);
+  const manualRows = [];
+  for (let i = 0; i < 30; i += 1) {
+    const rowIndex = matrix.length;
+    matrix.push([`수기${String(i + 1).padStart(2, "0")}`, "", "", "", "", "", "", "", "수기입력", "수기 출근증빙", "", "", "", "미처리"]);
+    manualRows.push(rowIndex);
+  }
+
   const sheet = XLSX.utils.aoa_to_sheet(matrix);
   sheet["!merges"] = [
     { s: { r: 0, c: 0 }, e: { r: 0, c: 13 } },
@@ -1332,6 +1327,10 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
     { s: { r: 3, c: 12 }, e: { r: 3, c: 13 } },
     { s: { r: 4, c: 12 }, e: { r: 4, c: 13 } },
   ];
+  sheet["!merges"].push(
+    { s: { r: manualTitleRow, c: 0 }, e: { r: manualTitleRow, c: 11 } },
+    { s: { r: manualTitleRow, c: 12 }, e: { r: manualTitleRow, c: 13 } },
+  );
   for (const item of regionRows) {
     sheet["!merges"].push(
       { s: { r: item.row, c: 0 }, e: { r: item.row, c: 7 } },
@@ -1465,7 +1464,6 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
     }
     applyProcessStatusStyle(sheet, XLSX.utils.encode_cell({ r: item.row, c: 13 }), "미처리");
   });
-
 
   styleCellRange(sheet, manualTitleRow, 0, manualTitleRow, 13, {
     fill: { patternType: "solid", fgColor: { rgb: "FFE2F0D9" } },
