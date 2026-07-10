@@ -12,7 +12,7 @@
     <header class="topbar">
       <div>
         <p class="eyebrow">ATTENDANCE MANAGEMENT</p>
-        <h1>전자랜드 · 홈플러스 근태 관리 <span class="version-tag">v44</span></h1>
+        <h1>전자랜드 · 홈플러스 근태 관리 <span class="version-tag">v48</span></h1>
       </div>
       <div class="topbar-actions">
         <span id="storageBadge" class="badge neutral">저장 방식 확인 중</span>
@@ -112,15 +112,15 @@
             </div>
 
             <div class="field-group optional-upload">
-              <label class="field-label">증빙 반영·비교 최종본 <span class="optional-label">선택</span></label>
+              <label class="field-label">증빙·중간 확인 완료 파일 <span class="optional-label">선택</span></label>
               <div class="upload-box">
                 <label class="dropzone compact-dropzone" id="referenceDropzone">
                   <input id="referenceFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
                   <span class="drop-icon">C</span>
-                  <strong id="referenceFileName">증빙 O 입력 최종본 선택</strong>
-                  <small>출근 미등록 K열·계획&근태 상이 M열·휴무 초과자 R열 중 한 곳에 O를 입력하면 연결된 중복 건을 함께 완료합니다. 인력 변동 입력값도 같이 인식합니다.</small>
+                  <strong id="referenceFileName">출근 증빙/처리 O 파일 선택</strong>
+                  <small>7/10까지 확인한 출근 증빙·처리 O 파일은 여기에 넣고 분석한 뒤 결과 화면의 ‘중간 확인 저장’을 누르면 해당 기준일 이전 확정값이 D1에 기록됩니다. 다음 분석부터는 저장된 날짜 이전 건을 다시 확인 대상으로 띄우지 않습니다.</small>
                 </label>
-                <button id="referenceFileClear" class="file-clear-button hidden" type="button" aria-label="증빙 최종본 파일 제거">파일 제거</button>
+                <button id="referenceFileClear" class="file-clear-button hidden" type="button" aria-label="증빙·중간 확인 파일 제거">파일 제거</button>
               </div>
             </div>
 
@@ -165,7 +165,8 @@
                     <select id="storeFilter" class="input compact"><option value="">전체 매장</option></select>
                     <select id="managerFilter" class="input compact"><option value="">전체 매니저</option></select>
                     <button id="exportButton" class="btn secondary" type="button">최종본 양식 엑셀 저장</button>
-                    <button id="saveClosureButton" class="btn primary" type="button">월 마감 교체 저장</button>
+                    <button id="saveClosureButton" class="btn primary" type="button">확인 기록 저장</button>
+                    <small id="saveClosureHelp" class="toolbar-help">기준일이 월말 전이면 중간 확인 저장, 월말이면 월 마감 저장으로 기록됩니다.</small>
                   </div>
                 </div>
 

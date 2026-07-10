@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=46";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=48";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -53,7 +53,7 @@ async function init() {
   setupFileClear("planFileClear", "planFile", setPlanFile, "계획표");
   setupFileClear("attendanceFileClear", "attendanceFile", setAttendanceFile, "실제 근태표");
   setupFileClear("annualFileClear", "annualFile", setAnnualFile, "연차신청현황");
-  setupFileClear("referenceFileClear", "referenceFile", setReferenceFile, "증빙 최종본");
+  setupFileClear("referenceFileClear", "referenceFile", setReferenceFile, "증빙·중간 확인 파일");
   setupDropzone("closureBaseDropzone", "closureBaseFile", setClosureBaseFile);
   setupDropzone("closureTargetDropzone", "closureTargetFile", setClosureTargetFile);
   await checkBackend();
@@ -259,6 +259,26 @@ function setClosureTargetFile(file) {
   resetClosureComparisonOutput();
 }
 
+
+function isMidMonthCutoff(month, cutoffDate) {
+  return Boolean(month && cutoffDate && cutoffDate.startsWith(month) && cutoffDate < endOfMonth(month));
+}
+
+function updateSaveClosureButtonLabel() {
+  const button = $("#saveClosureButton");
+  const help = $("#saveClosureHelp");
+  if (!button) return;
+  const month = state.result?.targetMonth || $("#targetMonth")?.value || "";
+  const cutoff = state.result?.cutoffDate || $("#cutoffDate")?.value || "";
+  if (isMidMonthCutoff(month, cutoff)) {
+    button.textContent = "중간 확인 저장";
+    if (help) help.textContent = `${cutoff}까지 확인한 증빙·휴무·연차 반영값을 D1에 기록합니다. 다음 분석부터 ${cutoff} 이전 건은 이어받습니다.`;
+  } else {
+    button.textContent = "월 마감 교체 저장";
+    if (help) help.textContent = "대상 월 전체 최종 확정본을 저장하고 누적 휴가를 재계산합니다.";
+  }
+}
+
 async function analyzeFiles() {
   const button = $("#analyzeButton");
   try {
@@ -362,6 +382,7 @@ async function analyzeFiles() {
       workforce,
     };
 
+    updateSaveClosureButtonLabel();
     renderResult();
     const correctionMessage = [
       finalCorrectionSummary.appliedCount ? `수정 최종본 ${finalCorrectionSummary.appliedCount}건 재반영` : "",
@@ -1042,7 +1063,10 @@ function buildHrPayrollAudit({ result, annualApplications = [], targetMonth, cut
     const annualNeededFromDayoff = replacementShortage;
     const annualNeededTotal = roundHalf(annualNeededFromDayoff + annualMissingApplicationDays + annualPendingDays + annualRejectedDays + unresolvedDays);
     const requiredDays = dailyStatuses.length;
-    const explainedDays = roundHalf(workedDays + recognizedDayoff + directSubstitute + directCompensation + officialPaidDays + annualApprovedDays + replacementCovered);
+    // 설명완료는 날짜가 어떤 항목으로 설명됐는지 보는 값이라 대체/보상으로 휴무초과를 보정한 수량은 더하지 않는다.
+    // replacementCovered는 이미 휴무일로 한 번 설명된 날짜를 잔여 대체/보상으로 정산한 값이므로 더하면 기준일수보다 커진다.
+    const rawExplainedDays = roundHalf(workedDays + recognizedDayoff + directSubstitute + directCompensation + officialPaidDays + annualApprovedDays);
+    const explainedDays = Math.min(requiredDays, rawExplainedDays);
     const remainingUnexplainedDays = roundHalf(Math.max(0, requiredDays - explainedDays));
     const hardProblems = roundHalf(annualMissingApplicationDays + annualPendingDays + annualRejectedDays + unresolvedDays + Math.max(0, annualNeededFromDayoff));
     let payrollStatus = "급여확정";
@@ -3792,7 +3816,8 @@ async function saveClosure() {
 
   try {
     button.disabled = true;
-    button.textContent = "월 마감 저장·재계산 중...";
+    const midMonthSave = isMidMonthCutoff(result.targetMonth, result.cutoffDate);
+    button.textContent = midMonthSave ? "중간 확인 기록 저장 중..." : "월 마감 저장·재계산 중...";
     const response = await fetch("/api/closures", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -3857,20 +3882,22 @@ async function saveClosure() {
       })] : []),
     ]);
     await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard(), loadPersonnelChecks()]);
-    const action = data.replaced ? "기존 월 마감을 완전히 교체했습니다." : "새 월 마감을 저장했습니다.";
+    const action = midMonthSave
+      ? (data.replaced ? `기존 ${result.targetMonth} 중간 확인 기록을 ${result.cutoffDate} 기준으로 교체했습니다.` : `${result.targetMonth} 중간 확인 기록을 ${result.cutoffDate} 기준으로 저장했습니다.`)
+      : (data.replaced ? "기존 월 마감을 완전히 교체했습니다." : "새 월 마감을 저장했습니다.");
     const recalculateMessage = data.recalculateWarning
       ? ` 월 마감 원본은 저장됐지만 누적 재계산 경고가 있습니다: ${data.recalculateWarning}`
       : ` ${data.affectedMonths || 0}개 월의 연차·대체휴무·보상휴가 누적을 다시 계산했습니다.`;
     const failedFiles = fileResults.filter((item) => item.status === "rejected");
     const fileMessage = failedFiles.length
-      ? ` 월 마감은 정상 저장됐지만 원본 파일 ${failedFiles.length}개는 보관하지 못했습니다: ${failedFiles.map((item) => item.reason?.message || "파일 보관 오류").join(" / ")}`
-      : " 계획표·근태표·보고용 결과본과 선택한 비교 원본을 파일 보관함에 저장했습니다.";
+      ? ` 기록은 정상 저장됐지만 원본 파일 ${failedFiles.length}개는 보관하지 못했습니다: ${failedFiles.map((item) => item.reason?.message || "파일 보관 오류").join(" / ")}`
+      : (midMonthSave ? " 계획표·근태표·중간 확인 결과본과 선택한 증빙 파일을 파일 보관함에 저장했습니다." : " 계획표·근태표·보고용 결과본과 선택한 비교 원본을 파일 보관함에 저장했습니다.");
     showToast(`${action}${recalculateMessage}${fileMessage}`);
   } catch (error) {
     showToast(error.message || "월 마감 저장 중 오류가 발생했습니다.");
   } finally {
     button.disabled = false;
-    button.textContent = "월 마감 교체 저장";
+    updateSaveClosureButtonLabel();
   }
 }
 
