@@ -1,6 +1,6 @@
 const WEEKDAYS = ["일", "월", "화", "수", "목", "금", "토"];
 const NON_WORK_CODES = new Set([
-  "휴무", "무급휴가", "연차", "공가", "휴가", "경조",
+  "휴무", "무급휴가", "연차", "공가", "휴가", "경조", "출산휴가", "육아휴직",
   "대체휴일(1일)", "대체휴일(0.5일)", "보상휴가(1일)", "보상휴가(0.5일)",
 ]);
 const WORK_CLOCK_CODES = new Set([
@@ -111,6 +111,7 @@ function buildContext(result, daysInMonth) {
   const planById = groupBy(result.plan?.rows || [], (row) => normalizeId(row.employeeId));
   const attendanceByKey = buildAttendanceMap(result.attendance?.rows || []);
   const summaryById = new Map((result.employeeSummaries || []).map((row) => [normalizeId(row.employeeId), row]));
+  const approvedLeaveStatusByKey = buildApprovedLeaveStatusMap(result.annualApplications || [], result.targetMonth);
   const evidenceSet = new Set((result.evidenceOverrides || []).map(String));
   const issueMap = new Map();
   for (const issue of result.mismatchRows || []) {
@@ -199,7 +200,7 @@ function buildContext(result, daysInMonth) {
     const dayoffExcessDateSet = new Set((summary.baseExcessEvents || []).map((event) => String(event?.date || "")).filter(Boolean));
     for (let day = 1; day <= daysInMonth; day += 1) {
       const date = `${result.targetMonth}-${String(day).padStart(2, "0")}`;
-      const planStatus = normalizePlan(person.plan?.plans?.[day]);
+      const rawPlanStatus = normalizePlan(person.plan?.plans?.[day]);
       const attendance = attendanceByKey.get(`${person.employeeId}|${date}`) || emptyAttendance();
       const evidenceKey = `${person.employeeId}|${date}`;
       const evidence = evidenceSet.has(evidenceKey);
@@ -207,10 +208,16 @@ function buildContext(result, daysInMonth) {
       const finalAttendance = evidence
         ? { ...attendance, hasClockIn: true, actualStatus: "출근", evidenced: true }
         : attendance;
+      // 연차신청현황에서 승인된 휴가/연차는 상담사근태에 먼저 반영합니다.
+      // 단, 실제 출근기록이나 출근증빙이 있으면 기존 원칙대로 출근시간이 우선입니다.
+      const approvedLeaveStatus = approvedLeaveStatusByKey.get(evidenceKey);
+      const planStatus = (!finalAttendance.hasClockIn && approvedLeaveStatus) ? approvedLeaveStatus.displayStatus : rawPlanStatus;
       const evidenceResolvesMissing = evidence && WORK_CLOCK_CODES.has(planStatus);
       daily[day] = {
         date,
         planStatus,
+        rawPlanStatus,
+        approvedLeaveStatus,
         attendance: finalAttendance,
         evidence,
         display: dailyDisplay(planStatus, finalAttendance),
@@ -225,6 +232,62 @@ function buildContext(result, daysInMonth) {
   }
 
   return { workforce, workforceById, planById, attendanceByKey, summaryById, issueMap, people, dailyByKey };
+}
+
+function buildApprovedLeaveStatusMap(applications = [], targetMonth = "") {
+  const map = new Map();
+  for (const item of applications || []) {
+    const employeeId = normalizeId(item.employeeId);
+    const date = String(item.leaveDate || item.date || "");
+    if (!employeeId || !/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+    if (targetMonth && !date.startsWith(targetMonth)) continue;
+    if (!isApprovedLeaveApplication(item)) continue;
+    const displayStatus = approvedLeaveDisplayStatus(item);
+    if (!displayStatus) continue;
+    const key = `${employeeId}|${date}`;
+    const previous = map.get(key);
+    // 같은 날짜에 여러 신청이 있으면 1일 휴가성 항목을 우선 표시합니다.
+    if (!previous || leaveDisplayPriority(displayStatus) < leaveDisplayPriority(previous.displayStatus)) {
+      map.set(key, { displayStatus, source: item });
+    }
+  }
+  return map;
+}
+
+function isApprovedLeaveApplication(item = {}) {
+  const status = normalizeTextKey(item.applicationStatus || item.status);
+  if (!status) return false;
+  if (status.includes("반려") || status.includes("취소") || status.includes("철회")) return false;
+  return status.includes("승인") || status.includes("완료");
+}
+
+function approvedLeaveDisplayStatus(item = {}) {
+  const rawType = normalizeTextKey(`${item.leaveType || ""} ${item.requestedKind || ""}`);
+  const days = Number(item.days ?? item.requestedDays ?? 0);
+  if (rawType.includes("출산")) return "출산휴가";
+  if (rawType.includes("육아")) return "육아휴직";
+  if (rawType.includes("공가")) return "공가";
+  if (rawType.includes("경조")) return "경조";
+  if (rawType.includes("대체") && (rawType.includes("0.5") || rawType.includes("반"))) return "대체휴일(0.5일)";
+  if (rawType.includes("대체")) return "대체휴일(1일)";
+  if (rawType.includes("보상") && (rawType.includes("0.5") || rawType.includes("반"))) return "보상휴가(0.5일)";
+  if (rawType.includes("보상")) return "보상휴가(1일)";
+  if (rawType.includes("오전") && rawType.includes("반차")) return "오전반차";
+  if (rawType.includes("오후") && rawType.includes("반차")) return "오후반차";
+  if (rawType.includes("반차") || days === 0.5) return "오전반차";
+  if (rawType.includes("연차") || !rawType || rawType.includes("휴가")) return "연차";
+  return item.leaveType || item.requestedKind || "연차";
+}
+
+function leaveDisplayPriority(value) {
+  if (["연차", "출산휴가", "육아휴직", "공가", "경조"].includes(value)) return 1;
+  if (["대체휴일(1일)", "보상휴가(1일)"].includes(value)) return 2;
+  if (["오전반차", "오후반차", "대체휴일(0.5일)", "보상휴가(0.5일)"].includes(value)) return 3;
+  return 9;
+}
+
+function normalizeTextKey(value) {
+  return String(value ?? "").trim().replace(/\s+/g, "");
 }
 
 function resolveLeaveShortageDates(events = [], shortage = 0, recordedDates = []) {
@@ -2840,7 +2903,7 @@ function applyStatusStyle(sheet, address, value) {
   else if (text === "휴무") fill = "FFDDEBF7";
   else if (text.includes("대체휴일") || text === "대체휴무" || text.includes("보상휴가")) { fill = "FF2F5597"; fontColor = "FFFFFFFF"; bold = true; }
   else if (["연차", "오전반차", "오후반차", "반일근무"].includes(text)) fill = "FFC6E0B4";
-  else if (["공가", "휴가", "경조", "무급휴가", "교육"].includes(text)) fill = "FFDDEBF7";
+  else if (["공가", "휴가", "경조", "무급휴가", "교육", "출산휴가", "육아휴직"].includes(text)) fill = "FFDDEBF7";
   // 정상 출근시간(예: 09:03)과 구버전 출근 표시는 기본 흰색을 유지합니다.
   if (!fill) return;
   const base = sheet[address].s ? clone(sheet[address].s) : {};
