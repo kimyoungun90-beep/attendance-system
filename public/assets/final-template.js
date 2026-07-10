@@ -112,6 +112,7 @@ function buildContext(result, daysInMonth) {
   const attendanceByKey = buildAttendanceMap(result.attendance?.rows || []);
   const summaryById = new Map((result.employeeSummaries || []).map((row) => [normalizeId(row.employeeId), row]));
   const approvedLeaveStatusByKey = buildApprovedLeaveStatusMap(result.annualApplications || [], result.targetMonth);
+  const leaveApplicationStatusByKey = buildLeaveApplicationStatusMap(result.annualApplications || [], result.targetMonth);
   const evidenceSet = new Set((result.evidenceOverrides || []).map(String));
   const issueMap = new Map();
   for (const issue of result.mismatchRows || []) {
@@ -210,8 +211,13 @@ function buildContext(result, daysInMonth) {
       // 연차신청현황에서 승인된 휴가/연차는 상담사근태에 먼저 반영합니다.
       // 단, 실제 출근기록이나 출근증빙이 있으면 기존 원칙대로 출근시간이 우선입니다.
       const approvedLeaveStatus = approvedLeaveStatusByKey.get(evidenceKey);
+      const leaveApplicationStatus = leaveApplicationStatusByKey.get(evidenceKey);
       const planStatus = (!finalAttendance.hasClockIn && approvedLeaveStatus) ? approvedLeaveStatus.displayStatus : rawPlanStatus;
       const approvedLeaveResolvesMissing = Boolean(approvedLeaveStatus && !finalAttendance.hasClockIn);
+      const plannedLeaveApprovalIssue = Boolean(!finalAttendance.hasClockIn && !approvedLeaveStatus && requiresLeaveApproval(rawPlanStatus));
+      if (plannedLeaveApprovalIssue) {
+        addIssue(issueMap, person.employeeId, date, plannedLeaveApprovalReason(rawPlanStatus, leaveApplicationStatus));
+      }
       const issues = approvedLeaveResolvesMissing ? [] : (issueMap.get(`${person.employeeId}|${day}`) || []);
       const evidenceResolvesMissing = evidence && WORK_CLOCK_CODES.has(planStatus);
       daily[day] = {
@@ -219,6 +225,8 @@ function buildContext(result, daysInMonth) {
         planStatus,
         rawPlanStatus,
         approvedLeaveStatus,
+        leaveApplicationStatus,
+        plannedLeaveApprovalIssue,
         attendance: finalAttendance,
         evidence,
         display: dailyDisplay(planStatus, finalAttendance),
@@ -232,7 +240,91 @@ function buildContext(result, daysInMonth) {
     dailyByKey.set(person.key, daily);
   }
 
-  return { workforce, workforceById, planById, attendanceByKey, summaryById, issueMap, approvedLeaveStatusByKey, people, dailyByKey };
+  return { workforce, workforceById, planById, attendanceByKey, summaryById, issueMap, approvedLeaveStatusByKey, leaveApplicationStatusByKey, people, dailyByKey };
+}
+
+
+function buildLeaveApplicationStatusMap(applications = [], targetMonth = "") {
+  const map = new Map();
+  for (const item of applications || []) {
+    const employeeId = normalizeId(item.employeeId);
+    const date = String(item.leaveDate || item.date || "");
+    if (!employeeId || !/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+    if (targetMonth && !date.startsWith(targetMonth)) continue;
+    const displayStatus = approvedLeaveDisplayStatus(item);
+    const approvalStatus = leaveApprovalStatus(item);
+    const key = `${employeeId}|${date}`;
+    const current = map.get(key);
+    const candidate = { displayStatus, approvalStatus, source: item };
+    if (!current || leaveApplicationStatusPriority(candidate) < leaveApplicationStatusPriority(current)) map.set(key, candidate);
+  }
+  return map;
+}
+
+function leaveApprovalStatus(item = {}) {
+  const status = normalizeTextKey(item.applicationStatus || item.status);
+  if (!status) return "신청없음";
+  if (status.includes("반려") || status.includes("취소") || status.includes("철회")) return "반려";
+  if (status.includes("승인") || status.includes("완료")) return "승인";
+  return "미승인";
+}
+
+function leaveApplicationStatusPriority(item = {}) {
+  if (item.approvalStatus === "승인") return 1;
+  if (item.approvalStatus === "미승인") return 2;
+  if (item.approvalStatus === "반려") return 3;
+  return 9;
+}
+
+function requiresLeaveApproval(status = "") {
+  const normalized = normalizePlan(status);
+  return [
+    "연차", "오전반차", "오후반차", "출산휴가", "육아휴직", "공가", "경조",
+    "대체휴일(1일)", "대체휴일(0.5일)", "보상휴가(1일)", "보상휴가(0.5일)", "휴가",
+  ].includes(normalized);
+}
+
+function plannedLeaveApprovalReason(planStatus = "", applicationStatus = null) {
+  const label = normalizePlan(planStatus) || "휴가";
+  const state = applicationStatus?.approvalStatus || "신청없음";
+  if (state === "미승인") return `${label} 계획이나 연차신청현황 승인 전입니다`;
+  if (state === "반려") return `${label} 계획이나 연차신청현황 반려/취소/철회 상태입니다`;
+  return `${label} 계획이나 연차신청현황 승인 건이 없습니다`;
+}
+
+function buildUnapprovedPlannedLeaveEvidenceRows(ctx = {}, result = {}) {
+  const rows = [];
+  const targetMonth = result.targetMonth || "";
+  const daysInMonth = targetMonth ? new Date(Number(targetMonth.slice(0, 4)), Number(targetMonth.slice(5, 7)), 0).getDate() : 31;
+  const seen = new Set((result.missingRows || []).map((row) => `${normalizeId(row.employeeId)}|${row.date}`));
+  for (const person of ctx.people || []) {
+    const daily = ctx.dailyByKey?.get(person.key) || {};
+    for (let day = 1; day <= daysInMonth; day += 1) {
+      const item = daily[day];
+      if (!item?.plannedLeaveApprovalIssue) continue;
+      const key = `${normalizeId(person.employeeId)}|${item.date}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const member = person.member || {};
+      rows.push({
+        issueType: "planned_leave_not_approved",
+        missingType: "휴가 승인확인",
+        route: result.route || member.route || "",
+        employeeId: normalizeId(person.employeeId),
+        name: person.name || member.employeeName || "",
+        store: member.storeName || person.plan?.store || "",
+        date: item.date,
+        dateObject: item.date ? new Date(`${item.date}T00:00:00`) : null,
+        planStatus: item.rawPlanStatus || item.planStatus,
+        actualStatus: "",
+        actualIn: "",
+        changedIn: "",
+        result: "휴가 승인확인 필요",
+        reason: plannedLeaveApprovalReason(item.rawPlanStatus || item.planStatus, item.leaveApplicationStatus),
+      });
+    }
+  }
+  return rows;
 }
 
 function buildApprovedLeaveStatusMap(applications = [], targetMonth = "") {
@@ -1328,7 +1420,10 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
   const doneFormulaForRange = (range) => `(COUNTIF(${range},"O")+COUNTIF(${range},"○")+COUNTIF(${range},"ㅇ"))`;
   const doneFormulaForRow = (excelRow) => doneFormulaForRange(`$K${excelRow}:$W${excelRow}`);
 
-  const rows = [...(result.missingRows || [])]
+  const rows = [
+    ...(result.missingRows || []),
+    ...buildUnapprovedPlannedLeaveEvidenceRows(ctx, result),
+  ]
     .filter((row) => !isResolvedByApprovedLeave(row, ctx))
     .map((row) => {
       const member = findMember(ctx, row.employeeId, row.store) || {};
@@ -1348,7 +1443,7 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
   const uniqueStores = new Set(rows.map((row) => row.member.storeName || row.store || "").filter(Boolean)).size;
   const matrix = Array.from({ length: 7 }, () => Array(COL_COUNT).fill(""));
   matrix[0][0] = `${year}년 ${monthNo}월 출근증빙·휴무확인`;
-  matrix[1][0] = `출근 기록이 없거나 수기 보정이 필요한 건을 처리합니다. K~W열 중 해당 처리 항목에 O 입력 후 재업로드하면 상담사근태 해당 날짜가 출근/휴무/연차/반차/출산휴가/육아휴직/공가/경조/대체/보상으로 반영됩니다. 수기 입력 영역도 동일한 목록으로 처리됩니다. · 기준일 ${result.cutoffDate || `${year}-${String(monthNo).padStart(2, "0")}-${String(new Date(year, monthNo, 0).getDate()).padStart(2, "0")}`}`;
+  matrix[1][0] = `출근 기록이 없거나 승인되지 않은 휴가 계획, 수기 보정이 필요한 건을 처리합니다. K~W열 중 해당 처리 항목에 O 입력 후 재업로드하면 상담사근태 해당 날짜가 출근/휴무/연차/반차/출산휴가/육아휴직/공가/경조/대체/보상으로 반영됩니다. 수기 입력 영역도 동일한 목록으로 처리됩니다. · 기준일 ${result.cutoffDate || `${year}-${String(monthNo).padStart(2, "0")}-${String(new Date(year, monthNo, 0).getDate()).padStart(2, "0")}`}`;
 
   const cards = [
     [0, "총 확인 건수", `${rows.length}건`],
