@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=48";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=49";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -318,6 +318,9 @@ async function analyzeFiles() {
       ? applyReferenceDailyCorrections(plan, attendance, parsedReference, targetMonth, cutoffDate)
       : { appliedCount: 0, clockCount: 0, statusCount: 0, clearedCount: 0 };
     const workflowOverrides = parsedReference?.workflowOverrides || emptyWorkflowOverrides();
+    const workflowStatusSummary = parsedReference?.month === targetMonth
+      ? applyWorkflowDailyStatusOverrides(plan, attendance, workflowOverrides, targetMonth)
+      : { appliedCount: 0, clockCount: 0, dayoffCount: 0 };
     // 출근 미등록 K열뿐 아니라 계획&근태 상이 M열에서 출근 미입력 건을 O 처리해도 동일한 출근 증빙으로 반영합니다.
     const evidenceOverrides = [...new Set([
       ...(parsedReference?.evidenceKeys || []),
@@ -371,6 +374,7 @@ async function analyzeFiles() {
       hrPayrollAudit,
       referenceComparison,
       finalCorrectionSummary,
+      workflowStatusSummary,
       savedContinuationSummary,
       evidenceOverrides,
       workflowOverrides,
@@ -386,6 +390,7 @@ async function analyzeFiles() {
     renderResult();
     const correctionMessage = [
       finalCorrectionSummary.appliedCount ? `수정 최종본 ${finalCorrectionSummary.appliedCount}건 재반영` : "",
+      workflowStatusSummary.appliedCount ? `확인시트 ${workflowStatusSummary.appliedCount}건 반영` : "",
       savedContinuationSummary.appliedCount ? `이전 확정 ${savedContinuationSummary.appliedCount}건 이어받음` : "",
     ].filter(Boolean).join(" · ");
     const correctionMessageText = correctionMessage ? ` · ${correctionMessage}` : "";
@@ -1875,12 +1880,22 @@ function emptyWorkflowOverrides() {
     dayoffCompletedKeys: [],
     dayoffCompletedIds: [],
     managerDeliveredIds: [],
+    dailyStatusOverrides: [],
   };
 }
 
 function isWorkflowApproved(value) {
   const mark = String(value ?? "").trim().toUpperCase().replace(/\s+/g, "");
   return ["O", "○", "ㅇ", "Y", "YES", "TRUE", "완료", "처리완료", "전달완료", "증빙완료"].includes(mark);
+}
+
+function workflowOverrideStatus(value) {
+  const raw = String(value ?? "").trim();
+  const normalized = normalizeActualCode(raw);
+  if (isClockDisplayValue(raw)) return raw.slice(0, 5);
+  if (comparableCode(normalized) === "근무") return "09:00";
+  if (normalized === "휴무") return "휴무";
+  return raw;
 }
 
 function workflowIssueType(value, planStatus = "") {
@@ -1929,14 +1944,42 @@ function parseWorkflowOverrides(sheets, targetMonth = "", defaultRoute = "") {
     }
   };
 
-  scanSheet(/출근\s*미등록|증빙/, ["증빙여부(O입력)", "증빙여부(O 입력)", "증빙여부", "출근증빙", "증빙"], ({ employeeId, date }) => {
-    if (!date) return;
-    const dailyKey = `${employeeId}|${date}`;
-    dailySet.add(dailyKey);
-    attendanceEvidenceSet.add(dailyKey);
-    planSet.add(dailyKey);
-    issueSet.add(`${dailyKey}|missing_clock_in`);
-  });
+  for (const sheet of (sheets || []).filter((item) => /출근\s*증빙|휴무\s*확인|출근\s*미등록|증빙/.test(String(item.sheetName || "")))) {
+    const matrix = sheet.matrix || [];
+    const headerIndex = findFlexibleHeaderRow(matrix, (headers) => findHeaderIndex(headers, ["사번", "사원번호", "제니엘사번"]) >= 0
+      && (findHeaderIndex(headers, ["휴무확인(O입력)", "휴무확인(O 입력)", "휴무확인", "휴무"]) >= 0
+        || findHeaderIndex(headers, ["출근확인(O입력)", "출근확인(O 입력)", "출근확인", "증빙여부(O입력)", "증빙여부(O 입력)", "증빙여부", "출근증빙", "증빙"]) >= 0));
+    if (headerIndex < 0) continue;
+    const headers = (matrix[headerIndex] || []).map(normalizeHeader);
+    const idCol = findHeaderIndex(headers, ["사번", "사원번호", "제니엘사번"]);
+    const dateCol = findHeaderIndex(headers, ["발생일", "근무일자", "일자", "날짜"]);
+    const storeCol = findHeaderIndex(headers, ["매장명", "점포명", "매장"]);
+    const dayoffCol = findHeaderIndex(headers, ["휴무확인(O입력)", "휴무확인(O 입력)", "휴무확인", "휴무"]);
+    const clockCol = findHeaderIndex(headers, ["출근확인(O입력)", "출근확인(O 입력)", "출근확인", "증빙여부(O입력)", "증빙여부(O 입력)", "증빙여부", "출근증빙", "증빙"]);
+    if (idCol < 0 || dateCol < 0) continue;
+    for (const row of matrix.slice(headerIndex + 1)) {
+      const employeeId = normalizeEmployeeId(row[idCol]);
+      const date = parseReferenceFinalDate(row[dateCol]);
+      if (!looksLikeEmployeeId(employeeId) || !date) continue;
+      const dailyKey = `${employeeId}|${date}`;
+      const store = storeCol >= 0 ? text(row[storeCol]) : "";
+      const dayoffApproved = dayoffCol >= 0 && isWorkflowApproved(row[dayoffCol]);
+      const clockApproved = clockCol >= 0 && isWorkflowApproved(row[clockCol]);
+      if (dayoffApproved) {
+        dailySet.add(dailyKey);
+        planSet.add(dailyKey);
+        issueSet.add(`${dailyKey}|missing_clock_in`);
+        result.dailyStatusOverrides.push({ employeeId, date, store, status: "휴무", source: "출근증빙·휴무확인" });
+      }
+      if (clockApproved) {
+        dailySet.add(dailyKey);
+        attendanceEvidenceSet.add(dailyKey);
+        planSet.add(dailyKey);
+        issueSet.add(`${dailyKey}|missing_clock_in`);
+        result.dailyStatusOverrides.push({ employeeId, date, store, status: "09:00", source: "출근증빙·휴무확인" });
+      }
+    }
+  }
 
   scanSheet(/계획.*근태.*상이/, ["처리여부(O입력)", "처리여부(O 입력)", "처리체크", "완료여부", "처리완료"], ({ employeeId, date, typeText, planStatus }) => {
     if (!date) return;
@@ -1967,6 +2010,65 @@ function parseWorkflowOverrides(sheets, targetMonth = "", defaultRoute = "") {
   result.dayoffCompletedIds = [...dayoffIdSet];
   result.managerDeliveredIds = [...managerSet];
   return result;
+}
+
+function applyWorkflowDailyStatusOverrides(plan, attendance, overrides = emptyWorkflowOverrides(), targetMonth = "") {
+  const rows = Array.isArray(overrides?.dailyStatusOverrides) ? overrides.dailyStatusOverrides : [];
+  if (!rows.length) return { appliedCount: 0, clockCount: 0, dayoffCount: 0 };
+  const planRowsById = groupBy(plan.rows || [], (row) => normalizeEmployeeId(row.employeeId));
+  const replacementByKey = new Map();
+  const summary = { appliedCount: 0, clockCount: 0, dayoffCount: 0 };
+  for (const row of rows) {
+    const employeeId = normalizeEmployeeId(row.employeeId);
+    const date = String(row.date || "");
+    if (!employeeId || !date.startsWith(`${targetMonth}-`)) continue;
+    const day = Number(date.slice(-2));
+    const plans = planRowsById.get(employeeId) || [];
+    if (!plans.length || !day) continue;
+    const selectedPlan = chooseReferencePlanRow(plans, { store: row.store }, emptyAttendanceValue());
+    if (!selectedPlan) continue;
+    const status = workflowOverrideStatus(row.status);
+    const key = `${employeeId}|${date}`;
+    if (status === "휴무") {
+      selectedPlan.plans[day] = "휴무";
+      replacementByKey.set(key, {
+        employeeId,
+        name: selectedPlan.name || "",
+        date,
+        actualIn: "",
+        changedIn: "",
+        location: row.store || selectedPlan.store || "",
+        actualStatus: "휴무",
+        finalOverride: true,
+        forceClockIn: false,
+        finalDisplay: "휴무",
+      });
+      summary.dayoffCount += 1;
+      summary.appliedCount += 1;
+    } else {
+      const clock = isClockDisplayValue(status) ? status.slice(0, 5) : "09:00";
+      replacementByKey.set(key, {
+        employeeId,
+        name: selectedPlan.name || "",
+        date,
+        actualIn: clock,
+        changedIn: "",
+        location: row.store || selectedPlan.store || "",
+        actualStatus: "출근",
+        finalOverride: true,
+        forceClockIn: true,
+        finalDisplay: clock,
+      });
+      summary.clockCount += 1;
+      summary.appliedCount += 1;
+    }
+  }
+  if (replacementByKey.size) {
+    attendance.rows = (attendance.rows || []).filter((row) => !replacementByKey.has(`${normalizeEmployeeId(row.employeeId)}|${row.date}`));
+    attendance.rows.push(...replacementByKey.values());
+    attendance.hasActualStatusColumn = true;
+  }
+  return summary;
 }
 
 function applyWorkflowOverrides(result, overrides = emptyWorkflowOverrides(), context = {}) {
