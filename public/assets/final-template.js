@@ -305,6 +305,16 @@ function buildAuditTableSheet(workbook, sheetName, title, subtitle, rows, column
   matrix[6] = columns.map(([header]) => header);
   for (const row of rows) matrix.push(columns.map(([, getter]) => getter(row)));
 
+
+  const manualTitleRow = matrix.length;
+  matrix.push(["▼ 수기 입력 영역", "", "", "", "", "", "", "", "", "", "", "", "계획이 휴무/공백인데 출근 증빙을 받은 경우 이름·발생일 입력 후 L열 출근확인에 O", ""]);
+  const manualRows = [];
+  for (let i = 0; i < 30; i += 1) {
+    const rowIndex = matrix.length;
+    matrix.push([`수기${String(i + 1).padStart(2, "0")}`, "", "", "", "", "", "", "", "수기입력", "수기 출근증빙", "", "", "", "미처리"]);
+    manualRows.push(rowIndex);
+  }
+
   const sheet = XLSX.utils.aoa_to_sheet(matrix);
   sheet["!merges"] = [
     { s: { r: 0, c: 0 }, e: { r: 0, c: columns.length - 1 } },
@@ -576,6 +586,10 @@ function buildIssueSummarySheet(workbook, result, ctx, year, monthNo) {
     { s: { r: 3, c: 12 }, e: { r: 3, c: 13 } },
     { s: { r: 4, c: 12 }, e: { r: 4, c: 13 } },
   ];
+  sheet["!merges"].push(
+    { s: { r: manualTitleRow, c: 0 }, e: { r: manualTitleRow, c: 11 } },
+    { s: { r: manualTitleRow, c: 12 }, e: { r: manualTitleRow, c: 13 } },
+  );
   for (const item of regionRows) {
     sheet["!merges"].push(
       { s: { r: item.row, c: 0 }, e: { r: item.row, c: 7 } },
@@ -1239,17 +1253,15 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
   });
 
   rows.sort((a, b) => regionOrder.indexOf(a.region) - regionOrder.indexOf(b.region)
-    || String(a.member.regionalManager || "").localeCompare(String(b.member.regionalManager || ""), "ko")
-    || String(a.member.manager || "").localeCompare(String(b.member.manager || ""), "ko")
+    || String(a.name || a.member.employeeName || "").localeCompare(String(b.name || b.member.employeeName || ""), "ko")
     || String(a.member.storeName || a.store || "").localeCompare(String(b.member.storeName || b.store || ""), "ko")
-    || String(a.date || "").localeCompare(String(b.date || ""))
-    || String(a.name || "").localeCompare(String(b.name || ""), "ko"));
+    || String(a.date || "").localeCompare(String(b.date || "")));
 
   const uniquePeople = new Set(rows.map((row) => normalizeId(row.employeeId)).filter(Boolean)).size;
   const uniqueStores = new Set(rows.map((row) => row.member.storeName || row.store || "").filter(Boolean)).size;
   const matrix = Array.from({ length: 7 }, () => Array(14).fill(""));
   matrix[0][0] = `${year}년 ${monthNo}월 출근증빙·휴무확인`;
-  matrix[1][0] = `출근 기록이 없는 건만 표시합니다. K열 휴무확인 또는 L열 출근확인에 O 입력 후 재업로드하면 상담사근태 해당 날짜가 각각 휴무 또는 09:00으로 반영됩니다. · 기준일 ${result.cutoffDate || `${year}-${String(monthNo).padStart(2, "0")}-${String(new Date(year, monthNo, 0).getDate()).padStart(2, "0")}`}`;
+  matrix[1][0] = `출근 기록이 없는 건만 표시합니다. K열 휴무확인 또는 L열 출근확인에 O 입력 후 재업로드하면 상담사근태 해당 날짜가 각각 휴무 또는 09:00으로 반영됩니다. 하단 수기 입력 영역에는 이름·발생일을 입력하고 출근확인에 O를 넣으면 휴무계획자도 출근증빙으로 처리됩니다. · 기준일 ${result.cutoffDate || `${year}-${String(monthNo).padStart(2, "0")}-${String(new Date(year, monthNo, 0).getDate()).padStart(2, "0")}`}`;
 
   const cards = [
     [0, "총 미등록 건수", `${rows.length}건`],
@@ -1337,11 +1349,11 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
 
   const rangeStart = 8;
   const rangeEnd = Math.max(rangeStart, matrix.length);
-  setFormula(sheet, "A4", `COUNTA($G$${rangeStart}:$G$${rangeEnd})&"건"`, `${rows.length}건`);
+  setFormula(sheet, "A4", `COUNTIF($G$${rangeStart}:$G$${rangeEnd},"?*")&"건"`, `${rows.length}건`);
   setValue(sheet, "C4", `${uniquePeople}명`);
   setValue(sheet, "E4", `${uniqueStores}개`);
   const doneAllFormula = `(COUNTIF($K$${rangeStart}:$L$${rangeEnd},"O")+COUNTIF($K$${rangeStart}:$L$${rangeEnd},"○")+COUNTIF($K$${rangeStart}:$L$${rangeEnd},"ㅇ"))`;
-  setFormula(sheet, "G4", `(COUNTA($G$${rangeStart}:$G$${rangeEnd})-${doneAllFormula})&"건"`, `${rows.length}건`);
+  setFormula(sheet, "G4", `(COUNTIF($G$${rangeStart}:$G$${rangeEnd},"?*")-${doneAllFormula})&"건"`, `${rows.length}건`);
   setFormula(sheet, "I4", `${doneAllFormula}&"건"`, "0건");
 
   for (const item of regionRows) {
@@ -1357,6 +1369,13 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
 
   dataRows.forEach((item) => {
     const excelRow = item.row + 1;
+    setFormula(sheet, `N${excelRow}`, `IF(OR(UPPER(TRIM(K${excelRow}))="O",K${excelRow}="○",K${excelRow}="ㅇ",UPPER(TRIM(L${excelRow}))="O",L${excelRow}="○",L${excelRow}="ㅇ"),"처리 완료","미처리")`, "미처리");
+    setNumberFormat(sheet, `H${excelRow}`, "yyyy-mm-dd");
+  });
+
+  manualRows.forEach((rowIndex) => {
+    const excelRow = rowIndex + 1;
+    setFormula(sheet, `G${excelRow}`, `IFERROR(IF($F${excelRow}="","",INDEX('상담사근태'!$I:$I,MATCH($F${excelRow},'상담사근태'!$J:$J,0))),"")`, "");
     setFormula(sheet, `N${excelRow}`, `IF(OR(UPPER(TRIM(K${excelRow}))="O",K${excelRow}="○",K${excelRow}="ㅇ",UPPER(TRIM(L${excelRow}))="O",L${excelRow}="○",L${excelRow}="ㅇ"),"처리 완료","미처리")`, "미처리");
     setNumberFormat(sheet, `H${excelRow}`, "yyyy-mm-dd");
   });
@@ -1445,6 +1464,32 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
       };
     }
     applyProcessStatusStyle(sheet, XLSX.utils.encode_cell({ r: item.row, c: 13 }), "미처리");
+  });
+
+
+  styleCellRange(sheet, manualTitleRow, 0, manualTitleRow, 13, {
+    fill: { patternType: "solid", fgColor: { rgb: "FFE2F0D9" } },
+    font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FF107C41" } },
+    alignment: { horizontal: "left", vertical: "center", wrapText: true },
+    border: thinBorder("FFB7D7A8"),
+  });
+  manualRows.forEach((rowIndex, manualIndex) => {
+    styleCellRange(sheet, rowIndex, 0, rowIndex, 13, {
+      fill: { patternType: "solid", fgColor: { rgb: manualIndex % 2 ? "FFF7FBF5" : "FFFFFFFF" } },
+      font: { name: "맑은 고딕", sz: 9, color: { rgb: "FF1F2937" } },
+      alignment: { horizontal: "center", vertical: "center", wrapText: true },
+      border: thinBorder("FFDCE3EC"),
+    });
+    for (const addr of [XLSX.utils.encode_cell({ r: rowIndex, c: 5 }), XLSX.utils.encode_cell({ r: rowIndex, c: 7 }), XLSX.utils.encode_cell({ r: rowIndex, c: 10 }), XLSX.utils.encode_cell({ r: rowIndex, c: 11 })]) {
+      if (sheet[addr]) sheet[addr].s = {
+        ...(sheet[addr].s || {}),
+        fill: { patternType: "solid", fgColor: { rgb: "FFFFF2CC" } },
+        font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FFC55A11" } },
+        alignment: { horizontal: "center", vertical: "center" },
+        border: thinBorder("FFF4C27A"),
+      };
+    }
+    applyProcessStatusStyle(sheet, XLSX.utils.encode_cell({ r: rowIndex, c: 13 }), "미처리");
   });
 
   setRef(sheet, matrix.length, 14);

@@ -1827,6 +1827,7 @@ function findDateLikeColumn(matrix, startRow = 0) {
 
 function parseEvidenceOverrides(sheets) {
   const keys = new Set();
+  const employeeLookup = buildEmployeeLookupFromSheets(sheets);
   const candidates = (sheets || []).filter((sheet) => /출근\s*미등록|증빙/.test(String(sheet.sheetName || "")));
   // 시트명이 수기로 바뀐 경우에도 머리글을 찾아 읽을 수 있도록 전체 시트를 보조 탐색합니다.
   const scanSheets = candidates.length ? candidates : (sheets || []);
@@ -1849,18 +1850,22 @@ function parseEvidenceOverrides(sheets) {
 
     const headers = (matrix[headerIndex] || []).map(normalizeHeader);
     let employeeIdCol = findHeaderIndex(headers, ["제니엘사번", "사번", "사원번호"]);
+    let nameCol = findHeaderIndex(headers, ["성명", "이름", "직원명", "상담사명"]);
+    let storeCol = findHeaderIndex(headers, ["매장명", "점포명", "매장"]);
     let dateCol = findEvidenceDateColumn(headers);
-    let evidenceCol = findHeaderIndex(headers, ["증빙여부(O입력)", "증빙여부(O 입력)", "증빙여부", "출근증빙", "증빙"]);
+    let evidenceCol = findHeaderIndex(headers, ["증빙여부(O입력)", "증빙여부(O 입력)", "증빙여부", "출근증빙", "증빙", "출근확인(O입력)", "출근확인(O 입력)", "출근확인"]);
 
     if (dateCol < 0) dateCol = findDateLikeColumn(matrix, headerIndex + 1);
     // 최종본 고정양식에서 머리글이 지워진 경우: G=사번, H=발생일, K=증빙여부.
     if (employeeIdCol < 0 && (matrix[headerIndex] || []).length >= 11) employeeIdCol = 6;
     if (dateCol < 0 && (matrix[headerIndex] || []).length >= 11) dateCol = 7;
     if (evidenceCol < 0 && (matrix[headerIndex] || []).length >= 11) evidenceCol = 10;
-    if (employeeIdCol < 0 || dateCol < 0 || evidenceCol < 0) continue;
+    if ((employeeIdCol < 0 && nameCol < 0) || dateCol < 0 || evidenceCol < 0) continue;
 
     for (const row of matrix.slice(headerIndex + 1)) {
-      const employeeId = normalizeEmployeeId(row[employeeIdCol]);
+      const store = storeCol >= 0 ? text(row[storeCol]) : "";
+      let employeeId = employeeIdCol >= 0 ? normalizeEmployeeId(row[employeeIdCol]) : "";
+      if (!looksLikeEmployeeId(employeeId) && nameCol >= 0) employeeId = employeeLookup.resolve(row[nameCol], store);
       const date = parseReferenceFinalDate(row[dateCol]);
       const mark = String(row[evidenceCol] ?? "").trim().toUpperCase().replace(/\s+/g, "");
       const approved = ["O", "○", "ㅇ", "Y", "YES", "TRUE", "완료", "증빙완료"].includes(mark);
@@ -1910,8 +1915,53 @@ function isDayoffLinkedPlan(value) {
   return raw === "휴무" || substitutePlanValue(raw) > 0 || compensationPlanValue(raw) > 0;
 }
 
+function normalizeLookupKey(value) {
+  return text(value).replace(/\s+/g, "").trim();
+}
+
+function buildEmployeeLookupFromSheets(sheets) {
+  const byName = new Map();
+  const byNameStore = new Map();
+  const add = (map, key, employeeId) => {
+    if (!key || !looksLikeEmployeeId(employeeId)) return;
+    if (!map.has(key)) map.set(key, new Set());
+    map.get(key).add(employeeId);
+  };
+  for (const sheet of (sheets || []).filter((item) => /상담사\s*근태|출퇴근현황|근태/.test(String(item.sheetName || "")))) {
+    const matrix = sheet.matrix || [];
+    const headerIndex = findFlexibleHeaderRow(matrix, (headers) => (
+      findHeaderIndex(headers, ["사번", "사원번호", "제니엘사번"]) >= 0
+      && findHeaderIndex(headers, ["성명", "이름", "직원명", "상담사명"]) >= 0
+    ));
+    if (headerIndex < 0) continue;
+    const headers = (matrix[headerIndex] || []).map(normalizeHeader);
+    const idCol = findHeaderIndex(headers, ["사번", "사원번호", "제니엘사번"]);
+    const nameCol = findHeaderIndex(headers, ["성명", "이름", "직원명", "상담사명"]);
+    const storeCol = findHeaderIndex(headers, ["매장명", "점포명", "매장", "근무지", "출근지점"]);
+    if (idCol < 0 || nameCol < 0) continue;
+    for (const row of matrix.slice(headerIndex + 1)) {
+      const employeeId = normalizeEmployeeId(row[idCol]);
+      const name = normalizeLookupKey(row[nameCol]);
+      const store = storeCol >= 0 ? normalizeLookupKey(row[storeCol]) : "";
+      if (!looksLikeEmployeeId(employeeId) || !name) continue;
+      add(byName, name, employeeId);
+      if (store) add(byNameStore, `${name}|${store}`, employeeId);
+    }
+  }
+  const unique = (set) => set && set.size === 1 ? [...set][0] : "";
+  return {
+    resolve(nameValue, storeValue = "") {
+      const name = normalizeLookupKey(nameValue);
+      const store = normalizeLookupKey(storeValue);
+      if (!name) return "";
+      return unique(byNameStore.get(`${name}|${store}`)) || unique(byName.get(name)) || "";
+    },
+  };
+}
+
 function parseWorkflowOverrides(sheets, targetMonth = "", defaultRoute = "") {
   const result = emptyWorkflowOverrides();
+  const employeeLookup = buildEmployeeLookupFromSheets(sheets);
   const issueSet = new Set();
   const dailySet = new Set();
   const attendanceEvidenceSet = new Set();
@@ -1952,17 +2002,19 @@ function parseWorkflowOverrides(sheets, targetMonth = "", defaultRoute = "") {
     if (headerIndex < 0) continue;
     const headers = (matrix[headerIndex] || []).map(normalizeHeader);
     const idCol = findHeaderIndex(headers, ["사번", "사원번호", "제니엘사번"]);
+    const nameCol = findHeaderIndex(headers, ["성명", "이름", "직원명", "상담사명"]);
     const dateCol = findHeaderIndex(headers, ["발생일", "근무일자", "일자", "날짜"]);
     const storeCol = findHeaderIndex(headers, ["매장명", "점포명", "매장"]);
     const dayoffCol = findHeaderIndex(headers, ["휴무확인(O입력)", "휴무확인(O 입력)", "휴무확인", "휴무"]);
     const clockCol = findHeaderIndex(headers, ["출근확인(O입력)", "출근확인(O 입력)", "출근확인", "증빙여부(O입력)", "증빙여부(O 입력)", "증빙여부", "출근증빙", "증빙"]);
-    if (idCol < 0 || dateCol < 0) continue;
+    if ((idCol < 0 && nameCol < 0) || dateCol < 0) continue;
     for (const row of matrix.slice(headerIndex + 1)) {
-      const employeeId = normalizeEmployeeId(row[idCol]);
+      const store = storeCol >= 0 ? text(row[storeCol]) : "";
+      let employeeId = idCol >= 0 ? normalizeEmployeeId(row[idCol]) : "";
+      if (!looksLikeEmployeeId(employeeId) && nameCol >= 0) employeeId = employeeLookup.resolve(row[nameCol], store);
       const date = parseReferenceFinalDate(row[dateCol]);
       if (!looksLikeEmployeeId(employeeId) || !date) continue;
       const dailyKey = `${employeeId}|${date}`;
-      const store = storeCol >= 0 ? text(row[storeCol]) : "";
       const dayoffApproved = dayoffCol >= 0 && isWorkflowApproved(row[dayoffCol]);
       const clockApproved = clockCol >= 0 && isWorkflowApproved(row[clockCol]);
       if (dayoffApproved) {
