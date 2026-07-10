@@ -42,6 +42,7 @@ export async function buildFinalTemplateWorkbook(result) {
   const context = buildContext(result, daysInMonth);
   fillMainSheet(workbook.Sheets["상담사근태"], result, context, year, monthNo, daysInMonth);
   buildEvidenceDashboardSheet(workbook, result, context, year, monthNo);
+  buildDayoffReplacementSheet(workbook, result, context, year, monthNo);
   buildPlanAttendanceMatchSheet(workbook, result, context, year, monthNo);
   buildDayoffSubstituteSheet(workbook, result, context, year, monthNo);
   buildAnnualComparisonSheet(workbook, result, year, monthNo);
@@ -57,6 +58,7 @@ export async function buildFinalTemplateWorkbook(result) {
   workbook.SheetNames = [
     "상담사근태",
     "출근증빙·휴무확인",
+    "대체+보상 대체 인원",
     "계획&근태 상이 인원",
     "휴무 초과자",
     "인사팀 급여 확정표",
@@ -237,12 +239,87 @@ function buildContext(result, daysInMonth) {
         issues: evidenceResolvesMissing ? [] : [...new Set(issues)],
       };
     }
+    applyAutoBlankDayoffAndExcess(daily, summary, person.employeeId, issueMap);
     dailyByKey.set(person.key, daily);
   }
 
   return { workforce, workforceById, planById, attendanceByKey, summaryById, issueMap, approvedLeaveStatusByKey, leaveApplicationStatusByKey, people, dailyByKey };
 }
 
+function applyAutoBlankDayoffAndExcess(daily = {}, summary = {}, employeeId = "", issueMap = new Map()) {
+  const baseAllowance = roundHalf(Number(summary.baseAllowance || 0));
+  if (!(baseAllowance > 0)) return;
+
+  const days = Object.keys(daily)
+    .map((day) => Number(day))
+    .filter((day) => day > 0)
+    .sort((a, b) => a - b);
+
+  const explicitDayoffDays = days.filter((day) => isExplicitDayoffItem(daily[day]));
+  let recognizedDayoffCount = roundHalf(explicitDayoffDays.length);
+
+  // 계획을 공백으로 둔 인원이 많아, 기본 휴무 기준 안에서는 공백 미출근일을 먼저 휴무로 채웁니다.
+  // 단, 기준 휴무 수를 초과해서 자동 휴무를 만들지는 않습니다.
+  for (const day of days) {
+    if (recognizedDayoffCount >= baseAllowance) break;
+    const item = daily[day];
+    if (!isAutoBlankDayoffCandidate(item)) continue;
+    item.display = "휴무(공백)";
+    item.autoBlankDayoff = true;
+    item.issues = [];
+    recognizedDayoffCount = roundHalf(recognizedDayoffCount + 1);
+  }
+
+  // 상담사가 실제로 휴무를 등록/사용한 건이 기준 휴무보다 많을 때만 초과 휴무로 표시합니다.
+  // 초과분은 대체휴무+보상휴가 잔여가 있으면 살구색 휴무(잔여), 잔여가 없으면 빨간색 휴무(초과)로 구분합니다.
+  const registeredDayoffDays = days.filter((day) => isExplicitDayoffItem(daily[day]));
+  const excessCount = Math.max(0, registeredDayoffDays.length - baseAllowance);
+  if (!(excessCount > 0)) return;
+
+  let remainingExtraLeave = roundHalf(Number(summary.availableSubstitute || 0) + Number(summary.availableCompensation || 0));
+  const excessDays = registeredDayoffDays.slice(Math.floor(baseAllowance));
+  for (const day of excessDays) {
+    const item = daily[day];
+    if (!item || item.attendance?.hasClockIn) continue;
+    if (remainingExtraLeave >= 1) {
+      item.display = "휴무(잔여)";
+      item.dayoffOverAllowanceCovered = true;
+      item.issues = [];
+      remainingExtraLeave = roundHalf(remainingExtraLeave - 1);
+    } else {
+      item.display = "휴무(초과)";
+      item.dayoffOverAllowanceShortage = true;
+      item.issues = [];
+    }
+    item.dayoffOverAllowance = true;
+  }
+}
+
+function isExplicitDayoffItem(item = {}) {
+  if (!item || item.attendance?.hasClockIn) return false;
+  const display = String(item.display || "");
+  if (display === "휴무" || display === "휴무(잔여)" || display === "휴무(초과)") return true;
+  if (item.attendance?.finalOverride && normalizeActual(item.attendance.finalDisplay) === "휴무") return true;
+  if (normalizeActual(item.attendance?.actualStatus) === "휴무") return true;
+  return normalizePlan(item.rawPlanStatus || item.planStatus) === "휴무";
+}
+
+function isAutoBlankDayoffCandidate(item = {}) {
+  if (!item || item.attendance?.hasClockIn || item.approvedLeaveStatus) return false;
+  if (item.attendance?.finalOverride) return false;
+  const rawPlan = normalizePlan(item.rawPlanStatus || item.planStatus);
+  const actual = normalizeActual(item.attendance?.actualStatus);
+  return rawPlan === "공백" && !actual;
+}
+
+function isDayoffAutoDisplay(value = "") {
+  return ["휴무(공백)", "휴무(잔여)", "휴무(초과)"].includes(String(value || ""));
+}
+
+function isDayoffLikeDisplay(value = "") {
+  const text = String(value || "");
+  return text === "휴무" || text.startsWith("휴무(");
+}
 
 function buildLeaveApplicationStatusMap(applications = [], targetMonth = "") {
   const map = new Map();
@@ -1394,6 +1471,51 @@ function isResolvedByApprovedLeave(row = {}, ctx = {}) {
   return !attendance.hasClockIn;
 }
 
+function buildDayoffReplacementEvidenceRows(ctx, result) {
+  const rows = [];
+  for (const person of ctx.people || []) {
+    const daily = ctx.dailyByKey?.get(person.key) || {};
+    const summary = ctx.summaryById?.get(normalizeId(person.employeeId)) || {};
+    const availableSubstitute = roundHalf(Number(summary.availableSubstitute || 0));
+    const availableCompensation = roundHalf(Number(summary.availableCompensation || 0));
+    const totalAvailable = roundHalf(availableSubstitute + availableCompensation);
+    for (const [dayText, item] of Object.entries(daily)) {
+      if (!item?.dayoffOverAllowanceCovered && !item?.dayoffOverAllowanceShortage) continue;
+      const shortage = Boolean(item.dayoffOverAllowanceShortage);
+      rows.push({
+        employeeId: person.employeeId,
+        name: person.name || person.member?.employeeName || "",
+        store: person.member?.storeName || person.plan?.store || "",
+        date: item.date || `${result.targetMonth}-${String(Number(dayText)).padStart(2, "0")}`,
+        planStatus: item.display,
+        missingType: item.dayoffOverAllowanceCovered ? "휴무(잔여)" : "휴무(초과)",
+        possibleType: shortage ? "불가능" : "가능",
+        needDays: 1,
+        availableSubstitute,
+        availableCompensation,
+        totalAvailable,
+        reason: shortage
+          ? "기본 휴무 초과 · 대체/보상 잔여 부족 · 연차 확인 필요"
+          : "기본 휴무 초과 · 대체/보상 잔여로 대체 가능",
+      });
+    }
+  }
+  return rows;
+}
+
+function isAutoBlankDayoffEvidenceRow(row, ctx) {
+  const employeeId = normalizeId(row?.employeeId);
+  const date = String(row?.date || "");
+  if (!employeeId || !date) return false;
+  for (const person of ctx.people || []) {
+    if (normalizeId(person.employeeId) !== employeeId) continue;
+    const day = Number(date.slice(-2));
+    const item = ctx.dailyByKey?.get(person.key)?.[day];
+    if (item?.autoBlankDayoff) return true;
+  }
+  return false;
+}
+
 function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
   const regionOrder = ["서울", "경인", "충청", "경북", "경남", "전라"];
   const actionSpecs = [
@@ -1425,6 +1547,7 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
     ...buildUnapprovedPlannedLeaveEvidenceRows(ctx, result),
   ]
     .filter((row) => !isResolvedByApprovedLeave(row, ctx))
+    .filter((row) => !isAutoBlankDayoffEvidenceRow(row, ctx))
     .map((row) => {
       const member = findMember(ctx, row.employeeId, row.store) || {};
       return {
@@ -1443,7 +1566,7 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
   const uniqueStores = new Set(rows.map((row) => row.member.storeName || row.store || "").filter(Boolean)).size;
   const matrix = Array.from({ length: 7 }, () => Array(COL_COUNT).fill(""));
   matrix[0][0] = `${year}년 ${monthNo}월 출근증빙·휴무확인`;
-  matrix[1][0] = `출근 기록이 없거나 승인되지 않은 휴가 계획, 수기 보정이 필요한 건을 처리합니다. K~W열 중 해당 처리 항목에 O 입력 후 재업로드하면 상담사근태 해당 날짜가 출근/휴무/연차/반차/출산휴가/육아휴직/공가/경조/대체/보상으로 반영됩니다. 수기 입력 영역도 동일한 목록으로 처리됩니다. · 기준일 ${result.cutoffDate || `${year}-${String(monthNo).padStart(2, "0")}-${String(new Date(year, monthNo, 0).getDate()).padStart(2, "0")}`}`;
+  matrix[1][0] = `출근 기록이 없거나 승인되지 않은 휴가 계획, 기준 휴무 초과로 대체/보상/연차 처리가 필요한 건을 처리합니다. K~W열 중 해당 처리 항목에 O 입력 후 재업로드하면 상담사근태 해당 날짜가 출근/휴무/연차/반차/출산휴가/육아휴직/공가/경조/대체/보상으로 반영됩니다. 수기 입력 영역도 동일한 목록으로 처리됩니다. · 기준일 ${result.cutoffDate || `${year}-${String(monthNo).padStart(2, "0")}-${String(new Date(year, monthNo, 0).getDate()).padStart(2, "0")}`}`;
 
   const cards = [
     [0, "총 확인 건수", `${rows.length}건`],
@@ -1805,11 +1928,15 @@ function applyMismatchBadgeStyle(sheet, address, category) {
 
 function applyMissingTypeStyle(sheet, address, missingType) {
   if (!sheet[address]) return;
-  const palette = missingType === "계획 미입력"
-    ? { fill: "FFFFF2CC", font: "FFC55A11", border: "FFF4C27A" }
-    : missingType === "출ㆍ계 미입력"
-      ? { fill: "FFF4EAF7", font: "FF7030A0", border: "FFD4B3E2" }
-      : { fill: "FFFFE4E6", font: "FFC00000", border: "FFF1A2A7" };
+  const palette = missingType === "휴무(잔여)"
+    ? { fill: "FFF4B183", font: "FF9C5700", border: "FFF4C27A" }
+    : missingType === "휴무(초과)"
+      ? { fill: "FFFF0000", font: "FFFFFFFF", border: "FFC00000" }
+      : missingType === "계획 미입력"
+        ? { fill: "FFFFF2CC", font: "FFC55A11", border: "FFF4C27A" }
+        : missingType === "출ㆍ계 미입력"
+          ? { fill: "FFF4EAF7", font: "FF7030A0", border: "FFD4B3E2" }
+          : { fill: "FFFFE4E6", font: "FFC00000", border: "FFF1A2A7" };
   sheet[address].s = {
     ...(sheet[address].s || {}),
     fill: { patternType: "solid", fgColor: { rgb: palette.fill } },
@@ -1900,6 +2027,238 @@ function applyAnnualApprovalStatusStyle(sheet, address, status) {
     alignment: { horizontal: "center", vertical: "center", wrapText: true },
     border: thinBorder("FFDCE3EC"),
   };
+}
+
+
+function buildDayoffReplacementSheet(workbook, result, ctx, year, monthNo) {
+  const regionOrder = ["서울", "경인", "충청", "경북", "경남", "전라"];
+  const actionSpecs = [
+    { title: "대체휴무 1일(O 입력)", short: "대체1", status: "대체휴일(1일)" },
+    { title: "대체휴무 0.5일(O 입력)", short: "대체0.5", status: "대체휴일(0.5일)" },
+    { title: "보상휴가 1일(O 입력)", short: "보상1", status: "보상휴가(1일)" },
+    { title: "보상휴가 0.5일(O 입력)", short: "보상0.5", status: "보상휴가(0.5일)" },
+    { title: "연차확인(O 입력)", short: "연차", status: "연차" },
+  ];
+  const ACTION_START_COL = 14; // O
+  const ACTION_END_COL = ACTION_START_COL + actionSpecs.length - 1; // S
+  const REASON_COL = ACTION_END_COL + 1; // T
+  const STATUS_COL = ACTION_END_COL + 2; // U
+  const COL_COUNT = STATUS_COL + 1;
+  const actionLetters = actionSpecs.map((_, index) => XLSX.utils.encode_col(ACTION_START_COL + index));
+  const doneFormulaForRange = (range) => `(COUNTIF(${range},"O")+COUNTIF(${range},"○")+COUNTIF(${range},"ㅇ"))`;
+  const doneFormulaForRow = (excelRow) => doneFormulaForRange(`$O${excelRow}:$S${excelRow}`);
+
+  const rows = buildDayoffReplacementEvidenceRows(ctx, result)
+    .map((row) => {
+      const member = findMember(ctx, row.employeeId, row.store) || {};
+      return {
+        ...row,
+        member,
+        region: normalizeDashboardRegion(member.region2 || member.region1 || row.region || "", member.storeName || row.store || ""),
+      };
+    })
+    .sort((a, b) => regionOrder.indexOf(a.region) - regionOrder.indexOf(b.region)
+      || String(a.possibleType || "").localeCompare(String(b.possibleType || ""), "ko")
+      || String(a.name || a.member.employeeName || "").localeCompare(String(b.name || b.member.employeeName || ""), "ko")
+      || String(a.member.storeName || a.store || "").localeCompare(String(b.member.storeName || b.store || ""), "ko")
+      || String(a.date || "").localeCompare(String(b.date || "")));
+
+  const possibleCount = rows.filter((row) => row.possibleType === "가능").length;
+  const impossibleCount = rows.filter((row) => row.possibleType !== "가능").length;
+  const uniquePeople = new Set(rows.map((row) => normalizeId(row.employeeId)).filter(Boolean)).size;
+  const matrix = Array.from({ length: 7 }, () => Array(COL_COUNT).fill(""));
+  matrix[0][0] = `${year}년 ${monthNo}월 대체+보상 대체 인원`;
+  matrix[1][0] = "기본 휴무 기준을 초과한 인원 중 대체휴무·보상휴가로 대체 가능한 건과 불가능한 건을 분리합니다. O 입력 후 재업로드하면 상담사근태와 잔여가 순서대로 다시 정리됩니다.";
+  const cards = [
+    [0, "총 대상 건수", `${rows.length}건`],
+    [2, "대상 인원", `${uniquePeople}명`],
+    [4, "대체 가능", `${possibleCount}건`],
+    [6, "연차 확인 필요", `${impossibleCount}건`],
+    [8, "처리 완료", "0건"],
+  ];
+  for (const [col, label, value] of cards) {
+    matrix[2][col] = label;
+    matrix[3][col] = value;
+  }
+  matrix[2][10] = "처리 순서";
+  matrix[3][10] = "가능: 대체휴무 → 보상휴가";
+  matrix[4][10] = "불가능: 연차확인으로 처리";
+  matrix[6] = [
+    "No", "지역장", "매니저", "지역", "매장명", "이름", "사번", "발생일", "현재표시", "가능구분",
+    "대체가능잔여", "보상가능잔여", "총가능잔여", "필요일수",
+    ...actionSpecs.map((item) => item.title), "상세사유", "처리상태",
+  ];
+
+  const regionRows = [];
+  const dataRows = [];
+  let no = 1;
+  for (const region of regionOrder) {
+    const group = rows.filter((row) => row.region === region);
+    const regionRow = matrix.length;
+    matrix.push([
+      `▼  ${region} (총 ${group.length}건)`, "", "", "", "", "", "", "", "", "",
+      `가능 ${group.filter((row) => row.possibleType === "가능").length}건  |  불가능 ${group.filter((row) => row.possibleType !== "가능").length}건  |  완료 0건`, "", "", "", "", "", "", "", "", "", "",
+    ]);
+    regionRows.push({ row: regionRow, region, count: group.length });
+    for (const row of group) {
+      const rowIndex = matrix.length;
+      matrix.push([
+        no++, row.member.regionalManager || "", row.member.manager || "", region,
+        row.member.storeName || row.store || "", row.name || row.member.employeeName || "", normalizeId(row.employeeId),
+        row.date ? new Date(`${row.date}T00:00:00`) : "",
+        row.planStatus || "", row.possibleType || "",
+        row.availableSubstitute || 0, row.availableCompensation || 0, row.totalAvailable || 0, row.needDays || 1,
+        ...actionSpecs.map(() => ""), row.reason || "", "미처리",
+      ]);
+      dataRows.push({ row: rowIndex, ...row });
+    }
+  }
+
+  const sheet = XLSX.utils.aoa_to_sheet(matrix);
+  sheet["!merges"] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: STATUS_COL } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: STATUS_COL } },
+    { s: { r: 2, c: 0 }, e: { r: 2, c: 1 } }, { s: { r: 3, c: 0 }, e: { r: 4, c: 1 } },
+    { s: { r: 2, c: 2 }, e: { r: 2, c: 3 } }, { s: { r: 3, c: 2 }, e: { r: 4, c: 3 } },
+    { s: { r: 2, c: 4 }, e: { r: 2, c: 5 } }, { s: { r: 3, c: 4 }, e: { r: 4, c: 5 } },
+    { s: { r: 2, c: 6 }, e: { r: 2, c: 7 } }, { s: { r: 3, c: 6 }, e: { r: 4, c: 7 } },
+    { s: { r: 2, c: 8 }, e: { r: 2, c: 9 } }, { s: { r: 3, c: 8 }, e: { r: 4, c: 9 } },
+    { s: { r: 2, c: 10 }, e: { r: 2, c: STATUS_COL } },
+    { s: { r: 3, c: 10 }, e: { r: 3, c: STATUS_COL } },
+    { s: { r: 4, c: 10 }, e: { r: 4, c: STATUS_COL } },
+  ];
+  for (const item of regionRows) {
+    sheet["!merges"].push(
+      { s: { r: item.row, c: 0 }, e: { r: item.row, c: 9 } },
+      { s: { r: item.row, c: 10 }, e: { r: item.row, c: STATUS_COL } },
+    );
+  }
+  sheet["!cols"] = [
+    { wch: 6 }, { wch: 11 }, { wch: 11 }, { wch: 9 }, { wch: 18 }, { wch: 11 }, { wch: 13 },
+    { wch: 13 }, { wch: 13 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 10 },
+    ...actionSpecs.map(() => ({ wch: 15 })), { wch: 42 }, { wch: 12 },
+  ];
+  sheet["!rows"] = matrix.map((_, index) => ({ hpt: index === 0 ? 34 : index === 1 ? 34 : index >= 2 && index <= 4 ? 28 : index === 5 ? 8 : index === 6 ? 38 : regionRows.some((item) => item.row === index) ? 26 : 25 }));
+  sheet["!freeze"] = { xSplit: 0, ySplit: 7, topLeftCell: "A8", activePane: "bottomLeft", state: "frozen" };
+  sheet["!views"] = [{ showGridLines: false, zoomScale: 70, zoomScaleNormal: 70 }];
+
+  const rangeStart = 8;
+  const rangeEnd = Math.max(rangeStart, matrix.length);
+  const doneAllFormula = doneFormulaForRange(`$O$${rangeStart}:$S$${rangeEnd}`);
+  setFormula(sheet, "A4", `COUNTIF($G$${rangeStart}:$G$${rangeEnd},"?*")&"건"`, `${rows.length}건`);
+  setValue(sheet, "C4", `${uniquePeople}명`);
+  setValue(sheet, "E4", `${possibleCount}건`);
+  setValue(sheet, "G4", `${impossibleCount}건`);
+  setFormula(sheet, "I4", `${doneAllFormula}&"건"`, "0건");
+  for (const item of regionRows) {
+    const excelRow = item.row + 1;
+    const doneFormula = actionLetters.map((letter) => `(COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$${letter}$${rangeStart}:$${letter}$${rangeEnd},"O")+COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$${letter}$${rangeStart}:$${letter}$${rangeEnd},"○")+COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$${letter}$${rangeStart}:$${letter}$${rangeEnd},"ㅇ"))`).join("+");
+    setFormula(sheet, `A${excelRow}`, `"▼  ${item.region} (총 "&COUNTIF($D$${rangeStart}:$D$${rangeEnd},"${item.region}")&"건)"`, `▼  ${item.region} (총 ${item.count}건)`);
+    setFormula(sheet, `K${excelRow}`, `"가능 "&COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$J$${rangeStart}:$J$${rangeEnd},"가능")&"건  |  불가능 "&COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$J$${rangeStart}:$J$${rangeEnd},"불가능")&"건  |  완료 "&(${doneFormula || "0"})&"건"`, "");
+  }
+
+  const applyRowFormula = (rowIndex) => {
+    const excelRow = rowIndex + 1;
+    setFormula(sheet, `U${excelRow}`, `IF(${doneFormulaForRow(excelRow)}>0,"처리 완료","미처리")`, "미처리");
+    setNumberFormat(sheet, `H${excelRow}`, "yyyy-mm-dd");
+  };
+  dataRows.forEach((item) => applyRowFormula(item.row));
+
+  styleCellRange(sheet, 0, 0, 0, STATUS_COL, {
+    fill: { patternType: "solid", fgColor: { rgb: "FF0B3B76" } },
+    font: { name: "맑은 고딕", sz: 18, bold: true, color: { rgb: "FFFFFFFF" } },
+    alignment: { horizontal: "left", vertical: "center" },
+  });
+  styleCellRange(sheet, 1, 0, 1, STATUS_COL, {
+    fill: { patternType: "solid", fgColor: { rgb: "FFF4F7FB" } },
+    font: { name: "맑은 고딕", sz: 10, color: { rgb: "FF40516B" } },
+    alignment: { horizontal: "right", vertical: "center", wrapText: true },
+  });
+  const cardPalettes = [
+    { fill: "FFF7FAFF", border: "FF8FB7E8", font: "FF0B5CCB" },
+    { fill: "FFF3F8FF", border: "FF9CC2EF", font: "FF2F75B5" },
+    { fill: "FFF3FBF6", border: "FF9FD3B2", font: "FF107C41" },
+    { fill: "FFFFF5F5", border: "FFF1A2A7", font: "FFC00000" },
+    { fill: "FFF3FBF6", border: "FF9FD3B2", font: "FF107C41" },
+  ];
+  cards.forEach(([col], index) => {
+    const palette = cardPalettes[index];
+    styleCellRange(sheet, 2, col, 4, col + 1, {
+      fill: { patternType: "solid", fgColor: { rgb: palette.fill } },
+      font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FF26364D" } },
+      alignment: { horizontal: "center", vertical: "center", wrapText: true },
+      border: thinBorder(palette.border),
+    });
+    styleCellRange(sheet, 3, col, 4, col + 1, {
+      fill: { patternType: "solid", fgColor: { rgb: palette.fill } },
+      font: { name: "맑은 고딕", sz: 19, bold: true, color: { rgb: palette.font } },
+      alignment: { horizontal: "center", vertical: "center" },
+      border: thinBorder(palette.border),
+    });
+  });
+  styleCellRange(sheet, 2, 10, 4, STATUS_COL, {
+    fill: { patternType: "solid", fgColor: { rgb: "FFFFF8EF" } },
+    font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FFC55A11" } },
+    alignment: { horizontal: "center", vertical: "center", wrapText: true },
+    border: thinBorder("FFF4C27A"),
+  });
+  styleCellRange(sheet, 6, 0, 6, STATUS_COL, {
+    fill: { patternType: "solid", fgColor: { rgb: "FF0B3B76" } },
+    font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: "FFFFFFFF" } },
+    alignment: { horizontal: "center", vertical: "center", wrapText: true },
+    border: thinBorder("FF8EA6C3"),
+  });
+  const regionPalette = {
+    서울: { fill: "FFEAF2FB", font: "FF0B5CCB" },
+    경인: { fill: "FFF0F6FC", font: "FF2F75B5" },
+    충청: { fill: "FFEFF7F1", font: "FF107C41" },
+    경북: { fill: "FFF3EFF9", font: "FF7030A0" },
+    경남: { fill: "FFFFF3EA", font: "FFC55A11" },
+    전라: { fill: "FFEDF8FA", font: "FF008C95" },
+  };
+  for (const item of regionRows) {
+    const palette = regionPalette[item.region] || regionPalette.서울;
+    styleCellRange(sheet, item.row, 0, item.row, STATUS_COL, {
+      fill: { patternType: "solid", fgColor: { rgb: palette.fill } },
+      font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: palette.font } },
+      alignment: { horizontal: "left", vertical: "center" },
+      border: thinBorder("FFD6DFEA"),
+    });
+    const summaryAddr = XLSX.utils.encode_cell({ r: item.row, c: 10 });
+    if (sheet[summaryAddr]) sheet[summaryAddr].s.alignment = { horizontal: "right", vertical: "center" };
+  }
+  dataRows.forEach((item, index) => {
+    styleCellRange(sheet, item.row, 0, item.row, STATUS_COL, {
+      fill: { patternType: "solid", fgColor: { rgb: index % 2 ? "FFF9FBFD" : "FFFFFFFF" } },
+      font: { name: "맑은 고딕", sz: 9, color: { rgb: "FF1F2937" } },
+      alignment: { horizontal: "center", vertical: "center", wrapText: true },
+      border: thinBorder("FFDCE3EC"),
+    });
+    const typeAddr = XLSX.utils.encode_cell({ r: item.row, c: 9 });
+    if (sheet[typeAddr]) sheet[typeAddr].s = {
+      ...(sheet[typeAddr].s || {}),
+      fill: { patternType: "solid", fgColor: { rgb: item.possibleType === "가능" ? "FFE2F0D9" : "FFF4CCCC" } },
+      font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: item.possibleType === "가능" ? "FF107C41" : "FF9C0006" } },
+      alignment: { horizontal: "center", vertical: "center" },
+      border: thinBorder("FFDCE3EC"),
+    };
+    for (let c = ACTION_START_COL; c <= ACTION_END_COL; c += 1) {
+      const addr = XLSX.utils.encode_cell({ r: item.row, c });
+      if (sheet[addr]) sheet[addr].s = {
+        ...(sheet[addr].s || {}),
+        fill: { patternType: "solid", fgColor: { rgb: "FFFFF2CC" } },
+        font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FFC55A11" } },
+        alignment: { horizontal: "center", vertical: "center" },
+        border: thinBorder("FFF4C27A"),
+      };
+    }
+    const reasonAddr = XLSX.utils.encode_cell({ r: item.row, c: REASON_COL });
+    if (sheet[reasonAddr]) sheet[reasonAddr].s.alignment = { horizontal: "left", vertical: "center", wrapText: true };
+    applyProcessStatusStyle(sheet, XLSX.utils.encode_cell({ r: item.row, c: STATUS_COL }), "미처리");
+  });
+  setRef(sheet, matrix.length, COL_COUNT);
+  workbook.Sheets["대체+보상 대체 인원"] = sheet;
+  if (!workbook.SheetNames.includes("대체+보상 대체 인원")) workbook.SheetNames.push("대체+보상 대체 인원");
 }
 
 function buildDayoffSubstituteSheet(workbook, result, ctx, year, monthNo) {
@@ -2314,7 +2673,8 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
       applyStatusStyle(sheet, address, item?.display || "");
       if (item?.issues?.length) {
         // 미입력 유형은 각각의 구분색과 8pt 글씨를 유지하고, 그 외 오류만 공통 경고색을 적용합니다.
-        if (!String(item?.display || "").includes("미입력")) applyIssueStyle(sheet, address, item.issues);
+        // 자동 휴무 보정 표시는 자체 색상을 유지합니다.
+        if (!String(item?.display || "").includes("미입력") && !isDayoffAutoDisplay(item?.display)) applyIssueStyle(sheet, address, item.issues);
         issueCount += 1;
       }
       // 반차는 실제 출근시간을 표시하되 연두색으로 구분합니다.
@@ -2325,7 +2685,7 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
       // 단, 연차신청현황에서 승인된 연차/반차가 반영된 날은 일반 연차 색상을 유지합니다.
       const approvedAnnualLike = Boolean(item?.approvedLeaveStatus && !item?.attendance?.hasClockIn
         && ["연차", "오전반차", "오후반차"].includes(item?.planStatus));
-      if (!approvedAnnualLike && (item?.dayoffExcess || item?.substituteShortage || item?.compensationShortage)) applyLeaveShortageStyle(sheet, address);
+      if (!isDayoffAutoDisplay(item?.display) && !approvedAnnualLike && (item?.dayoffExcess || item?.substituteShortage || item?.compensationShortage)) applyLeaveShortageStyle(sheet, address);
       if (NON_WORK_CODES.has(item?.planStatus) && item?.attendance?.hasClockIn) clockCorrection += 1;
     }
 
@@ -2334,7 +2694,7 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
     const registeredCount = displayValues.filter((value) => value && !String(value).includes("미입력")).length;
     const displayedWorkCount = Object.values(daily).filter((item) => Boolean(item?.attendance?.hasClockIn)).length;
     const plannedDayoffCount = planValues.filter((value) => value === "휴무").length;
-    const displayedDayoffCount = displayValues.filter((value) => value === "휴무").length;
+    const displayedDayoffCount = displayValues.filter(isDayoffLikeDisplay).length;
     const educationCount = planValues.filter((value) => value === "교육").length;
     const halfCount = planValues.filter((value) => value === "오전반차" || value === "오후반차").length;
     const annualCount = planValues.filter((value) => value === "연차").length;
@@ -2373,7 +2733,7 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
     setFormula(sheet, addr(0), `COUNTIFS(${dailyRange},"<>",${dailyRange},"<>*미입력*")`, registeredCount);
     setFormula(sheet, addr(1), `COUNTIF(${dailyRange},"출근")+COUNTIF(${dailyRange},"??:??")`, displayedWorkCount);
     setValue(sheet, addr(2), baseAllowance);
-    setFormula(sheet, addr(3), `COUNTIF(${dailyRange},"휴무")`, displayedDayoffCount);
+    setFormula(sheet, addr(3), `COUNTIF(${dailyRange},"휴무*")`, displayedDayoffCount);
     setFormula(sheet, addr(4), `MAX(0,${addr(3)}-${addr(2)})`, displayedDayoffExcess);
     setValue(sheet, addr(5), additionalAvailable);
     setFormula(sheet, addr(6), `COUNTIF(${dailyRange},"대체휴일(1일)")+COUNTIF(${dailyRange},"대체휴무")+COUNTIF(${dailyRange},"보상휴가(1일)")+COUNTIF(${dailyRange},"보상휴가")+0.5*COUNTIF(${dailyRange},"대체휴일(0.5일)")+0.5*COUNTIF(${dailyRange},"보상휴가(0.5일)")+${compactNumber(autoSubstituteUsed)}`, combinedLeaveUsed);
@@ -3012,6 +3372,9 @@ function applyStatusStyle(sheet, address, value) {
   else if (text === "계획 미입력") { fill = "FFFFC000"; fontColor = "FF7F4100"; bold = true; }
   else if (text === "출ㆍ계 미입력") { fill = "FFFF0000"; fontColor = "FFFFFFFF"; bold = true; }
   else if (text === "미입력") { fill = "FFF33E0D"; fontColor = "FFFFFFFF"; bold = true; }
+  else if (text === "휴무(공백)") fill = "FFDDEBF7";
+  else if (text === "휴무(잔여)") { fill = "FFF4B183"; fontColor = "FF9C5700"; bold = true; }
+  else if (text === "휴무(초과)") { fill = "FFFF0000"; fontColor = "FFFFFFFF"; bold = true; }
   else if (text === "휴무") fill = "FFDDEBF7";
   else if (text.includes("대체휴일") || text === "대체휴무" || text.includes("보상휴가")) { fill = "FF2F5597"; fontColor = "FFFFFFFF"; bold = true; }
   else if (["연차", "오전반차", "오후반차", "반일근무"].includes(text)) fill = "FFC6E0B4";
@@ -3365,6 +3728,7 @@ async function applyLiveEvidenceConditionalFormatting(buffer, result) {
     const dxf=appendConditionalDxfs(stylesXml);
     const configs=[
       ["출근증빙·휴무확인",[{sqref:"K8:W1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(K8))="O",K8="○",K8="ㅇ")'}]},{sqref:"Y8:Y1000",rules:[{dxfId:dxf.completed,formula:'$Y8="처리 완료"'},{dxfId:dxf.pending,formula:'$Y8="미처리"'}]}]],
+      ["대체+보상 대체 인원",[{sqref:"O8:S1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(O8))="O",O8="○",O8="ㅇ")'}]},{sqref:"U8:U1000",rules:[{dxfId:dxf.completed,formula:'$U8="처리 완료"'},{dxfId:dxf.pending,formula:'$U8="미처리"'}]}]],
       ["계획&근태 상이 인원",[{sqref:"M8:M1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(M8))="O",M8="○",M8="ㅇ")'}]},{sqref:"N8:N1000",rules:[{dxfId:dxf.completed,formula:'$N8="처리 완료"'},{dxfId:dxf.pending,formula:'$N8="미처리"'}]}]],
       ["휴무 초과자",[{sqref:"R8:R1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(R8))="O",R8="○",R8="ㅇ")'}]},{sqref:"S8:S1000",rules:[{dxfId:dxf.completed,formula:'$S8="처리 완료"'},{dxfId:dxf.pending,formula:'$S8="미처리"'}]}]],
       ["매니저별 이상 근태",[{sqref:"L8:L1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(L8))="O",L8="○",L8="ㅇ")'}]},{sqref:"M8:M1000",rules:[{dxfId:dxf.completed,formula:'$M8="전달 완료"'},{dxfId:dxf.pending,formula:'$M8="미전달"'}]}]],
@@ -3390,7 +3754,7 @@ async function applyWorkbookOpenViewSettings(buffer) {
     if (!workbookXml || !relsXml) return buffer;
 
     const frozenDashboardSheets = new Set([
-      "계획&근태 상이 인원", "출근증빙·휴무확인", "휴무 초과자", "인사팀 급여 확정표", "출근 미달자 정산", "연차 사용 필요자", "최종 문제자", "전체 요약본", "매니저별 이상 근태", "주 근태 확인자", "해당 월 연차 등록 현황 및 일자", "인력 변동 확인",
+      "계획&근태 상이 인원", "출근증빙·휴무확인", "대체+보상 대체 인원", "휴무 초과자", "인사팀 급여 확정표", "출근 미달자 정산", "연차 사용 필요자", "최종 문제자", "전체 요약본", "매니저별 이상 근태", "주 근태 확인자", "해당 월 연차 등록 현황 및 일자", "인력 변동 확인",
     ]);
     const attendanceFreezeSheet = "상담사근태";
     const sheetTags = workbookXml.match(/<sheet\b[^>]*\/?\s*>/g) || [];

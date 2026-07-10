@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=55";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=57";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -2011,7 +2011,7 @@ function parseWorkflowOverrides(sheets, targetMonth = "", defaultRoute = "") {
   ];
   const evidenceActionHeaderNames = evidenceActionSpecs.flatMap((item) => item.columns);
 
-  for (const sheet of (sheets || []).filter((item) => /출근\s*증빙|휴무\s*확인|출근\s*미등록|증빙/.test(String(item.sheetName || "")))) {
+  for (const sheet of (sheets || []).filter((item) => /출근\s*증빙|휴무\s*확인|출근\s*미등록|증빙|대체\s*\+?\s*보상\s*대체|대체.*보상.*인원/.test(String(item.sheetName || "")))) {
     const matrix = sheet.matrix || [];
     const headerIndex = findFlexibleHeaderRow(matrix, (headers) => (findHeaderIndex(headers, ["사번", "사원번호", "제니엘사번"]) >= 0 || findHeaderIndex(headers, ["성명", "이름", "직원명", "상담사명"]) >= 0)
       && findHeaderIndex(headers, ["발생일", "근무일자", "일자", "날짜"]) >= 0
