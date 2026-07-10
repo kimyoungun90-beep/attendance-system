@@ -266,6 +266,9 @@ function applyAutoBlankDayoffAndExcess(daily = {}, summary = {}, employeeId = ""
     if (!isAutoBlankDayoffCandidate(item)) continue;
     item.display = "휴무(공백)";
     item.autoBlankDayoff = true;
+    item.dayoffExcess = false;
+    item.substituteShortage = false;
+    item.compensationShortage = false;
     item.issues = [];
     recognizedDayoffCount = roundHalf(recognizedDayoffCount + 1);
   }
@@ -309,7 +312,11 @@ function isAutoBlankDayoffCandidate(item = {}) {
   if (item.attendance?.finalOverride) return false;
   const rawPlan = normalizePlan(item.rawPlanStatus || item.planStatus);
   const actual = normalizeActual(item.attendance?.actualStatus);
-  return rawPlan === "공백" && !actual;
+  const display = String(item.display || "");
+  // 근무계획과 실제 근태가 모두 비어 있는 날짜는 먼저 기본 휴무 한도 안에서 휴무(공백)으로 채웁니다.
+  // 기존 표시가 출ㆍ계 미입력/미등록으로 만들어졌더라도 같은 공백일로 취급합니다.
+  const planBlank = rawPlan === "공백" || display === "출ㆍ계 미입력" || display === "미등록" || display === "미입력";
+  return planBlank && !actual;
 }
 
 function isDayoffAutoDisplay(value = "") {
@@ -356,10 +363,12 @@ function leaveApplicationStatusPriority(item = {}) {
 function requiresLeaveApproval(status = "") {
   const normalized = normalizePlan(status);
   // 대체휴무·보상휴가는 근무계획/증빙 보정 기준으로 파란색 휴가 표시를 유지합니다.
+  // 공가·경조는 회사 인정 사유이므로 연차신청현황 승인 여부와 무관하게 정상 표시합니다.
   // 잔여 부족 등 초과 사용일만 별도 빨간색 경고로 표시합니다.
   if (isSubstituteOrCompensationStatus(normalized)) return false;
+  if (normalized === "공가" || normalized === "경조") return false;
   return [
-    "연차", "오전반차", "오후반차", "출산휴가", "육아휴직", "공가", "경조", "휴가",
+    "연차", "오전반차", "오후반차", "출산휴가", "육아휴직", "휴가",
   ].includes(normalized);
 }
 
