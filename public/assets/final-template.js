@@ -1229,6 +1229,30 @@ function buildAnnualComparisonSheet(workbook, result, year, monthNo) {
 
 function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
   const regionOrder = ["서울", "경인", "충청", "경북", "경남", "전라"];
+  const actionSpecs = [
+    { title: "출근확인(O 입력)", short: "출근", status: "09:00" },
+    { title: "휴무확인(O 입력)", short: "휴무", status: "휴무" },
+    { title: "연차확인(O 입력)", short: "연차", status: "연차" },
+    { title: "오전반차(O 입력)", short: "오전반차", status: "오전반차" },
+    { title: "오후반차(O 입력)", short: "오후반차", status: "오후반차" },
+    { title: "출산휴가(O 입력)", short: "출산", status: "출산휴가" },
+    { title: "육아휴직(O 입력)", short: "육아", status: "육아휴직" },
+    { title: "공가(O 입력)", short: "공가", status: "공가" },
+    { title: "경조(O 입력)", short: "경조", status: "경조" },
+    { title: "대체휴무 1일(O 입력)", short: "대체1", status: "대체휴일(1일)" },
+    { title: "대체휴무 0.5일(O 입력)", short: "대체0.5", status: "대체휴일(0.5일)" },
+    { title: "보상휴가 1일(O 입력)", short: "보상1", status: "보상휴가(1일)" },
+    { title: "보상휴가 0.5일(O 입력)", short: "보상0.5", status: "보상휴가(0.5일)" },
+  ];
+  const ACTION_START_COL = 10; // K
+  const ACTION_END_COL = ACTION_START_COL + actionSpecs.length - 1; // W
+  const REASON_COL = ACTION_END_COL + 1; // X
+  const STATUS_COL = ACTION_END_COL + 2; // Y
+  const COL_COUNT = STATUS_COL + 1;
+  const actionLetters = actionSpecs.map((_, index) => XLSX.utils.encode_col(ACTION_START_COL + index));
+  const doneFormulaForRange = (range) => `(COUNTIF(${range},"O")+COUNTIF(${range},"○")+COUNTIF(${range},"ㅇ"))`;
+  const doneFormulaForRow = (excelRow) => doneFormulaForRange(`$K${excelRow}:$W${excelRow}`);
+
   const rows = [...(result.missingRows || [])].map((row) => {
     const member = findMember(ctx, row.employeeId, row.store) || {};
     return {
@@ -1245,12 +1269,12 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
 
   const uniquePeople = new Set(rows.map((row) => normalizeId(row.employeeId)).filter(Boolean)).size;
   const uniqueStores = new Set(rows.map((row) => row.member.storeName || row.store || "").filter(Boolean)).size;
-  const matrix = Array.from({ length: 7 }, () => Array(14).fill(""));
+  const matrix = Array.from({ length: 7 }, () => Array(COL_COUNT).fill(""));
   matrix[0][0] = `${year}년 ${monthNo}월 출근증빙·휴무확인`;
-  matrix[1][0] = `출근 기록이 없는 건만 표시합니다. K열 휴무확인 또는 L열 출근확인에 O 입력 후 재업로드하면 상담사근태 해당 날짜가 각각 휴무 또는 09:00으로 반영됩니다. 하단 수기 입력 영역에는 이름·발생일을 입력하고 출근확인에 O를 넣으면 휴무계획자도 출근증빙으로 처리됩니다. · 기준일 ${result.cutoffDate || `${year}-${String(monthNo).padStart(2, "0")}-${String(new Date(year, monthNo, 0).getDate()).padStart(2, "0")}`}`;
+  matrix[1][0] = `출근 기록이 없거나 수기 보정이 필요한 건을 처리합니다. K~W열 중 해당 처리 항목에 O 입력 후 재업로드하면 상담사근태 해당 날짜가 출근/휴무/연차/반차/출산휴가/육아휴직/공가/경조/대체/보상으로 반영됩니다. 수기 입력 영역도 동일한 목록으로 처리됩니다. · 기준일 ${result.cutoffDate || `${year}-${String(monthNo).padStart(2, "0")}-${String(new Date(year, monthNo, 0).getDate()).padStart(2, "0")}`}`;
 
   const cards = [
-    [0, "총 미등록 건수", `${rows.length}건`],
+    [0, "총 확인 건수", `${rows.length}건`],
     [2, "대상 인원", `${uniquePeople}명`],
     [4, "대상 매장", `${uniqueStores}개`],
     [6, "미처리", `${rows.length}건`],
@@ -1260,12 +1284,12 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
     matrix[2][col] = label;
     matrix[3][col] = value;
   }
-  matrix[2][10] = "구분 색상 안내";
-  matrix[3][10] = "● 휴무 확인";
-  matrix[3][11] = "● 출근 확인";
-  matrix[4][10] = "● 출ㆍ계 미입력";
-  matrix[4][11] = "● 처리 완료";
-  matrix[6] = ["No", "지역장", "매니저", "지역", "매장명", "이름", "사번", "발생일", "근무계획", "구분", "휴무확인(O 입력)", "출근확인(O 입력)", "상세사유", "처리상태"];
+  matrix[2][10] = "처리 목록";
+  matrix[3][10] = "출근 / 휴무 / 연차 / 반차";
+  matrix[3][14] = "출산휴가 / 육아휴직";
+  matrix[4][10] = "공가 / 경조 / 대체 / 보상";
+  matrix[4][14] = "0.5일은 별도 칸 사용";
+  matrix[6] = ["No", "지역장", "매니저", "지역", "매장명", "이름", "사번", "발생일", "근무계획", "구분", ...actionSpecs.map((item) => item.title), "상세사유", "처리상태"];
 
   const regionRows = [];
   const dataRows = [];
@@ -1280,7 +1304,7 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
     };
     matrix.push([
       `▼  ${region} (총 ${group.length}건)`, "", "", "", "", "", "", "",
-      `출근 미입력 ${typeCounts.clock}건  |  계획 미입력 ${typeCounts.plan}건  |  출ㆍ계 미입력 ${typeCounts.both}건  |  완료 0건`, "", "", "", "", "",
+      `출근 미입력 ${typeCounts.clock}건  |  계획 미입력 ${typeCounts.plan}건  |  출ㆍ계 미입력 ${typeCounts.both}건  |  완료 0건`, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
     ]);
     regionRows.push({ row: regionRowIndex, region, count: group.length, typeCounts });
     for (const row of group) {
@@ -1296,9 +1320,8 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
         row.date ? new Date(`${row.date}T00:00:00`) : "",
         row.planStatus && row.planStatus !== "공백" ? row.planStatus : "미입력",
         missingType,
-        "",
-        "",
-        row.reason || row.result || "출근 기록 없음 · 휴무인지 출근증빙 가능한지 확인 필요",
+        ...actionSpecs.map(() => ""),
+        row.reason || row.result || "출근 기록 없음 · 휴무/출근/연차/휴직 등 처리 항목 확인 필요",
         "미처리",
       ]);
       dataRows.push({ row: matrix.length - 1, missingType });
@@ -1306,88 +1329,92 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
   }
 
   const manualTitleRow = matrix.length;
-  matrix.push(["▼ 수기 입력 영역", "", "", "", "", "", "", "", "", "", "", "", "계획이 휴무/공백인데 출근 증빙을 받은 경우 이름·발생일 입력 후 L열 출근확인에 O", ""]);
+  matrix.push(["▼ 수기 입력 영역", "", "", "", "", "", "", "", "", "", "이름·발생일 입력 후 K~W 중 처리 항목에 O 입력", "", "", "", "", "", "", "", "", "", "", "", "", "휴무/연차/공백인데 출근했거나 연차↔휴무 변경 등 모든 수기 보정 가능", ""]);
   const manualRows = [];
-  for (let i = 0; i < 30; i += 1) {
+  for (let i = 0; i < 40; i += 1) {
     const rowIndex = matrix.length;
-    matrix.push([`수기${String(i + 1).padStart(2, "0")}`, "", "", "", "", "", "", "", "수기입력", "수기 출근증빙", "", "", "", "미처리"]);
+    matrix.push([`수기${String(i + 1).padStart(2, "0")}`, "", "", "", "", "", "", "", "수기입력", "수기 보정", ...actionSpecs.map(() => ""), "", "미처리"]);
     manualRows.push(rowIndex);
   }
 
   const sheet = XLSX.utils.aoa_to_sheet(matrix);
   sheet["!merges"] = [
-    { s: { r: 0, c: 0 }, e: { r: 0, c: 13 } },
-    { s: { r: 1, c: 0 }, e: { r: 1, c: 13 } },
+    { s: { r: 0, c: 0 }, e: { r: 0, c: STATUS_COL } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: STATUS_COL } },
     { s: { r: 2, c: 0 }, e: { r: 2, c: 1 } }, { s: { r: 3, c: 0 }, e: { r: 4, c: 1 } },
     { s: { r: 2, c: 2 }, e: { r: 2, c: 3 } }, { s: { r: 3, c: 2 }, e: { r: 4, c: 3 } },
     { s: { r: 2, c: 4 }, e: { r: 2, c: 5 } }, { s: { r: 3, c: 4 }, e: { r: 4, c: 5 } },
     { s: { r: 2, c: 6 }, e: { r: 2, c: 7 } }, { s: { r: 3, c: 6 }, e: { r: 4, c: 7 } },
     { s: { r: 2, c: 8 }, e: { r: 2, c: 9 } }, { s: { r: 3, c: 8 }, e: { r: 4, c: 9 } },
-    { s: { r: 2, c: 10 }, e: { r: 2, c: 13 } },
-    { s: { r: 3, c: 12 }, e: { r: 3, c: 13 } },
-    { s: { r: 4, c: 12 }, e: { r: 4, c: 13 } },
+    { s: { r: 2, c: 10 }, e: { r: 2, c: STATUS_COL } },
+    { s: { r: 3, c: 10 }, e: { r: 3, c: 13 } },
+    { s: { r: 3, c: 14 }, e: { r: 3, c: STATUS_COL } },
+    { s: { r: 4, c: 10 }, e: { r: 4, c: 13 } },
+    { s: { r: 4, c: 14 }, e: { r: 4, c: STATUS_COL } },
   ];
   sheet["!merges"].push(
-    { s: { r: manualTitleRow, c: 0 }, e: { r: manualTitleRow, c: 11 } },
-    { s: { r: manualTitleRow, c: 12 }, e: { r: manualTitleRow, c: 13 } },
+    { s: { r: manualTitleRow, c: 0 }, e: { r: manualTitleRow, c: 9 } },
+    { s: { r: manualTitleRow, c: 10 }, e: { r: manualTitleRow, c: 22 } },
+    { s: { r: manualTitleRow, c: 23 }, e: { r: manualTitleRow, c: 24 } },
   );
   for (const item of regionRows) {
     sheet["!merges"].push(
       { s: { r: item.row, c: 0 }, e: { r: item.row, c: 7 } },
-      { s: { r: item.row, c: 8 }, e: { r: item.row, c: 13 } },
+      { s: { r: item.row, c: 8 }, e: { r: item.row, c: STATUS_COL } },
     );
   }
 
   sheet["!cols"] = [
     { wch: 6 }, { wch: 11 }, { wch: 11 }, { wch: 9 }, { wch: 18 }, { wch: 11 }, { wch: 13 },
-    { wch: 13 }, { wch: 17 }, { wch: 27 }, { wch: 17 }, { wch: 17 }, { wch: 46 }, { wch: 12 },
+    { wch: 13 }, { wch: 15 }, { wch: 17 },
+    ...actionSpecs.map(() => ({ wch: 13 })),
+    { wch: 46 }, { wch: 12 },
   ];
-  sheet["!rows"] = matrix.map((_, index) => ({ hpt: index === 0 ? 34 : index === 1 ? 24 : index >= 2 && index <= 4 ? 28 : index === 5 ? 8 : index === 6 ? 30 : regionRows.some((item) => item.row === index) ? 26 : 24 }));
+  sheet["!rows"] = matrix.map((_, index) => ({ hpt: index === 0 ? 34 : index === 1 ? 34 : index >= 2 && index <= 4 ? 28 : index === 5 ? 8 : index === 6 ? 34 : regionRows.some((item) => item.row === index) ? 26 : 24 }));
   sheet["!freeze"] = { xSplit: 0, ySplit: 7, topLeftCell: "A8", activePane: "bottomLeft", state: "frozen" };
-  sheet["!views"] = [{ showGridLines: false, zoomScale: 70, zoomScaleNormal: 70 }];
+  sheet["!views"] = [{ showGridLines: false, zoomScale: 65, zoomScaleNormal: 65 }];
 
   const rangeStart = 8;
   const rangeEnd = Math.max(rangeStart, matrix.length);
+  const doneAllFormula = doneFormulaForRange(`$K$${rangeStart}:$W$${rangeEnd}`);
   setFormula(sheet, "A4", `COUNTIF($G$${rangeStart}:$G$${rangeEnd},"?*")&"건"`, `${rows.length}건`);
   setValue(sheet, "C4", `${uniquePeople}명`);
   setValue(sheet, "E4", `${uniqueStores}개`);
-  const doneAllFormula = `(COUNTIF($K$${rangeStart}:$L$${rangeEnd},"O")+COUNTIF($K$${rangeStart}:$L$${rangeEnd},"○")+COUNTIF($K$${rangeStart}:$L$${rangeEnd},"ㅇ"))`;
   setFormula(sheet, "G4", `(COUNTIF($G$${rangeStart}:$G$${rangeEnd},"?*")-${doneAllFormula})&"건"`, `${rows.length}건`);
   setFormula(sheet, "I4", `${doneAllFormula}&"건"`, "0건");
 
   for (const item of regionRows) {
     const excelRow = item.row + 1;
     const totalFormula = `COUNTIF($D$${rangeStart}:$D$${rangeEnd},"${item.region}")`;
-    const doneFormula = `(COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$K$${rangeStart}:$K$${rangeEnd},"O")+COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$K$${rangeStart}:$K$${rangeEnd},"○")+COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$K$${rangeStart}:$K$${rangeEnd},"ㅇ")+COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$L$${rangeStart}:$L$${rangeEnd},"O")+COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$L$${rangeStart}:$L$${rangeEnd},"○")+COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$L$${rangeStart}:$L$${rangeEnd},"ㅇ"))`;
+    const doneFormula = actionLetters.map((letter) => `(COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$${letter}$${rangeStart}:$${letter}$${rangeEnd},"O")+COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$${letter}$${rangeStart}:$${letter}$${rangeEnd},"○")+COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$${letter}$${rangeStart}:$${letter}$${rangeEnd},"ㅇ"))`).join("+");
     const clockFormula = `COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$J$${rangeStart}:$J$${rangeEnd},"출근 미입력")`;
     const planFormula = `COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$J$${rangeStart}:$J$${rangeEnd},"계획 미입력")`;
     const bothFormula = `COUNTIFS($D$${rangeStart}:$D$${rangeEnd},"${item.region}",$J$${rangeStart}:$J$${rangeEnd},"출ㆍ계 미입력")`;
     setFormula(sheet, `A${excelRow}`, `"▼  ${item.region} (총 "&${totalFormula}&"건)"`, `▼  ${item.region} (총 ${item.count}건)`);
-    setFormula(sheet, `I${excelRow}`, `"출근 미입력 "&${clockFormula}&"건  |  계획 미입력 "&${planFormula}&"건  |  출ㆍ계 미입력 "&${bothFormula}&"건  |  완료 "&${doneFormula}&"건"`, `출근 미입력 ${item.typeCounts.clock}건  |  계획 미입력 ${item.typeCounts.plan}건  |  출ㆍ계 미입력 ${item.typeCounts.both}건  |  완료 0건`);
+    setFormula(sheet, `I${excelRow}`, `"출근 미입력 "&${clockFormula}&"건  |  계획 미입력 "&${planFormula}&"건  |  출ㆍ계 미입력 "&${bothFormula}&"건  |  완료 "&(${doneFormula || "0"})&"건"`, `출근 미입력 ${item.typeCounts.clock}건  |  계획 미입력 ${item.typeCounts.plan}건  |  출ㆍ계 미입력 ${item.typeCounts.both}건  |  완료 0건`);
   }
 
-  dataRows.forEach((item) => {
-    const excelRow = item.row + 1;
-    setFormula(sheet, `N${excelRow}`, `IF(OR(UPPER(TRIM(K${excelRow}))="O",K${excelRow}="○",K${excelRow}="ㅇ",UPPER(TRIM(L${excelRow}))="O",L${excelRow}="○",L${excelRow}="ㅇ"),"처리 완료","미처리")`, "미처리");
+  const applyRowFormulas = (rowIndex) => {
+    const excelRow = rowIndex + 1;
+    setFormula(sheet, `${XLSX.utils.encode_col(STATUS_COL)}${excelRow}`, `IF(${doneFormulaForRow(excelRow)}>0,"처리 완료","미처리")`, "미처리");
     setNumberFormat(sheet, `H${excelRow}`, "yyyy-mm-dd");
-  });
-
+  };
+  dataRows.forEach((item) => applyRowFormulas(item.row));
   manualRows.forEach((rowIndex) => {
     const excelRow = rowIndex + 1;
     setFormula(sheet, `G${excelRow}`, `IFERROR(IF($F${excelRow}="","",INDEX('상담사근태'!$I:$I,MATCH($F${excelRow},'상담사근태'!$J:$J,0))),"")`, "");
-    setFormula(sheet, `N${excelRow}`, `IF(OR(UPPER(TRIM(K${excelRow}))="O",K${excelRow}="○",K${excelRow}="ㅇ",UPPER(TRIM(L${excelRow}))="O",L${excelRow}="○",L${excelRow}="ㅇ"),"처리 완료","미처리")`, "미처리");
-    setNumberFormat(sheet, `H${excelRow}`, "yyyy-mm-dd");
+    applyRowFormulas(rowIndex);
   });
 
-  styleCellRange(sheet, 0, 0, 0, 13, {
+  styleCellRange(sheet, 0, 0, 0, STATUS_COL, {
     fill: { patternType: "solid", fgColor: { rgb: "FF0B3B76" } },
     font: { name: "맑은 고딕", sz: 18, bold: true, color: { rgb: "FFFFFFFF" } },
     alignment: { horizontal: "left", vertical: "center" },
   });
-  styleCellRange(sheet, 1, 0, 1, 13, {
+  styleCellRange(sheet, 1, 0, 1, STATUS_COL, {
     fill: { patternType: "solid", fgColor: { rgb: "FFF4F7FB" } },
     font: { name: "맑은 고딕", sz: 10, color: { rgb: "FF40516B" } },
-    alignment: { horizontal: "right", vertical: "center" },
+    alignment: { horizontal: "right", vertical: "center", wrapText: true },
   });
 
   const cardPalettes = [
@@ -1414,9 +1441,9 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
   });
   applyDashboardLegendStyle(sheet);
 
-  styleCellRange(sheet, 6, 0, 6, 13, {
+  styleCellRange(sheet, 6, 0, 6, STATUS_COL, {
     fill: { patternType: "solid", fgColor: { rgb: "FF0B3B76" } },
-    font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FFFFFFFF" } },
+    font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: "FFFFFFFF" } },
     alignment: { horizontal: "center", vertical: "center", wrapText: true },
     border: thinBorder("FF8EA6C3"),
   });
@@ -1431,7 +1458,7 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
   };
   for (const item of regionRows) {
     const palette = regionPalette[item.region];
-    styleCellRange(sheet, item.row, 0, item.row, 13, {
+    styleCellRange(sheet, item.row, 0, item.row, STATUS_COL, {
       fill: { patternType: "solid", fgColor: { rgb: palette.fill } },
       font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: palette.font } },
       alignment: { horizontal: "left", vertical: "center" },
@@ -1441,44 +1468,10 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
     if (sheet[summaryAddr]) sheet[summaryAddr].s.alignment = { horizontal: "right", vertical: "center" };
   }
 
-  dataRows.forEach((item, index) => {
-    styleCellRange(sheet, item.row, 0, item.row, 13, {
-      fill: { patternType: "solid", fgColor: { rgb: index % 2 ? "FFF9FBFD" : "FFFFFFFF" } },
-      font: { name: "맑은 고딕", sz: 9, color: { rgb: "FF1F2937" } },
-      alignment: { horizontal: "center", vertical: "center", wrapText: true },
-      border: thinBorder("FFDCE3EC"),
-    });
-    const reasonAddr = XLSX.utils.encode_cell({ r: item.row, c: 12 });
-    if (sheet[reasonAddr]) sheet[reasonAddr].s.alignment = { horizontal: "left", vertical: "center", wrapText: true };
-    applyMissingTypeStyle(sheet, XLSX.utils.encode_cell({ r: item.row, c: 9 }), item.missingType);
-    const dayoffConfirmAddr = XLSX.utils.encode_cell({ r: item.row, c: 10 });
-    const evidenceAddr = XLSX.utils.encode_cell({ r: item.row, c: 11 });
-    for (const confirmAddr of [dayoffConfirmAddr, evidenceAddr]) if (sheet[confirmAddr]) {
-      sheet[confirmAddr].s = {
-        ...(sheet[confirmAddr].s || {}),
-        fill: { patternType: "solid", fgColor: { rgb: "FFFFF2CC" } },
-        font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FFC55A11" } },
-        alignment: { horizontal: "center", vertical: "center" },
-        border: thinBorder("FFF4C27A"),
-      };
-    }
-    applyProcessStatusStyle(sheet, XLSX.utils.encode_cell({ r: item.row, c: 13 }), "미처리");
-  });
-
-  styleCellRange(sheet, manualTitleRow, 0, manualTitleRow, 13, {
-    fill: { patternType: "solid", fgColor: { rgb: "FFE2F0D9" } },
-    font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FF107C41" } },
-    alignment: { horizontal: "left", vertical: "center", wrapText: true },
-    border: thinBorder("FFB7D7A8"),
-  });
-  manualRows.forEach((rowIndex, manualIndex) => {
-    styleCellRange(sheet, rowIndex, 0, rowIndex, 13, {
-      fill: { patternType: "solid", fgColor: { rgb: manualIndex % 2 ? "FFF7FBF5" : "FFFFFFFF" } },
-      font: { name: "맑은 고딕", sz: 9, color: { rgb: "FF1F2937" } },
-      alignment: { horizontal: "center", vertical: "center", wrapText: true },
-      border: thinBorder("FFDCE3EC"),
-    });
-    for (const addr of [XLSX.utils.encode_cell({ r: rowIndex, c: 5 }), XLSX.utils.encode_cell({ r: rowIndex, c: 7 }), XLSX.utils.encode_cell({ r: rowIndex, c: 10 }), XLSX.utils.encode_cell({ r: rowIndex, c: 11 })]) {
+  const inputColumns = Array.from({ length: actionSpecs.length }, (_, i) => ACTION_START_COL + i);
+  const highlightInputCells = (rowIndex) => {
+    for (const c of inputColumns) {
+      const addr = XLSX.utils.encode_cell({ r: rowIndex, c });
       if (sheet[addr]) sheet[addr].s = {
         ...(sheet[addr].s || {}),
         fill: { patternType: "solid", fgColor: { rgb: "FFFFF2CC" } },
@@ -1487,10 +1480,47 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
         border: thinBorder("FFF4C27A"),
       };
     }
-    applyProcessStatusStyle(sheet, XLSX.utils.encode_cell({ r: rowIndex, c: 13 }), "미처리");
+  };
+  dataRows.forEach((item, index) => {
+    styleCellRange(sheet, item.row, 0, item.row, STATUS_COL, {
+      fill: { patternType: "solid", fgColor: { rgb: index % 2 ? "FFF9FBFD" : "FFFFFFFF" } },
+      font: { name: "맑은 고딕", sz: 9, color: { rgb: "FF1F2937" } },
+      alignment: { horizontal: "center", vertical: "center", wrapText: true },
+      border: thinBorder("FFDCE3EC"),
+    });
+    const reasonAddr = XLSX.utils.encode_cell({ r: item.row, c: REASON_COL });
+    if (sheet[reasonAddr]) sheet[reasonAddr].s.alignment = { horizontal: "left", vertical: "center", wrapText: true };
+    applyMissingTypeStyle(sheet, XLSX.utils.encode_cell({ r: item.row, c: 9 }), item.missingType);
+    highlightInputCells(item.row);
+    applyProcessStatusStyle(sheet, XLSX.utils.encode_cell({ r: item.row, c: STATUS_COL }), "미처리");
   });
 
-  setRef(sheet, matrix.length, 14);
+  styleCellRange(sheet, manualTitleRow, 0, manualTitleRow, STATUS_COL, {
+    fill: { patternType: "solid", fgColor: { rgb: "FFE2F0D9" } },
+    font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FF107C41" } },
+    alignment: { horizontal: "left", vertical: "center", wrapText: true },
+    border: thinBorder("FFB7D7A8"),
+  });
+  manualRows.forEach((rowIndex, manualIndex) => {
+    styleCellRange(sheet, rowIndex, 0, rowIndex, STATUS_COL, {
+      fill: { patternType: "solid", fgColor: { rgb: manualIndex % 2 ? "FFF7FBF5" : "FFFFFFFF" } },
+      font: { name: "맑은 고딕", sz: 9, color: { rgb: "FF1F2937" } },
+      alignment: { horizontal: "center", vertical: "center", wrapText: true },
+      border: thinBorder("FFDCE3EC"),
+    });
+    for (const addr of [XLSX.utils.encode_cell({ r: rowIndex, c: 5 }), XLSX.utils.encode_cell({ r: rowIndex, c: 7 }), ...inputColumns.map((c) => XLSX.utils.encode_cell({ r: rowIndex, c }))]) {
+      if (sheet[addr]) sheet[addr].s = {
+        ...(sheet[addr].s || {}),
+        fill: { patternType: "solid", fgColor: { rgb: "FFFFF2CC" } },
+        font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FFC55A11" } },
+        alignment: { horizontal: "center", vertical: "center" },
+        border: thinBorder("FFF4C27A"),
+      };
+    }
+    applyProcessStatusStyle(sheet, XLSX.utils.encode_cell({ r: rowIndex, c: STATUS_COL }), "미처리");
+  });
+
+  setRef(sheet, matrix.length, COL_COUNT);
   workbook.Sheets["출근증빙·휴무확인"] = sheet;
   if (!workbook.SheetNames.includes("출근증빙·휴무확인")) workbook.SheetNames.push("출근증빙·휴무확인");
   delete workbook.Sheets["출근 미등록"];
@@ -2089,14 +2119,26 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
       }
       const item = daily[day];
       applyNeutralDayStyle(sheet, address);
-      if (item?.attendance && !item.attendance.hasClockIn) {
-        const colLetter = XLSX.utils.encode_col(col0);
-        const dayoffConfirmCount = `(COUNTIFS('출근증빙·휴무확인'!$G$8:$G$1000,$I${row},'출근증빙·휴무확인'!$H$8:$H$1000,${colLetter}$5,'출근증빙·휴무확인'!$K$8:$K$1000,"O")+COUNTIFS('출근증빙·휴무확인'!$G$8:$G$1000,$I${row},'출근증빙·휴무확인'!$H$8:$H$1000,${colLetter}$5,'출근증빙·휴무확인'!$K$8:$K$1000,"○")+COUNTIFS('출근증빙·휴무확인'!$G$8:$G$1000,$I${row},'출근증빙·휴무확인'!$H$8:$H$1000,${colLetter}$5,'출근증빙·휴무확인'!$K$8:$K$1000,"ㅇ"))`;
-        const evidenceCount = `(COUNTIFS('출근증빙·휴무확인'!$G$8:$G$1000,$I${row},'출근증빙·휴무확인'!$H$8:$H$1000,${colLetter}$5,'출근증빙·휴무확인'!$L$8:$L$1000,"O")+COUNTIFS('출근증빙·휴무확인'!$G$8:$G$1000,$I${row},'출근증빙·휴무확인'!$H$8:$H$1000,${colLetter}$5,'출근증빙·휴무확인'!$L$8:$L$1000,"○")+COUNTIFS('출근증빙·휴무확인'!$G$8:$G$1000,$I${row},'출근증빙·휴무확인'!$H$8:$H$1000,${colLetter}$5,'출근증빙·휴무확인'!$L$8:$L$1000,"ㅇ"))`;
-        setFormula(sheet, address, `IF(${evidenceCount}>0,"09:00",IF(${dayoffConfirmCount}>0,"휴무","${item.display}"))`, item.display);
-      } else {
-        setValue(sheet, address, item?.display || "");
-      }
+      const colLetter = XLSX.utils.encode_col(col0);
+      const evidenceOverrides = [
+        ["K", "09:00"],
+        ["L", "휴무"],
+        ["M", "연차"],
+        ["N", "오전반차"],
+        ["O", "오후반차"],
+        ["P", "출산휴가"],
+        ["Q", "육아휴직"],
+        ["R", "공가"],
+        ["S", "경조"],
+        ["T", "대체휴일(1일)"],
+        ["U", "대체휴일(0.5일)"],
+        ["V", "보상휴가(1일)"],
+        ["W", "보상휴가(0.5일)"],
+      ];
+      const checkedCount = (actionCol) => `(COUNTIFS('출근증빙·휴무확인'!$G$8:$G$1000,$I${row},'출근증빙·휴무확인'!$H$8:$H$1000,${colLetter}$5,'출근증빙·휴무확인'!$${actionCol}$8:$${actionCol}$1000,"O")+COUNTIFS('출근증빙·휴무확인'!$G$8:$G$1000,$I${row},'출근증빙·휴무확인'!$H$8:$H$1000,${colLetter}$5,'출근증빙·휴무확인'!$${actionCol}$8:$${actionCol}$1000,"○")+COUNTIFS('출근증빙·휴무확인'!$G$8:$G$1000,$I${row},'출근증빙·휴무확인'!$H$8:$H$1000,${colLetter}$5,'출근증빙·휴무확인'!$${actionCol}$8:$${actionCol}$1000,"ㅇ"))`;
+      const fallbackDisplay = String(item?.display || "").replace(/"/g, '""');
+      const overrideFormula = evidenceOverrides.reduceRight((formula, [actionCol, display]) => `IF(${checkedCount(actionCol)}>0,"${display}",${formula})`, `"${fallbackDisplay}"`);
+      setFormula(sheet, address, overrideFormula, item?.display || "");
       applyStatusStyle(sheet, address, item?.display || "");
       if (item?.issues?.length) {
         // 미입력 유형은 각각의 구분색과 8pt 글씨를 유지하고, 그 외 오류만 공통 경고색을 적용합니다.
@@ -3147,7 +3189,7 @@ async function applyLiveEvidenceConditionalFormatting(buffer, result) {
     if(!workbookXml||!relsXml||!stylesXml)return buffer;
     const dxf=appendConditionalDxfs(stylesXml);
     const configs=[
-      ["출근증빙·휴무확인",[{sqref:"K8:L1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(K8))="O",K8="○",K8="ㅇ",UPPER(TRIM(L8))="O",L8="○",L8="ㅇ")'}]},{sqref:"N8:N1000",rules:[{dxfId:dxf.completed,formula:'$N8="처리 완료"'},{dxfId:dxf.pending,formula:'$N8="미처리"'}]}]],
+      ["출근증빙·휴무확인",[{sqref:"K8:W1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(K8))="O",K8="○",K8="ㅇ")'}]},{sqref:"Y8:Y1000",rules:[{dxfId:dxf.completed,formula:'$Y8="처리 완료"'},{dxfId:dxf.pending,formula:'$Y8="미처리"'}]}]],
       ["계획&근태 상이 인원",[{sqref:"M8:M1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(M8))="O",M8="○",M8="ㅇ")'}]},{sqref:"N8:N1000",rules:[{dxfId:dxf.completed,formula:'$N8="처리 완료"'},{dxfId:dxf.pending,formula:'$N8="미처리"'}]}]],
       ["휴무 초과자",[{sqref:"R8:R1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(R8))="O",R8="○",R8="ㅇ")'}]},{sqref:"S8:S1000",rules:[{dxfId:dxf.completed,formula:'$S8="처리 완료"'},{dxfId:dxf.pending,formula:'$S8="미처리"'}]}]],
       ["매니저별 이상 근태",[{sqref:"L8:L1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(L8))="O",L8="○",L8="ㅇ")'}]},{sqref:"M8:M1000",rules:[{dxfId:dxf.completed,formula:'$M8="전달 완료"'},{dxfId:dxf.pending,formula:'$M8="미전달"'}]}]],

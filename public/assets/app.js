@@ -1899,7 +1899,7 @@ function workflowOverrideStatus(value) {
   const normalized = normalizeActualCode(raw);
   if (isClockDisplayValue(raw)) return raw.slice(0, 5);
   if (comparableCode(normalized) === "근무") return "09:00";
-  if (normalized === "휴무") return "휴무";
+  if (["휴무", "연차", "오전반차", "오후반차", "출산휴가", "육아휴직", "공가", "경조", "대체휴일(1일)", "대체휴일(0.5일)", "보상휴가(1일)", "보상휴가(0.5일)"].includes(normalized)) return normalized;
   return raw;
 }
 
@@ -1994,42 +1994,50 @@ function parseWorkflowOverrides(sheets, targetMonth = "", defaultRoute = "") {
     }
   };
 
+  const evidenceActionSpecs = [
+    { status: "09:00", columns: ["출근확인(O입력)", "출근확인(O 입력)", "출근확인", "증빙여부(O입력)", "증빙여부(O 입력)", "증빙여부", "출근증빙", "증빙"] },
+    { status: "휴무", columns: ["휴무확인(O입력)", "휴무확인(O 입력)", "휴무확인"] },
+    { status: "연차", columns: ["연차확인(O입력)", "연차확인(O 입력)", "연차확인"] },
+    { status: "오전반차", columns: ["오전반차확인(O입력)", "오전반차확인(O 입력)", "오전반차확인", "오전반차"] },
+    { status: "오후반차", columns: ["오후반차확인(O입력)", "오후반차확인(O 입력)", "오후반차확인", "오후반차"] },
+    { status: "출산휴가", columns: ["출산휴가확인(O입력)", "출산휴가확인(O 입력)", "출산휴가확인", "출산휴가"] },
+    { status: "육아휴직", columns: ["육아휴직확인(O입력)", "육아휴직확인(O 입력)", "육아휴직확인", "육아휴직"] },
+    { status: "공가", columns: ["공가확인(O입력)", "공가확인(O 입력)", "공가확인", "공가"] },
+    { status: "경조", columns: ["경조확인(O입력)", "경조확인(O 입력)", "경조확인", "경조"] },
+    { status: "대체휴일(1일)", columns: ["대체휴무1일확인(O입력)", "대체휴무1일확인(O 입력)", "대체휴무(1일)", "대체휴무 1일", "대체1일"] },
+    { status: "대체휴일(0.5일)", columns: ["대체휴무0.5일확인(O입력)", "대체휴무0.5일확인(O 입력)", "대체휴무(0.5일)", "대체휴무 0.5일", "대체0.5"] },
+    { status: "보상휴가(1일)", columns: ["보상휴가1일확인(O입력)", "보상휴가1일확인(O 입력)", "보상휴가(1일)", "보상휴가 1일", "보상1일"] },
+    { status: "보상휴가(0.5일)", columns: ["보상휴가0.5일확인(O입력)", "보상휴가0.5일확인(O 입력)", "보상휴가(0.5일)", "보상휴가 0.5일", "보상0.5"] },
+  ];
+  const evidenceActionHeaderNames = evidenceActionSpecs.flatMap((item) => item.columns);
+
   for (const sheet of (sheets || []).filter((item) => /출근\s*증빙|휴무\s*확인|출근\s*미등록|증빙/.test(String(item.sheetName || "")))) {
     const matrix = sheet.matrix || [];
-    const headerIndex = findFlexibleHeaderRow(matrix, (headers) => findHeaderIndex(headers, ["사번", "사원번호", "제니엘사번"]) >= 0
-      && (findHeaderIndex(headers, ["휴무확인(O입력)", "휴무확인(O 입력)", "휴무확인", "휴무"]) >= 0
-        || findHeaderIndex(headers, ["출근확인(O입력)", "출근확인(O 입력)", "출근확인", "증빙여부(O입력)", "증빙여부(O 입력)", "증빙여부", "출근증빙", "증빙"]) >= 0));
+    const headerIndex = findFlexibleHeaderRow(matrix, (headers) => (findHeaderIndex(headers, ["사번", "사원번호", "제니엘사번"]) >= 0 || findHeaderIndex(headers, ["성명", "이름", "직원명", "상담사명"]) >= 0)
+      && findHeaderIndex(headers, ["발생일", "근무일자", "일자", "날짜"]) >= 0
+      && findHeaderIndex(headers, evidenceActionHeaderNames) >= 0);
     if (headerIndex < 0) continue;
     const headers = (matrix[headerIndex] || []).map(normalizeHeader);
     const idCol = findHeaderIndex(headers, ["사번", "사원번호", "제니엘사번"]);
     const nameCol = findHeaderIndex(headers, ["성명", "이름", "직원명", "상담사명"]);
     const dateCol = findHeaderIndex(headers, ["발생일", "근무일자", "일자", "날짜"]);
     const storeCol = findHeaderIndex(headers, ["매장명", "점포명", "매장"]);
-    const dayoffCol = findHeaderIndex(headers, ["휴무확인(O입력)", "휴무확인(O 입력)", "휴무확인", "휴무"]);
-    const clockCol = findHeaderIndex(headers, ["출근확인(O입력)", "출근확인(O 입력)", "출근확인", "증빙여부(O입력)", "증빙여부(O 입력)", "증빙여부", "출근증빙", "증빙"]);
-    if ((idCol < 0 && nameCol < 0) || dateCol < 0) continue;
+    const actionColumns = evidenceActionSpecs.map((spec) => ({ ...spec, col: findHeaderIndex(headers, spec.columns) })).filter((spec) => spec.col >= 0);
+    if ((idCol < 0 && nameCol < 0) || dateCol < 0 || !actionColumns.length) continue;
     for (const row of matrix.slice(headerIndex + 1)) {
       const store = storeCol >= 0 ? text(row[storeCol]) : "";
       let employeeId = idCol >= 0 ? normalizeEmployeeId(row[idCol]) : "";
       if (!looksLikeEmployeeId(employeeId) && nameCol >= 0) employeeId = employeeLookup.resolve(row[nameCol], store);
       const date = parseReferenceFinalDate(row[dateCol]);
       if (!looksLikeEmployeeId(employeeId) || !date) continue;
+      const selected = actionColumns.find((spec) => isWorkflowApproved(row[spec.col]));
+      if (!selected) continue;
       const dailyKey = `${employeeId}|${date}`;
-      const dayoffApproved = dayoffCol >= 0 && isWorkflowApproved(row[dayoffCol]);
-      const clockApproved = clockCol >= 0 && isWorkflowApproved(row[clockCol]);
-      if (dayoffApproved) {
-        dailySet.add(dailyKey);
-        planSet.add(dailyKey);
-        issueSet.add(`${dailyKey}|missing_clock_in`);
-        result.dailyStatusOverrides.push({ employeeId, date, store, status: "휴무", source: "출근증빙·휴무확인" });
-      }
-      if (clockApproved) {
-        dailySet.add(dailyKey);
-        attendanceEvidenceSet.add(dailyKey);
-        planSet.add(dailyKey);
-        issueSet.add(`${dailyKey}|missing_clock_in`);
-        result.dailyStatusOverrides.push({ employeeId, date, store, status: "09:00", source: "출근증빙·휴무확인" });
-      }
+      dailySet.add(dailyKey);
+      planSet.add(dailyKey);
+      issueSet.add(`${dailyKey}|missing_clock_in`);
+      if (selected.status === "09:00") attendanceEvidenceSet.add(dailyKey);
+      result.dailyStatusOverrides.push({ employeeId, date, store, status: selected.status, source: "출근증빙·휴무확인" });
     }
   }
 
@@ -2066,10 +2074,10 @@ function parseWorkflowOverrides(sheets, targetMonth = "", defaultRoute = "") {
 
 function applyWorkflowDailyStatusOverrides(plan, attendance, overrides = emptyWorkflowOverrides(), targetMonth = "") {
   const rows = Array.isArray(overrides?.dailyStatusOverrides) ? overrides.dailyStatusOverrides : [];
-  if (!rows.length) return { appliedCount: 0, clockCount: 0, dayoffCount: 0 };
+  if (!rows.length) return { appliedCount: 0, clockCount: 0, dayoffCount: 0, leaveCount: 0 };
   const planRowsById = groupBy(plan.rows || [], (row) => normalizeEmployeeId(row.employeeId));
   const replacementByKey = new Map();
-  const summary = { appliedCount: 0, clockCount: 0, dayoffCount: 0 };
+  const summary = { appliedCount: 0, clockCount: 0, dayoffCount: 0, leaveCount: 0 };
   for (const row of rows) {
     const employeeId = normalizeEmployeeId(row.employeeId);
     const date = String(row.date || "");
@@ -2081,24 +2089,8 @@ function applyWorkflowDailyStatusOverrides(plan, attendance, overrides = emptyWo
     if (!selectedPlan) continue;
     const status = workflowOverrideStatus(row.status);
     const key = `${employeeId}|${date}`;
-    if (status === "휴무") {
-      selectedPlan.plans[day] = "휴무";
-      replacementByKey.set(key, {
-        employeeId,
-        name: selectedPlan.name || "",
-        date,
-        actualIn: "",
-        changedIn: "",
-        location: row.store || selectedPlan.store || "",
-        actualStatus: "휴무",
-        finalOverride: true,
-        forceClockIn: false,
-        finalDisplay: "휴무",
-      });
-      summary.dayoffCount += 1;
-      summary.appliedCount += 1;
-    } else {
-      const clock = isClockDisplayValue(status) ? status.slice(0, 5) : "09:00";
+    if (isClockDisplayValue(status)) {
+      const clock = status.slice(0, 5);
       replacementByKey.set(key, {
         employeeId,
         name: selectedPlan.name || "",
@@ -2112,6 +2104,24 @@ function applyWorkflowDailyStatusOverrides(plan, attendance, overrides = emptyWo
         finalDisplay: clock,
       });
       summary.clockCount += 1;
+      summary.appliedCount += 1;
+    } else {
+      const finalStatus = status || "휴무";
+      selectedPlan.plans[day] = finalStatus;
+      replacementByKey.set(key, {
+        employeeId,
+        name: selectedPlan.name || "",
+        date,
+        actualIn: "",
+        changedIn: "",
+        location: row.store || selectedPlan.store || "",
+        actualStatus: finalStatus,
+        finalOverride: true,
+        forceClockIn: false,
+        finalDisplay: finalStatus,
+      });
+      if (finalStatus === "휴무") summary.dayoffCount += 1;
+      else summary.leaveCount += 1;
       summary.appliedCount += 1;
     }
   }
@@ -3344,6 +3354,8 @@ function normalizeActualCode(value) {
   if (raw.includes("보상")) return "보상휴가(1일)";
   if (raw.includes("0.5") || raw.includes("반일근무") || raw === "반차") return "반일근무";
   if (raw.includes("무급")) return "무급휴가";
+  if (raw.includes("출산")) return "출산휴가";
+  if (raw.includes("육아휴직")) return "육아휴직";
   if (raw.includes("연차")) return "연차";
   if (raw.includes("공가")) return "공가";
   if (raw.includes("경조")) return "경조";
