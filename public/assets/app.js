@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=62";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=68";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -544,10 +544,48 @@ function buildEmployeeFactsForSave(result) {
       dayRow.manager = override.manager || "";
       dayRow.managerFileName = override.fileName || "";
     }
+    applyAutoBlankDayoffToFact(fact, result.targetMonth);
     recomputeFactFromDailyStatuses(fact, result.targetMonth);
     fact.managerFinalized = true;
   }
   return facts;
+}
+
+function applyAutoBlankDayoffToFact(fact, targetMonth) {
+  const daily = Array.isArray(fact.dailyStatuses) ? fact.dailyStatuses : [];
+  const baseAllowance = roundHalf(Number(fact.baseAllowance || fact.baseAllowanceRaw || 0));
+  if (!(baseAllowance > 0)) return;
+  const monthRows = daily
+    .filter((row) => String(row.date || "").startsWith(`${targetMonth}-`))
+    .sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
+  let dayoffCount = 0;
+  const candidates = [];
+  for (const row of monthRows) {
+    const display = managerFinalDisplay(row.displayStatus || row.actualStatus || row.planStatus || "");
+    if (String(display).startsWith("휴무")) dayoffCount = roundHalf(dayoffCount + 1);
+    else if (!row.hasClockIn && isAutoBlankDayoffMissingDisplay(display)) candidates.push(row);
+  }
+  for (const row of candidates) {
+    if (dayoffCount >= baseAllowance) break;
+    row.displayStatus = "휴무(공백)";
+    row.actualStatus = "휴무";
+    row.actualIn = "";
+    row.changedIn = "";
+    row.hasClockIn = false;
+    row.planStatus = "휴무";
+    row.autoBlankDayoff = true;
+    dayoffCount = roundHalf(dayoffCount + 1);
+  }
+}
+
+function isAutoBlankDayoffMissingDisplay(value = "") {
+  const compact = String(value || "").trim().replace(/\s+/g, "").replace(/[ㆍ·\/\-]/g, "");
+  if (!compact) return false;
+  return compact === "공백"
+    || compact === "미등록"
+    || compact === "미입력"
+    || compact === "출계미입력"
+    || compact === "출계미등록";
 }
 
 function recomputeFactFromDailyStatuses(fact, targetMonth) {
@@ -3294,19 +3332,8 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       }
 
       if (UNEXPECTED_CLOCK_PLANS.has(planStatus) && attendanceValue.hasClockIn) {
-        const row = makeIssueRow({
-          issueType: "unexpected_clock_in",
-          route,
-          person,
-          date,
-          dateObject,
-          planStatus,
-          attendanceValue,
-          result: "휴무·휴가인데 출근기록 있음",
-          reason: `${planStatus} 계획이나 출근기록이 있음`,
-        });
-        unexpectedRows.push(row);
-        addMismatch(makeMismatchRow({ ...row, route, person, date, dateObject, planStatus, attendanceValue, result: row.result, reason: row.reason }));
+        // 실제 출근이 찍힌 날은 계획이 휴무/휴가/대체/보상이어도 정상 출근으로 인정합니다.
+        // 빨간색 경고나 출근증빙 요청 대상으로 만들지 않습니다.
         hasPrimaryIssue = true;
       }
 
@@ -3776,6 +3803,9 @@ function makeMismatchRow({ issueType = "", missingType = "", route, person, date
 
 function evaluateMismatch(planStatus, attendanceValue, hasActualStatusColumn) {
   if (attendanceValue?.finalOverride) return null;
+  // 실제 출근시간/변경 출근시간/출근 증빙이 있으면 계획과 달라도 정상 출근으로 봅니다.
+  // 출근을 찍은 사람은 빨간색 경고, 계획·근태 상이, 출근증빙 요청 대상에서 제외합니다.
+  if (attendanceValue?.hasClockIn) return null;
   if (planStatus === "기타") {
     return { result: "검토 필요", reason: "기타는 자동 단정하지 않고 계획·실제 근태 확인이 필요함" };
   }

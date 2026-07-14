@@ -41,6 +41,7 @@ export async function buildFinalTemplateWorkbook(result) {
 
   const context = buildContext(result, daysInMonth);
   fillMainSheet(workbook.Sheets["상담사근태"], result, context, year, monthNo, daysInMonth);
+  applySheetAutoBlankDayoff(workbook.Sheets["상담사근태"], result, daysInMonth);
   const managerComparisonRows = buildManagerFinalizationSheets(workbook, result, year, monthNo, daysInMonth);
   buildEvidenceDashboardSheet(workbook, result, context, year, monthNo);
   buildDayoffReplacementSheet(workbook, result, context, year, monthNo);
@@ -312,14 +313,25 @@ function isExplicitDayoffItem(item = {}) {
 
 function isAutoBlankDayoffCandidate(item = {}) {
   if (!item || item.attendance?.hasClockIn || item.approvedLeaveStatus) return false;
-  if (item.attendance?.finalOverride) return false;
   const rawPlan = normalizePlan(item.rawPlanStatus || item.planStatus);
   const actual = normalizeActual(item.attendance?.actualStatus);
-  const display = String(item.display || "");
-  // 근무계획과 실제 근태가 모두 비어 있는 날짜는 먼저 기본 휴무 한도 안에서 휴무(공백)으로 채웁니다.
-  // 기존 표시가 출ㆍ계 미입력/미등록으로 만들어졌더라도 같은 공백일로 취급합니다.
-  const planBlank = rawPlan === "공백" || display === "출ㆍ계 미입력" || display === "미등록" || display === "미입력";
-  return planBlank && !actual;
+  const display = String(item.display || item.attendance?.finalDisplay || "");
+  // 근무계획과 실제 근태가 모두 비어 있는 날짜는 기본 휴무 한도 안에서 휴무(공백)으로 채웁니다.
+  // 표시가 출ㆍ계/출/계 미입력, 미등록 등으로 들어와도 같은 공백일로 봅니다.
+  const planBlank = rawPlan === "공백" || isAutoBlankDayoffMissingDisplay(display);
+  const actualBlank = !actual || isAutoBlankDayoffMissingDisplay(actual);
+  if (item.attendance?.finalOverride && !isAutoBlankDayoffMissingDisplay(display)) return false;
+  return planBlank && actualBlank;
+}
+
+function isAutoBlankDayoffMissingDisplay(value = "") {
+  const compact = String(value || "").trim().replace(/\s+/g, "").replace(/[ㆍ·\/\-]/g, "");
+  if (!compact) return false;
+  return compact === "공백"
+    || compact === "미등록"
+    || compact === "미입력"
+    || compact === "출계미입력"
+    || compact === "출계미등록";
 }
 
 function isDayoffAutoDisplay(value = "") {
@@ -1535,6 +1547,39 @@ function isAutoBlankDayoffEvidenceRow(row, ctx) {
   return false;
 }
 
+function buildManagerAwareAutoBlankDayoffSet(result, ctx) {
+  const set = new Set();
+  const targetMonth = result?.targetMonth || "";
+  const monthNo = Number(targetMonth.slice(5, 7));
+  const year = Number(targetMonth.slice(0, 4));
+  const daysInMonth = year && monthNo ? new Date(year, monthNo, 0).getDate() : 31;
+  const managerFinalStatusByKey = buildManagerFinalizationStatusMap(result);
+  for (const person of ctx.people || []) {
+    const employeeId = normalizeId(person.employeeId);
+    const summary = ctx.summaryById?.get(employeeId) || {};
+    const baseAllowance = roundHalf(Number(summary.baseAllowance || result.baseAllowance || 0));
+    if (!employeeId || !(baseAllowance > 0)) continue;
+    const daily = ctx.dailyByKey?.get(person.key) || {};
+    let dayoffCount = 0;
+    const candidates = [];
+    for (let day = 1; day <= daysInMonth; day += 1) {
+      const date = `${targetMonth}-${String(day).padStart(2, "0")}`;
+      const key = `${employeeId}|${date}`;
+      const item = daily[day] || {};
+      const managerValue = managerFinalStatusByKey.get(key);
+      const display = managerValue ? normalizeManagerFinalSheetValue(managerValue) : String(item.display || "");
+      if (isDayoffLikeDisplay(display)) dayoffCount = roundHalf(dayoffCount + 1);
+      else if (!item.attendance?.hasClockIn && !item.approvedLeaveStatus && isAutoBlankDayoffMissingDisplay(display)) candidates.push(key);
+    }
+    for (const key of candidates) {
+      if (dayoffCount >= baseAllowance) break;
+      set.add(key);
+      dayoffCount = roundHalf(dayoffCount + 1);
+    }
+  }
+  return set;
+}
+
 function buildManagerFinalizationStatusMap(result) {
   const map = new Map();
   const values = Array.isArray(result?.managerFinalization?.values) ? result.managerFinalization.values : [];
@@ -1585,12 +1630,14 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
   const doneFormulaForRow = (excelRow) => doneFormulaForRange(`$K${excelRow}:$W${excelRow}`);
 
   const managerFinalStatusByKey = buildManagerFinalizationStatusMap(result);
+  const managerAutoBlankDayoffSet = buildManagerAwareAutoBlankDayoffSet(result, ctx);
   const rows = [
     ...(result.missingRows || []),
     ...buildUnapprovedPlannedLeaveEvidenceRows(ctx, result),
   ]
     .filter((row) => !isResolvedByApprovedLeave(row, ctx))
     .filter((row) => !isAutoBlankDayoffEvidenceRow(row, ctx))
+    .filter((row) => !managerAutoBlankDayoffSet.has(`${normalizeId(row.employeeId)}|${row.date || ""}`))
     .filter((row) => {
       const key = `${normalizeId(row.employeeId)}|${row.date || ""}`;
       return !isEvidenceResolvedByManagerFinalization(managerFinalStatusByKey.get(key));
@@ -2722,22 +2769,21 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
       setFormula(sheet, address, overrideFormula, item?.display || "");
       applyStatusStyle(sheet, address, item?.display || "");
       if (item?.issues?.length) {
+        // 실제 출근이 찍힌 날은 계획이 휴무/휴가여도 문제로 보지 않으므로 빨간색 경고색을 적용하지 않습니다.
         // 미입력 유형은 각각의 구분색과 8pt 글씨를 유지하고, 그 외 오류만 공통 경고색을 적용합니다.
         // 자동 휴무 보정 표시는 자체 색상을 유지합니다.
-        if (!String(item?.display || "").includes("미입력") && !isDayoffAutoDisplay(item?.display)) applyIssueStyle(sheet, address, item.issues);
-        issueCount += 1;
+        if (!item?.attendance?.hasClockIn && !String(item?.display || "").includes("미입력") && !isDayoffAutoDisplay(item?.display)) applyIssueStyle(sheet, address, item.issues);
+        if (!item?.attendance?.hasClockIn) issueCount += 1;
       }
       // 반차는 실제 출근시간을 표시하되 연두색으로 구분합니다.
       if (["오전반차", "오후반차"].includes(item?.planStatus) && item?.attendance?.hasClockIn) applyHalfDayClockStyle(sheet, address);
-      // 근무 외 계획인데 실제 출근한 경우는 노란색으로 표시합니다. 교육·반차·대체/보상은 정상 예외로 둡니다.
-      // 특히 대체/보상 계획일에 실제 출근이 찍힌 경우에는 출근시간 표시를 우선하고 파란색/노란색을 적용하지 않습니다.
-      if (NON_WORK_CODES.has(item?.planStatus) && item?.attendance?.hasClockIn && !isSubstituteOrCompensationStatus(item?.planStatus)) applyUnexpectedClockStyle(sheet, address);
+      // 실제 출근이 찍힌 날은 계획이 휴무/휴가여도 출근시간 표시가 우선입니다. 노란색/빨간색 경고를 적용하지 않습니다.
       // 휴무·대체휴무·보상휴가 초과 사용일은 다른 색상보다 빨간색을 우선 적용합니다.
       // 단, 출근시간이 찍힌 날과 연차신청현황에서 승인된 연차/반차가 반영된 날은 일반 표시를 유지합니다.
       const approvedAnnualLike = Boolean(item?.approvedLeaveStatus && !item?.attendance?.hasClockIn
         && ["연차", "오전반차", "오후반차"].includes(item?.planStatus));
       if (!item?.attendance?.hasClockIn && !approvedAnnualLike && (item?.substituteShortage || item?.compensationShortage)) applyLeaveOveruseStyle(sheet, address);
-      else if (!isDayoffAutoDisplay(item?.display) && !approvedAnnualLike && (item?.dayoffExcess)) applyLeaveShortageStyle(sheet, address);
+      else if (!item?.attendance?.hasClockIn && !isDayoffAutoDisplay(item?.display) && !approvedAnnualLike && (item?.dayoffExcess)) applyLeaveShortageStyle(sheet, address);
       if (NON_WORK_CODES.has(item?.planStatus) && item?.attendance?.hasClockIn) clockCorrection += 1;
     }
 
@@ -2834,9 +2880,43 @@ function buildManagerFinalizationSheets(workbook, result, year, monthNo, daysInM
   if (!baseSheet) return [];
   const managerSheet = cloneSheet(baseSheet);
   const comparisonRows = applyManagerFinalizationToSheet(managerSheet, baseSheet, result, year, monthNo, daysInMonth);
+  applySheetAutoBlankDayoff(managerSheet, result, daysInMonth);
   workbook.Sheets["상담사근태_관리자반영"] = managerSheet;
   buildManagerFinalizationComparisonSheet(workbook, result, comparisonRows, year, monthNo);
   return comparisonRows;
+}
+
+function applySheetAutoBlankDayoff(sheet, result, daysInMonth) {
+  if (!sheet) return;
+  const summaries = new Map((result.employeeSummaries || []).map((row) => [normalizeId(row.employeeId), row]));
+  const lookup = buildMainAttendanceSheetLookup(sheet, result.targetMonth, daysInMonth);
+  const firstDayCol0 = 14;
+  for (const rows of lookup.rowsById.values()) {
+    for (const sheetRow of rows) {
+      const employeeId = normalizeId(sheetRow.employeeId);
+      const summary = summaries.get(employeeId) || {};
+      const baseAllowance = roundHalf(Number(summary.baseAllowance || result.baseAllowance || 0));
+      if (!(baseAllowance > 0)) continue;
+      let dayoffCount = 0;
+      const candidates = [];
+      for (let day = 1; day <= daysInMonth; day += 1) {
+        const address = XLSX.utils.encode_cell({ r: sheetRow.rowIndex0, c: firstDayCol0 + day - 1 });
+        const value = cellDisplayValue(sheet, address);
+        if (isDayoffLikeDisplay(value)) {
+          dayoffCount = roundHalf(dayoffCount + 1);
+        } else if (isAutoBlankDayoffMissingDisplay(value)) {
+          candidates.push(address);
+        }
+      }
+      for (const address of candidates) {
+        if (dayoffCount >= baseAllowance) break;
+        setValue(sheet, address, "휴무(공백)");
+        applyNeutralDayStyle(sheet, address);
+        applyStatusStyle(sheet, address, "휴무(공백)");
+        dayoffCount = roundHalf(dayoffCount + 1);
+      }
+    }
+  }
 }
 
 function cloneSheet(sheet) {
