@@ -13,6 +13,7 @@ export async function onRequestGet(context) {
   const url = new URL(context.request.url);
   const route = url.searchParams.get("route") || "";
   const month = url.searchParams.get("month") || "";
+  const requestedSnapshotId = url.searchParams.get("snapshotId") || "";
   if (!VALID_ROUTES.has(route) || !/^\d{4}-\d{2}$/.test(month)) {
     return json({ error: "경로와 대상 월을 확인해 주세요." }, 400);
   }
@@ -229,18 +230,78 @@ export async function onRequestGet(context) {
     })
     .filter((row) => row.employeeId && row.dailyStatuses.length);
 
-  // 월 경계 주차는 직전 월 스냅샷으로 이어 계산하고,
-  // 같은 월에 이미 저장된 중간 확인본이 있으면 그 확정일 이전은 다시 묻지 않도록 내려보냅니다.
+  // 월 경계 주차는 직전 월 마감 스냅샷으로 이어 계산합니다.
+  // 대상 월 중간 확인은 v61부터 별도 이력 테이블에서 선택한 저장본을 내려보냅니다.
   const previousMonthCutoff = closureCutoffByMonth.get(previousMonth) || "";
   const previousMonthDailyFacts = buildDailyFactsForMonth(previousMonth, previousMonthCutoff);
-  const currentMonthCutoff = closureCutoffByMonth.get(month) || "";
-  const currentMonthDailyFacts = buildDailyFactsForMonth(month, currentMonthCutoff);
+  const selectedSnapshot = await resolveMidmonthSnapshot(context.env.DB, route, month, requestedSnapshotId);
+  const currentMonthCutoff = selectedSnapshot?.cutoffDate || closureCutoffByMonth.get(month) || "";
+  const currentMonthDailyFacts = selectedSnapshot
+    ? await buildDailyFactsFromSnapshot(context.env.DB, selectedSnapshot.id)
+    : buildDailyFactsForMonth(month, currentMonthCutoff);
 
   return json({
     lotsByEmployee, balances, annualLeaveBefore, currentGrants, settlementGrants, autoUseDates,
     previousMonth, previousMonthFacts, previousMonthCutoff, previousMonthDailyFacts,
     currentMonthCutoff, currentMonthDailyFacts,
+    selectedMidmonthSnapshot: selectedSnapshot,
   });
+}
+
+async function resolveMidmonthSnapshot(db, route, month, requestedSnapshotId) {
+  if (requestedSnapshotId === "none") return null;
+  if (requestedSnapshotId) {
+    const row = await db.prepare(`
+      SELECT id, cutoff_date AS cutoffDate, snapshot_name AS snapshotName, employee_count AS employeeCount, daily_count AS dailyCount, created_at AS createdAt
+      FROM attendance_midmonth_snapshots
+      WHERE id = ? AND route = ? AND month = ? AND status = 'active'
+      LIMIT 1
+    `).bind(requestedSnapshotId, route, month).first();
+    return row || null;
+  }
+  const latest = await db.prepare(`
+    SELECT id, cutoff_date AS cutoffDate, snapshot_name AS snapshotName, employee_count AS employeeCount, daily_count AS dailyCount, created_at AS createdAt
+    FROM attendance_midmonth_snapshots
+    WHERE route = ? AND month = ? AND status = 'active'
+    ORDER BY cutoff_date DESC, created_at DESC
+    LIMIT 1
+  `).bind(route, month).first();
+  return latest || null;
+}
+
+async function buildDailyFactsFromSnapshot(db, snapshotId) {
+  const result = await db.prepare(`
+    SELECT employee_id, employee_name, store, status_date, plan_status, has_clock_in, actual_status, actual_in, changed_in, display_status, evidenced
+    FROM attendance_midmonth_snapshot_items
+    WHERE snapshot_id = ?
+    ORDER BY employee_name ASC, employee_id ASC, status_date ASC
+  `).bind(snapshotId).all();
+  const byEmployee = new Map();
+  for (const row of result.results || []) {
+    const employeeId = normalizeEmployeeId(row.employee_id);
+    if (!employeeId) continue;
+    if (!byEmployee.has(employeeId)) {
+      byEmployee.set(employeeId, {
+        employeeId,
+        name: String(row.employee_name || ""),
+        store: String(row.store || ""),
+        cutoffDate: "",
+        dailyStatuses: [],
+      });
+    }
+    const item = byEmployee.get(employeeId);
+    item.dailyStatuses.push({
+      date: String(row.status_date || ""),
+      planStatus: String(row.plan_status || "공백"),
+      hasClockIn: Boolean(row.has_clock_in),
+      actualStatus: String(row.actual_status || ""),
+      actualIn: String(row.actual_in || ""),
+      changedIn: String(row.changed_in || ""),
+      displayStatus: String(row.display_status || ""),
+      evidenced: Boolean(row.evidenced),
+    });
+  }
+  return [...byEmployee.values()].filter((row) => row.dailyStatuses.length);
 }
 
 

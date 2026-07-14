@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=57";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=61";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -39,6 +39,7 @@ const state = {
   annualBaselinePreviews: { homeplus: null, electroland: null },
   annualMonthlyPreviews: { homeplus: null, electroland: null },
   archiveUploadPreviews: { homeplus: [], electroland: [] },
+  midmonthSnapshots: [],
 };
 
 init();
@@ -58,7 +59,7 @@ async function init() {
   setupDropzone("closureTargetDropzone", "closureTargetFile", setClosureTargetFile);
   await checkBackend();
   syncRouteRuleHelp();
-  if (state.backend.loggedIn) await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard(), loadPersonnelChecks()]);
+  if (state.backend.loggedIn) await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard(), loadPersonnelChecks(), loadMidmonthSnapshots()]);
 }
 
 function bindEvents() {
@@ -70,6 +71,10 @@ function bindEvents() {
   $("#exportButton").addEventListener("click", exportResults);
   $("#saveClosureButton").addEventListener("click", saveClosure);
   $("#refreshHistoryButton").addEventListener("click", loadHistory);
+  $("#refreshSnapshotButton")?.addEventListener("click", loadMidmonthSnapshots);
+  $("#deleteSnapshotButton")?.addEventListener("click", deleteSelectedMidmonthSnapshot);
+  $("#midmonthSnapshotSelect")?.addEventListener("change", syncMidmonthSnapshotHelp);
+  $("#fullReanalyzeCheck")?.addEventListener("change", syncMidmonthSnapshotHelp);
   $("#refreshGrantButton").addEventListener("click", loadGrants);
   $("#grantRouteFilter").addEventListener("change", loadGrants);
   $("#grantForm").addEventListener("submit", saveGrant);
@@ -113,8 +118,8 @@ function bindEvents() {
   $("#logoutButton").addEventListener("click", logout);
   $("#loginCancel").addEventListener("click", () => $("#loginDialog").close());
   $("#loginForm").addEventListener("submit", login);
-  $("#targetMonth").addEventListener("change", () => { syncCutoffWithMonth(); syncRouteRuleHelp(); updateWorkforceStatus(); });
-  $$('input[name="route"]').forEach((input) => input.addEventListener("change", () => { syncRouteRuleHelp(); updateWorkforceStatus(); }));
+  $("#targetMonth").addEventListener("change", () => { syncCutoffWithMonth(); syncRouteRuleHelp(); updateWorkforceStatus(); loadMidmonthSnapshots(); });
+  $$('input[name="route"]').forEach((input) => input.addEventListener("change", () => { syncRouteRuleHelp(); updateWorkforceStatus(); loadMidmonthSnapshots(); }));
   $$(".tab[data-view]").forEach((tab) => tab.addEventListener("click", () => switchView(tab.dataset.view)));
   $$(".inner-tab").forEach((tab) => tab.addEventListener("click", () => switchResultTab(tab.dataset.resultTab)));
 }
@@ -288,6 +293,7 @@ async function analyzeFiles() {
     const targetMonth = $("#targetMonth").value;
     const cutoffDate = $("#cutoffDate").value;
     const route = selectedRoute();
+    const fullReanalysis = Boolean($("#fullReanalyzeCheck")?.checked);
     if (!targetMonth || !cutoffDate) throw new Error("대상 월과 비교 기준일을 입력해 주세요.");
     if (!cutoffDate.startsWith(targetMonth)) throw new Error("비교 기준일은 대상 월 안의 날짜여야 합니다.");
 
@@ -310,8 +316,11 @@ async function analyzeFiles() {
     if (!workforce?.members?.length) throw new Error(`${targetMonth} ${ROUTE_LABELS[route]} 경로의 인력·매장매칭 파일이 없습니다. 인력 매칭에서 먼저 등록해 주세요.`);
     const plan = parsePlan(planWorkbook, targetMonth);
     const attendance = parseAttendance(attendanceWorkbook, targetMonth);
-    state.priorLedger = await loadPriorLedger(route, targetMonth);
-    const savedContinuationSummary = applyCurrentMonthSavedDailyCorrections(plan, attendance, state.priorLedger, targetMonth, cutoffDate);
+    const selectedSnapshotId = fullReanalysis ? "none" : selectedMidmonthSnapshotId();
+    state.priorLedger = await loadPriorLedger(route, targetMonth, selectedSnapshotId);
+    const savedContinuationSummary = fullReanalysis
+      ? { appliedCount: 0, cutoffDate: state.priorLedger?.currentMonthCutoff || "", skipped: true }
+      : applyCurrentMonthSavedDailyCorrections(plan, attendance, state.priorLedger, targetMonth, cutoffDate);
 
     const parsedReference = referenceWorkbook ? parseReferenceFinalWorkbook(referenceWorkbook, targetMonth, route) : null;
     const finalCorrectionSummary = parsedReference?.month === targetMonth
@@ -376,6 +385,7 @@ async function analyzeFiles() {
       finalCorrectionSummary,
       workflowStatusSummary,
       savedContinuationSummary,
+      selectedMidmonthSnapshot: state.priorLedger.selectedMidmonthSnapshot || null,
       evidenceOverrides,
       workflowOverrides,
       personnelChecks: personnelOverrides,
@@ -391,7 +401,7 @@ async function analyzeFiles() {
     const correctionMessage = [
       finalCorrectionSummary.appliedCount ? `수정 최종본 ${finalCorrectionSummary.appliedCount}건 재반영` : "",
       workflowStatusSummary.appliedCount ? `확인시트 ${workflowStatusSummary.appliedCount}건 반영` : "",
-      savedContinuationSummary.appliedCount ? `이전 확정 ${savedContinuationSummary.appliedCount}건 이어받음` : "",
+      fullReanalysis ? "전체 재분석: 이전 중간 확인 기록 미적용" : (savedContinuationSummary.appliedCount ? `이전 확정 ${savedContinuationSummary.appliedCount}건 이어받음` : ""),
     ].filter(Boolean).join(" · ");
     const correctionMessageText = correctionMessage ? ` · ${correctionMessage}` : "";
     const linkedDailyCount = new Set([
@@ -412,10 +422,12 @@ async function analyzeFiles() {
   }
 }
 
-async function loadPriorLedger(route, month) {
+async function loadPriorLedger(route, month, snapshotId = "") {
   if (!(state.backend.available && state.backend.configured && state.backend.loggedIn)) return emptyLedger();
   try {
-    const response = await fetch(`/api/substitute-balances?route=${encodeURIComponent(route)}&month=${encodeURIComponent(month)}`, { cache: "no-store" });
+    const params = new URLSearchParams({ route, month });
+    if (snapshotId) params.set("snapshotId", snapshotId);
+    const response = await fetch(`/api/substitute-balances?${params.toString()}`, { cache: "no-store" });
     if (response.status === 401) {
       await checkBackend();
       return emptyLedger();
@@ -434,6 +446,7 @@ async function loadPriorLedger(route, month) {
       previousMonthDailyFacts: data.previousMonthDailyFacts || [],
       currentMonthCutoff: data.currentMonthCutoff || "",
       currentMonthDailyFacts: data.currentMonthDailyFacts || [],
+      selectedMidmonthSnapshot: data.selectedMidmonthSnapshot || null,
     };
   } catch (error) {
     showToast(`${error.message}. 이번 분석은 저장된 이전 월 누적을 제외하고 계산합니다.`);
@@ -441,11 +454,129 @@ async function loadPriorLedger(route, month) {
   }
 }
 
+
+function selectedMidmonthSnapshotId() {
+  const select = $("#midmonthSnapshotSelect");
+  if (!select) return "";
+  return select.value || "";
+}
+
+async function loadMidmonthSnapshots() {
+  const select = $("#midmonthSnapshotSelect");
+  if (!select) return;
+  const deleteButton = $("#deleteSnapshotButton");
+  const route = selectedRoute();
+  const month = $("#targetMonth")?.value || "";
+  if (!(state.backend.available && state.backend.configured && state.backend.loggedIn) || !route || !month) {
+    state.midmonthSnapshots = [];
+    renderMidmonthSnapshotOptions();
+    return;
+  }
+  const previousValue = select.value;
+  try {
+    select.innerHTML = `<option value="">중간 저장본 불러오는 중...</option>`;
+    if (deleteButton) deleteButton.disabled = true;
+    const params = new URLSearchParams({ route, month });
+    const response = await fetch(`/api/midmonth-snapshots?${params.toString()}`, { cache: "no-store" });
+    if (response.status === 401) {
+      await checkBackend();
+      state.midmonthSnapshots = [];
+      renderMidmonthSnapshotOptions();
+      return;
+    }
+    const data = await readJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "중간 저장 이력 조회 실패");
+    state.midmonthSnapshots = data.items || [];
+    renderMidmonthSnapshotOptions(previousValue);
+  } catch (error) {
+    state.midmonthSnapshots = [];
+    renderMidmonthSnapshotOptions();
+    showToast(error.message || "중간 저장 이력을 불러오지 못했습니다.");
+  }
+}
+
+function renderMidmonthSnapshotOptions(preferredValue = "") {
+  const select = $("#midmonthSnapshotSelect");
+  if (!select) return;
+  const snapshots = state.midmonthSnapshots || [];
+  const options = [`<option value="">최신 저장본 자동 사용</option>`];
+  for (const item of snapshots) {
+    const label = `${item.cutoffDate} 저장본 · ${item.employeeCount || 0}명/${item.dailyCount || 0}건 · ${formatShortDateTime(item.updatedAt || item.createdAt)}`;
+    options.push(`<option value="${escapeHtml(item.id)}">${escapeHtml(label)}</option>`);
+  }
+  options.push(`<option value="none">저장값 사용 안 함</option>`);
+  select.innerHTML = options.join("");
+  const values = new Set(["", "none", ...snapshots.map((item) => item.id)]);
+  if (preferredValue && values.has(preferredValue)) select.value = preferredValue;
+  else select.value = "";
+  syncMidmonthSnapshotHelp();
+}
+
+function syncMidmonthSnapshotHelp() {
+  const help = $("#midmonthSnapshotHelp");
+  const deleteButton = $("#deleteSnapshotButton");
+  const select = $("#midmonthSnapshotSelect");
+  if (!help || !select) return;
+  const full = Boolean($("#fullReanalyzeCheck")?.checked);
+  const selected = select.value;
+  if (full) {
+    help.textContent = "전체 재분석 체크 중: 선택한 저장본과 기존 저장값을 모두 무시합니다.";
+    if (deleteButton) deleteButton.disabled = !state.midmonthSnapshots?.some((item) => item.id === selected);
+    return;
+  }
+  if (selected === "none") {
+    help.textContent = "저장값 사용 안 함: 중간 저장본을 이어받지 않고 업로드 파일만 기준으로 분석합니다.";
+    if (deleteButton) deleteButton.disabled = true;
+    return;
+  }
+  const item = (state.midmonthSnapshots || []).find((row) => row.id === selected);
+  if (item) {
+    help.textContent = `${item.cutoffDate} 저장본 적용: 해당 날짜까지는 저장값을 쓰고 이후 날짜만 새로 분석합니다.`;
+    if (deleteButton) deleteButton.disabled = false;
+    return;
+  }
+  const latest = (state.midmonthSnapshots || [])[0];
+  help.textContent = latest
+    ? `최신 저장본 자동 사용: ${latest.cutoffDate} 기준 저장값을 이어받습니다.`
+    : "저장된 중간 확인본이 없습니다. 업로드 파일 기준으로 분석합니다.";
+  if (deleteButton) deleteButton.disabled = true;
+}
+
+async function deleteSelectedMidmonthSnapshot() {
+  const id = selectedMidmonthSnapshotId();
+  const item = (state.midmonthSnapshots || []).find((row) => row.id === id);
+  if (!id || id === "none" || !item) {
+    showToast("삭제할 중간 저장본을 선택해 주세요.");
+    return;
+  }
+  const ok = window.confirm(`${item.cutoffDate} 중간 저장본을 삭제할까요?\n삭제해도 다른 저장본은 유지됩니다.`);
+  if (!ok) return;
+  const button = $("#deleteSnapshotButton");
+  try {
+    if (button) button.disabled = true;
+    const response = await fetch(`/api/midmonth-snapshots?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+    const data = await readJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "중간 저장본 삭제 실패");
+    showToast(`${item.cutoffDate} 중간 저장본을 삭제했습니다.`);
+    await loadMidmonthSnapshots();
+  } catch (error) {
+    showToast(error.message || "중간 저장본 삭제 중 오류가 발생했습니다.");
+  } finally {
+    syncMidmonthSnapshotHelp();
+  }
+}
+
+function formatShortDateTime(value) {
+  if (!value) return "";
+  const textValue = String(value).replace("T", " ").replace("Z", "");
+  return textValue.slice(5, 16) || textValue;
+}
+
 function emptyLedger() {
   return {
     lotsByEmployee: {}, annualLeaveBefore: {}, currentGrants: [], settlementGrants: [], autoUseDates: [],
     previousMonth: "", previousMonthFacts: {}, previousMonthCutoff: "", previousMonthDailyFacts: [],
-    currentMonthCutoff: "", currentMonthDailyFacts: [],
+    currentMonthCutoff: "", currentMonthDailyFacts: [], selectedMidmonthSnapshot: null,
   };
 }
 
@@ -3984,10 +4115,14 @@ async function saveClosure() {
     button.disabled = true;
     const midMonthSave = isMidMonthCutoff(result.targetMonth, result.cutoffDate);
     button.textContent = midMonthSave ? "중간 확인 기록 저장 중..." : "월 마감 저장·재계산 중...";
-    const response = await fetch("/api/closures", {
+    const saveUrl = midMonthSave ? "/api/midmonth-snapshots" : "/api/closures";
+    const savePayload = midMonthSave
+      ? { route: result.route, month: result.targetMonth, cutoffDate: result.cutoffDate, snapshotName: `${result.cutoffDate} 중간 확인`, employeeFacts: payload.employeeFacts }
+      : payload;
+    const response = await fetch(saveUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(savePayload),
     });
     if (response.status === 401) {
       await checkBackend();
@@ -3997,7 +4132,7 @@ async function saveClosure() {
     const data = await readJsonResponse(response);
     if (!response.ok) throw new Error(data.error || "월 마감 저장 실패");
 
-    applyServerSummaries(data.summaries || []);
+    if (!midMonthSave) applyServerSummaries(data.summaries || []);
     mergeAnnualLeaveLedger(state.result, state.result.annualLedger, state.result.annualComparison);
     if (state.annualFile && (state.result.annualApplications || []).length) {
       await persistAnnualMonthlyFromAnalysis(state.result);
@@ -4047,13 +4182,15 @@ async function saveClosure() {
         note: "증빙 O 반영·최종본 비교 원본", sourceType: "closure", closureId: data.id, replace: false,
       })] : []),
     ]);
-    await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard(), loadPersonnelChecks()]);
+    await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard(), loadPersonnelChecks(), loadMidmonthSnapshots()]);
     const action = midMonthSave
-      ? (data.replaced ? `기존 ${result.targetMonth} 중간 확인 기록을 ${result.cutoffDate} 기준으로 교체했습니다.` : `${result.targetMonth} 중간 확인 기록을 ${result.cutoffDate} 기준으로 저장했습니다.`)
+      ? (data.replaced ? `기존 ${result.targetMonth} ${result.cutoffDate} 중간 저장본을 교체했습니다.` : `${result.targetMonth} ${result.cutoffDate} 중간 저장본을 새로 만들었습니다.`)
       : (data.replaced ? "기존 월 마감을 완전히 교체했습니다." : "새 월 마감을 저장했습니다.");
-    const recalculateMessage = data.recalculateWarning
-      ? ` 월 마감 원본은 저장됐지만 누적 재계산 경고가 있습니다: ${data.recalculateWarning}`
-      : ` ${data.affectedMonths || 0}개 월의 연차·대체휴무·보상휴가 누적을 다시 계산했습니다.`;
+    const recalculateMessage = midMonthSave
+      ? ` 직원 ${data.employeeCount || 0}명 / 날짜별 ${data.dailyCount || 0}건을 중간 저장 이력으로 기록했습니다.`
+      : (data.recalculateWarning
+        ? ` 월 마감 원본은 저장됐지만 누적 재계산 경고가 있습니다: ${data.recalculateWarning}`
+        : ` ${data.affectedMonths || 0}개 월의 연차·대체휴무·보상휴가 누적을 다시 계산했습니다.`);
     const failedFiles = fileResults.filter((item) => item.status === "rejected");
     const fileMessage = failedFiles.length
       ? ` 기록은 정상 저장됐지만 원본 파일 ${failedFiles.length}개는 보관하지 못했습니다: ${failedFiles.map((item) => item.reason?.message || "파일 보관 오류").join(" / ")}`
@@ -6173,7 +6310,7 @@ async function login(event) {
     if (!response.ok) throw new Error(data.error || "로그인 실패");
     $("#loginDialog").close();
     await checkBackend();
-    await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard()]);
+    await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard(), loadPersonnelChecks(), loadMidmonthSnapshots()]);
     showToast("관리자 로그인되었습니다.");
   } catch (error) {
     $("#loginError").textContent = error.message;
@@ -6189,6 +6326,8 @@ async function logout() {
   state.workforceUploads = [];
   state.workforce = null;
   state.annualLeaveDashboard = null;
+  state.midmonthSnapshots = [];
+  renderMidmonthSnapshotOptions();
   renderArchiveFiles([]);
   renderWorkforceUploads([]);
   renderAnnualLeaveDashboard(null);

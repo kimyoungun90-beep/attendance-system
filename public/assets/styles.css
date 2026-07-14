@@ -79,3 +79,37 @@
 @media(max-width:980px){.route-ledger-grid{grid-template-columns:1fr}}
 
 .toolbar-help { display:block; width:100%; color:#64748b; font-size:12px; line-height:1.4; }
+
+.inline-check { display: inline-flex; align-items: center; gap: 8px; font-weight: 700; color: #183153; }
+.inline-check input { width: 18px; height: 18px; accent-color: #123B72; }
+.reanalyze-option { padding: 10px 12px; border: 1px dashed #9fb4d1; border-radius: 12px; background: #f6f9fd; }
+
+.snapshot-manager .snapshot-toolbar {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px;
+  align-items: center;
+}
+.input-select {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--border, #d7dde8);
+  border-radius: 10px;
+  padding: 0 10px;
+  background: #fff;
+  font-size: 13px;
+}
+.btn.small {
+  min-height: 38px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+.btn.danger {
+  background: #fee2e2;
+  color: #991b1b;
+  border-color: #fecaca;
+}
+.btn.danger:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
