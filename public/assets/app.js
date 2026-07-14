@@ -298,12 +298,15 @@ function renderManagerCorrectionUploadList() {
   syncManagerCorrectionSummary();
 }
 
-function handleManagerCorrectionFileChange(event) {
+async function handleManagerCorrectionFileChange(event) {
   const input = event.target?.closest?.("input[data-manager-correction]");
   if (!input) return;
   const manager = input.dataset.managerCorrection || "";
   const file = input.files?.[0] || null;
-  setManagerCorrectionFile(manager, file);
+  if (!file) return setManagerCorrectionFile(manager, null);
+  const stableFile = await createStableExcelFile(file, `${manager} 매니저 수정본`);
+  if (stableFile) setManagerCorrectionFile(manager, stableFile);
+  input.value = "";
 }
 
 function handleManagerCorrectionListClick(event) {
@@ -332,7 +335,28 @@ function setManagerCorrectionFile(manager, file) {
   if (file) showToast(`${manager} 매니저 월마감 수정본을 등록했습니다.`);
 }
 
-function handleManagerCorrectionDrop(event) {
+async function createStableExcelFile(file, label = "엑셀 파일") {
+  if (!(file instanceof File)) return null;
+  const ext = String(file.name || "").toLowerCase().split(".").pop();
+  if (!["xlsx", "xls", "xlsb"].includes(ext)) {
+    showToast("월마감 수정본은 엑셀 파일(.xlsx/.xls/.xlsb)만 넣을 수 있습니다.");
+    return null;
+  }
+  try {
+    // 드래그한 원본 파일 핸들이 브라우저/탐색기/ChatWork 임시 경로에서 사라지는 경우를 막기 위해
+    // 등록 순간 파일 내용을 메모리 복사본으로 고정해 둡니다.
+    const buffer = await file.arrayBuffer();
+    return new File([buffer], file.name, {
+      type: file.type || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      lastModified: file.lastModified || Date.now(),
+    });
+  } catch (error) {
+    showToast(`${label}을 읽지 못했습니다. 파일을 PC 로컬 폴더에 저장한 뒤 다시 넣어 주세요. (${error.message || "파일 접근 오류"})`);
+    return null;
+  }
+}
+
+async function handleManagerCorrectionDrop(event) {
   const dropTarget = event.target?.closest?.("[data-manager-drop]");
   if (!dropTarget) return;
   event.preventDefault();
@@ -340,7 +364,9 @@ function handleManagerCorrectionDrop(event) {
   dropTarget.classList.remove("dragover");
   const manager = dropTarget.dataset.managerDrop || "";
   const file = event.dataTransfer?.files?.[0] || null;
-  setManagerCorrectionFile(manager, file);
+  if (!file) return setManagerCorrectionFile(manager, null);
+  const stableFile = await createStableExcelFile(file, `${manager} 매니저 수정본`);
+  if (stableFile) setManagerCorrectionFile(manager, stableFile);
 }
 
 function handleManagerCorrectionDrag(event) {
@@ -881,7 +907,12 @@ function emptyLedger() {
 }
 
 async function fileToWorkbookSheets(file) {
-  const buffer = await file.arrayBuffer();
+  let buffer;
+  try {
+    buffer = await file.arrayBuffer();
+  } catch (error) {
+    throw new Error(`${file?.name || "엑셀 파일"}을 읽지 못했습니다. 파일이 이동/삭제되었거나 ChatWork·압축파일·네트워크 임시 경로에서 바로 끌어온 경우일 수 있습니다. PC 로컬 폴더에 저장한 뒤 다시 넣어 주세요. (${error.message || "파일 접근 오류"})`);
+  }
   const workbook = XLSX.read(buffer, { type: "array", cellDates: true, raw: false });
   return workbook.SheetNames.map((sheetName) => {
     const sheet = workbook.Sheets[sheetName];
