@@ -58,10 +58,8 @@ export async function buildFinalTemplateWorkbook(result) {
 
   workbook.SheetNames = [
     "상담사근태",
-    "상담사근태_증빙반영",
     "상담사근태_관리자반영",
     "관리자수정 비교",
-    "관리자수정 충돌",
     "출근증빙·휴무확인",
     "대체+보상 대체 인원",
     "계획&근태 상이 인원",
@@ -1537,6 +1535,29 @@ function isAutoBlankDayoffEvidenceRow(row, ctx) {
   return false;
 }
 
+function buildManagerFinalizationStatusMap(result) {
+  const map = new Map();
+  const values = Array.isArray(result?.managerFinalization?.values) ? result.managerFinalization.values : [];
+  for (const item of values) {
+    const employeeId = normalizeId(item.employeeId);
+    const date = String(item.date || "");
+    if (!employeeId || !date) continue;
+    const value = normalizeManagerFinalSheetValue(item.value || item.rawValue || "");
+    if (!value) continue;
+    map.set(`${employeeId}|${date}`, value);
+  }
+  return map;
+}
+
+function isEvidenceResolvedByManagerFinalization(value) {
+  const display = normalizeManagerFinalSheetValue(value);
+  if (!display) return false;
+  const normalized = comparableFinalSheetValue(display);
+  if (!normalized || normalized === "공백") return false;
+  if (/미등록|미입력|출.?계/.test(normalized)) return false;
+  return true;
+}
+
 function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
   const regionOrder = ["서울", "경인", "충청", "경북", "경남", "전라"];
   const actionSpecs = [
@@ -1563,16 +1584,24 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
   const doneFormulaForRange = (range) => `(COUNTIF(${range},"O")+COUNTIF(${range},"○")+COUNTIF(${range},"ㅇ"))`;
   const doneFormulaForRow = (excelRow) => doneFormulaForRange(`$K${excelRow}:$W${excelRow}`);
 
+  const managerFinalStatusByKey = buildManagerFinalizationStatusMap(result);
   const rows = [
     ...(result.missingRows || []),
     ...buildUnapprovedPlannedLeaveEvidenceRows(ctx, result),
   ]
     .filter((row) => !isResolvedByApprovedLeave(row, ctx))
     .filter((row) => !isAutoBlankDayoffEvidenceRow(row, ctx))
+    .filter((row) => {
+      const key = `${normalizeId(row.employeeId)}|${row.date || ""}`;
+      return !isEvidenceResolvedByManagerFinalization(managerFinalStatusByKey.get(key));
+    })
     .map((row) => {
       const member = findMember(ctx, row.employeeId, row.store) || {};
+      const managerValue = managerFinalStatusByKey.get(`${normalizeId(row.employeeId)}|${row.date || ""}`) || "";
       return {
         ...row,
+        planStatus: managerValue && !isEvidenceResolvedByManagerFinalization(managerValue) ? managerValue : row.planStatus,
+        reason: managerValue && !isEvidenceResolvedByManagerFinalization(managerValue) ? `관리자반영 기준 확인 필요 · ${row.reason || row.result || "출근 기록 없음"}` : row.reason,
         member,
         region: normalizeDashboardRegion(member.region2 || member.region1 || row.region || "", member.storeName || row.store || ""),
       };
@@ -1587,7 +1616,7 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
   const uniqueStores = new Set(rows.map((row) => row.member.storeName || row.store || "").filter(Boolean)).size;
   const matrix = Array.from({ length: 7 }, () => Array(COL_COUNT).fill(""));
   matrix[0][0] = `${year}년 ${monthNo}월 출근증빙·휴무확인`;
-  matrix[1][0] = `출근 기록이 없거나 승인되지 않은 휴가 계획, 기준 휴무 초과로 대체/보상/연차 처리가 필요한 건을 처리합니다. K~W열 중 해당 처리 항목에 O 입력 후 재업로드하면 상담사근태 해당 날짜가 출근/휴무/연차/반차/출산휴가/육아휴직/공가/경조/대체/보상으로 반영됩니다. 수기 입력 영역도 동일한 목록으로 처리됩니다. · 기준일 ${result.cutoffDate || `${year}-${String(monthNo).padStart(2, "0")}-${String(new Date(year, monthNo, 0).getDate()).padStart(2, "0")}`}`;
+  matrix[1][0] = `상담사근태_관리자반영 기준으로 출근 기록이 없거나 승인되지 않은 휴가 계획, 기준 휴무 초과로 대체/보상/연차 처리가 필요한 건을 처리합니다. K~W열 중 해당 처리 항목에 O 입력 후 재업로드하면 상담사근태 해당 날짜가 출근/휴무/연차/반차/출산휴가/육아휴직/공가/경조/대체/보상으로 반영됩니다. 수기 입력 영역도 동일한 목록으로 처리됩니다. · 기준일 ${result.cutoffDate || `${year}-${String(monthNo).padStart(2, "0")}-${String(new Date(year, monthNo, 0).getDate()).padStart(2, "0")}`}`;
 
   const cards = [
     [0, "총 확인 건수", `${rows.length}건`],
@@ -1718,7 +1747,7 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
   dataRows.forEach((item) => applyRowFormulas(item.row));
   manualRows.forEach((rowIndex) => {
     const excelRow = rowIndex + 1;
-    setFormula(sheet, `G${excelRow}`, `IFERROR(IF($F${excelRow}="","",INDEX('상담사근태'!$I:$I,MATCH($F${excelRow},'상담사근태'!$J:$J,0))),"")`, "");
+    setFormula(sheet, `G${excelRow}`, `IFERROR(IF($F${excelRow}="","",INDEX('상담사근태_관리자반영'!$I:$I,MATCH($F${excelRow},'상담사근태_관리자반영'!$J:$J,0))),"")`, "");
     applyRowFormulas(rowIndex);
   });
 
@@ -2803,12 +2832,10 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
 function buildManagerFinalizationSheets(workbook, result, year, monthNo, daysInMonth) {
   const baseSheet = workbook.Sheets["상담사근태"];
   if (!baseSheet) return [];
-  workbook.Sheets["상담사근태_증빙반영"] = cloneSheet(baseSheet);
   const managerSheet = cloneSheet(baseSheet);
   const comparisonRows = applyManagerFinalizationToSheet(managerSheet, baseSheet, result, year, monthNo, daysInMonth);
   workbook.Sheets["상담사근태_관리자반영"] = managerSheet;
   buildManagerFinalizationComparisonSheet(workbook, result, comparisonRows, year, monthNo);
-  buildManagerFinalizationConflictSheet(workbook, result, year, monthNo);
   return comparisonRows;
 }
 
@@ -2930,31 +2957,10 @@ function applyManagerChangedStyle(sheet, address, value) {
 }
 
 function buildManagerFinalizationComparisonSheet(workbook, result, rows, year, monthNo) {
-  buildAuditTableSheet(workbook, "관리자수정 비교", `${year}년 ${monthNo}월 관리자수정 비교`, "상담사근태_증빙반영과 상담사근태_관리자반영이 다른 날짜만 표시합니다.", rows || [], [
+  buildAuditTableSheet(workbook, "관리자수정 비교", `${year}년 ${monthNo}월 관리자수정 비교`, "상담사근태와 상담사근태_관리자반영이 다른 날짜만 표시합니다.", rows || [], [
     ["지역장", (row) => row.regionalManager], ["수정매니저", (row) => row.manager], ["지역", (row) => row.region], ["매장명", (row) => row.store],
-    ["사번", (row) => row.employeeId], ["이름", (row) => row.name], ["일자", (row) => row.date], ["증빙반영값", (row) => row.before],
+    ["사번", (row) => row.employeeId], ["이름", (row) => row.name], ["일자", (row) => row.date], ["관리자반영 전", (row) => row.before],
     ["관리자반영값", (row) => row.after], ["차이유형", (row) => row.changeType], ["수정본 파일", (row) => row.fileName],
-  ]);
-}
-
-function buildManagerFinalizationConflictSheet(workbook, result, year, monthNo) {
-  const conflicts = result.managerFinalization?.conflicts || [];
-  const rows = [];
-  for (const conflict of conflicts) {
-    const records = conflict.records || [];
-    rows.push({
-      employeeId: conflict.employeeId || "",
-      name: conflict.name || "",
-      store: conflict.store || "",
-      date: conflict.date || "",
-      valueSummary: records.map((record) => `${record.manager || "-"}: ${record.value || record.rawValue || ""}`).join(" / "),
-      fileSummary: records.map((record) => `${record.manager || "-"}(${record.fileName || ""})`).join(" / "),
-      note: "같은 사번·일자에 서로 다른 값이 있어 자동 반영 제외",
-    });
-  }
-  buildAuditTableSheet(workbook, "관리자수정 충돌", `${year}년 ${monthNo}월 관리자수정 충돌`, "충돌 건은 상담사근태_관리자반영에 자동 반영하지 않고 확인 대상으로 남깁니다.", rows, [
-    ["사번", (row) => row.employeeId], ["이름", (row) => row.name], ["매장명", (row) => row.store], ["일자", (row) => row.date],
-    ["매니저별 값", (row) => row.valueSummary], ["파일", (row) => row.fileSummary], ["비고", (row) => row.note],
   ]);
 }
 

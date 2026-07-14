@@ -337,20 +337,33 @@ function syncManagerCorrectionSummary() {
   }
   const quick = $("#managerCorrectionQuickSummary");
   if (quick) quick.textContent = entries.length
-    ? `매니저 수정본 ${entries.length}개 선택됨 · 엑셀 저장 시 관리자반영 시트 생성`
+    ? `매니저 수정본 ${entries.length}개 선택됨 · 월마감 관리자반영 기준 적용`
     : "등록된 매니저 수정본 없음";
 }
 
-async function parseManagerFinalizationFiles(targetMonth, route) {
+function buildAssignedManagerByEmployee(workforce, route) {
+  const map = new Map();
+  const members = Array.isArray(workforce?.members) ? workforce.members : Array.isArray(workforce) ? workforce : [];
+  for (const member of members) {
+    if (route && member.route && member.route !== route) continue;
+    const employeeId = normalizeEmployeeId(member.employeeId || member.employee_id || member.사번 || member["사번"]);
+    const manager = text(member.manager || member["매니저"] || "").trim();
+    if (!employeeId || !manager) continue;
+    if (!map.has(employeeId)) map.set(employeeId, manager);
+  }
+  return map;
+}
+
+async function parseManagerFinalizationFiles(targetMonth, route, workforce = null) {
   const entries = Object.entries(state.managerCorrectionFiles || {}).filter(([, file]) => Boolean(file));
   if (!entries.length) return emptyManagerFinalization();
   if (route !== "electroland") {
-    return { ...emptyManagerFinalization(), skipped: true, note: "관리자 월마감 수정본은 v62 기준 전자랜드 매니저 목록에만 적용됩니다." };
+    return { ...emptyManagerFinalization(), skipped: true, note: "관리자 월마감 수정본은 v63 기준 전자랜드 매니저 목록에만 적용됩니다." };
   }
-  const collected = [];
   const files = [];
-  const conflictMap = new Map();
   const byKey = new Map();
+  const assignedManagerByEmployee = buildAssignedManagerByEmployee(workforce, route);
+  let skippedManagerMismatchCount = 0;
   for (const [manager, file] of entries) {
     const sheets = await fileToWorkbookSheets(file);
     const parsed = parseReferenceFinalWorkbook(sheets, targetMonth, route);
@@ -376,40 +389,31 @@ async function parseManagerFinalizationFiles(targetMonth, route) {
         manager,
         fileName: file.name,
       };
-      const existing = byKey.get(record.key);
-      if (existing && managerFinalComparable(existing.value) !== managerFinalComparable(value)) {
-        const conflictKey = record.key;
-        const rows = conflictMap.get(conflictKey) || [existing];
-        rows.push(record);
-        conflictMap.set(conflictKey, rows);
-      } else if (!existing) {
-        byKey.set(record.key, record);
+      const assignedManager = assignedManagerByEmployee.get(employeeId);
+      if (assignedManager && assignedManager !== manager) {
+        skippedManagerMismatchCount += 1;
+        continue;
       }
+      // 인력DB의 사번별 담당 매니저를 기준으로 본인 상담사 건만 반영합니다.
+      // 같은 사번·일자가 중복되면 마지막으로 읽은 매니저 수정본 값을 사용합니다.
+      byKey.set(record.key, record);
     }
   }
-  const conflictKeys = new Set(conflictMap.keys());
-  for (const [key, record] of byKey.entries()) {
-    if (!conflictKeys.has(key)) collected.push(record);
-  }
-  const conflicts = [...conflictMap.entries()].map(([key, records]) => {
-    const base = records[0] || {};
-    return { key, employeeId: base.employeeId || key.split("|")[0], name: base.name || "", store: base.store || "", date: base.date || key.split("|")[1], records };
-  });
+  const collected = [...byKey.values()];
   const result = {
     supplied: true,
     files,
     values: collected.sort((a, b) => a.manager.localeCompare(b.manager, "ko") || a.date.localeCompare(b.date) || a.name.localeCompare(b.name, "ko")),
-    conflicts,
     managerCount: files.length,
     appliedValueCount: collected.length,
-    conflictCount: conflicts.length,
+    skippedManagerMismatchCount,
   };
   state.managerFinalizationPreview = result;
   return result;
 }
 
 function emptyManagerFinalization() {
-  return { supplied: false, files: [], values: [], conflicts: [], managerCount: 0, appliedValueCount: 0, conflictCount: 0 };
+  return { supplied: false, files: [], values: [], managerCount: 0, appliedValueCount: 0, skippedManagerMismatchCount: 0 };
 }
 
 function managerFinalDisplay(value) {
@@ -613,7 +617,7 @@ async function analyzeFiles() {
       ? compareReferenceFinal(parsedReference, result, targetMonth, cutoffDate, workforce)
       : emptyReferenceComparison();
     const managerRequests = buildManagerRequests(result, annualComparison, workforce, targetMonth, workflowOverrides);
-    const managerFinalization = await parseManagerFinalizationFiles(targetMonth, route);
+    const managerFinalization = await parseManagerFinalizationFiles(targetMonth, route, workforce);
     const weeklyAttendanceChecks = buildWeeklyAttendanceChecks({
       employeeFacts: result.employeeFacts || [],
       previousMonthDailyFacts: state.priorLedger.previousMonthDailyFacts || [],
@@ -658,7 +662,7 @@ async function analyzeFiles() {
       finalCorrectionSummary.appliedCount ? `수정 최종본 ${finalCorrectionSummary.appliedCount}건 재반영` : "",
       workflowStatusSummary.appliedCount ? `확인시트 ${workflowStatusSummary.appliedCount}건 반영` : "",
       managerFinalization?.managerCount ? `관리자 수정본 ${managerFinalization.managerCount}개 읽음` : "",
-      managerFinalization?.conflictCount ? `관리자 수정 충돌 ${managerFinalization.conflictCount}건` : "",
+      managerFinalization?.skippedManagerMismatchCount ? `담당 매니저 불일치 ${managerFinalization.skippedManagerMismatchCount}건 제외` : "",
       fullReanalysis ? "전체 재분석: 이전 중간 확인 기록 미적용" : (savedContinuationSummary.appliedCount ? `이전 확정 ${savedContinuationSummary.appliedCount}건 이어받음` : ""),
     ].filter(Boolean).join(" · ");
     const correctionMessageText = correctionMessage ? ` · ${correctionMessage}` : "";
