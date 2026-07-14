@@ -41,6 +41,7 @@ export async function buildFinalTemplateWorkbook(result) {
 
   const context = buildContext(result, daysInMonth);
   fillMainSheet(workbook.Sheets["상담사근태"], result, context, year, monthNo, daysInMonth);
+  const managerComparisonRows = buildManagerFinalizationSheets(workbook, result, year, monthNo, daysInMonth);
   buildEvidenceDashboardSheet(workbook, result, context, year, monthNo);
   buildDayoffReplacementSheet(workbook, result, context, year, monthNo);
   buildPlanAttendanceMatchSheet(workbook, result, context, year, monthNo);
@@ -57,6 +58,10 @@ export async function buildFinalTemplateWorkbook(result) {
 
   workbook.SheetNames = [
     "상담사근태",
+    "상담사근태_증빙반영",
+    "상담사근태_관리자반영",
+    "관리자수정 비교",
+    "관리자수정 충돌",
     "출근증빙·휴무확인",
     "대체+보상 대체 인원",
     "계획&근태 상이 인원",
@@ -2793,6 +2798,164 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
       border: thinBorder("FFD9E1E8"),
     });
   }
+}
+
+function buildManagerFinalizationSheets(workbook, result, year, monthNo, daysInMonth) {
+  const baseSheet = workbook.Sheets["상담사근태"];
+  if (!baseSheet) return [];
+  workbook.Sheets["상담사근태_증빙반영"] = cloneSheet(baseSheet);
+  const managerSheet = cloneSheet(baseSheet);
+  const comparisonRows = applyManagerFinalizationToSheet(managerSheet, baseSheet, result, year, monthNo, daysInMonth);
+  workbook.Sheets["상담사근태_관리자반영"] = managerSheet;
+  buildManagerFinalizationComparisonSheet(workbook, result, comparisonRows, year, monthNo);
+  buildManagerFinalizationConflictSheet(workbook, result, year, monthNo);
+  return comparisonRows;
+}
+
+function cloneSheet(sheet) {
+  return clone(sheet || {});
+}
+
+function applyManagerFinalizationToSheet(managerSheet, baseSheet, result, year, monthNo, daysInMonth) {
+  const finalization = result.managerFinalization || {};
+  const values = Array.isArray(finalization.values) ? finalization.values : [];
+  const lookup = buildMainAttendanceSheetLookup(managerSheet, result.targetMonth, daysInMonth);
+  const rows = [];
+  for (const item of values) {
+    const date = String(item.date || "");
+    if (!date.startsWith(`${result.targetMonth}-`)) continue;
+    const day = Number(date.slice(-2));
+    if (!(day >= 1 && day <= daysInMonth)) continue;
+    const sheetRow = chooseManagerFinalizationTargetRow(lookup, item);
+    if (!sheetRow) continue;
+    const col0 = 14 + day - 1;
+    const address = XLSX.utils.encode_cell({ r: sheetRow.rowIndex0, c: col0 });
+    const before = cellDisplayValue(baseSheet, address);
+    const after = normalizeManagerFinalSheetValue(item.value || item.rawValue || "");
+    if (!after) continue;
+    setValue(managerSheet, address, after);
+    applyNeutralDayStyle(managerSheet, address);
+    applyStatusStyle(managerSheet, address, after);
+    const changed = comparableFinalSheetValue(before) !== comparableFinalSheetValue(after);
+    if (changed) applyManagerChangedStyle(managerSheet, address, after);
+    rows.push({
+      regionalManager: sheetRow.regionalManager || "",
+      manager: item.manager || sheetRow.manager || "",
+      region: sheetRow.region || "",
+      store: sheetRow.store || item.store || "",
+      employeeId: sheetRow.employeeId || item.employeeId || "",
+      name: sheetRow.name || item.name || "",
+      date,
+      before,
+      after,
+      changed,
+      changeType: changed ? `${before || "공백"}→${after || "공백"}` : "동일",
+      fileName: item.fileName || "",
+    });
+  }
+  return rows.filter((row) => row.changed).sort((a, b) => String(a.manager).localeCompare(String(b.manager), "ko") || String(a.store).localeCompare(String(b.store), "ko") || String(a.name).localeCompare(String(b.name), "ko") || String(a.date).localeCompare(String(b.date)));
+}
+
+function buildMainAttendanceSheetLookup(sheet, targetMonth, daysInMonth) {
+  const range = XLSX.utils.decode_range(sheet["!ref"] || "A1:BD200");
+  const rowsById = new Map();
+  for (let r = 6; r <= range.e.r; r += 1) {
+    const employeeId = normalizeId(cellDisplayValue(sheet, XLSX.utils.encode_cell({ r, c: 8 })));
+    if (!employeeId) continue;
+    const row = {
+      rowIndex0: r,
+      regionalManager: cellDisplayValue(sheet, XLSX.utils.encode_cell({ r, c: 1 })),
+      manager: cellDisplayValue(sheet, XLSX.utils.encode_cell({ r, c: 2 })),
+      region: [cellDisplayValue(sheet, XLSX.utils.encode_cell({ r, c: 3 })), cellDisplayValue(sheet, XLSX.utils.encode_cell({ r, c: 4 }))].filter(Boolean).join(" "),
+      store: cellDisplayValue(sheet, XLSX.utils.encode_cell({ r, c: 6 })),
+      employeeId,
+      name: cellDisplayValue(sheet, XLSX.utils.encode_cell({ r, c: 9 })),
+    };
+    if (!rowsById.has(employeeId)) rowsById.set(employeeId, []);
+    rowsById.get(employeeId).push(row);
+  }
+  return { rowsById };
+}
+
+function chooseManagerFinalizationTargetRow(lookup, item) {
+  const rows = lookup.rowsById.get(normalizeId(item.employeeId)) || [];
+  if (!rows.length) return null;
+  if (rows.length === 1) return rows[0];
+  const store = normalizeStore(item.store || "");
+  if (store) {
+    const exact = rows.find((row) => normalizeStore(row.store) === store);
+    if (exact) return exact;
+    const partial = rows.find((row) => normalizeStore(row.store).includes(store) || store.includes(normalizeStore(row.store)));
+    if (partial) return partial;
+  }
+  return rows[0];
+}
+
+function cellDisplayValue(sheet, address) {
+  const cell = sheet?.[address];
+  if (!cell) return "";
+  if (cell.w !== undefined) return String(cell.w || "").trim();
+  if (cell.v !== undefined) return String(cell.v || "").trim();
+  return "";
+}
+
+function normalizeManagerFinalSheetValue(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const clock = raw.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if (clock) return `${String(Number(clock[1])).padStart(2, "0")}:${clock[2]}`;
+  const normalized = normalizeActual(raw) || normalizePlan(raw);
+  if (normalized === "근무") return "출근";
+  if (normalized === "공백") return raw;
+  return normalized || raw;
+}
+
+function comparableFinalSheetValue(value) {
+  const normalized = normalizeManagerFinalSheetValue(value);
+  if (/^\d{2}:\d{2}$/.test(normalized)) return "출근";
+  const actual = normalizeActual(normalized);
+  return actual === "근무" ? "출근" : (actual || normalized || "");
+}
+
+function applyManagerChangedStyle(sheet, address, value) {
+  if (!sheet[address]) return;
+  const base = sheet[address].s ? clone(sheet[address].s) : {};
+  sheet[address].s = {
+    ...base,
+    fill: { patternType: "solid", fgColor: { rgb: "FFFFF2CC" } },
+    font: { ...(base.font || {}), name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FF7F6000" } },
+    alignment: { ...(base.alignment || {}), horizontal: "center", vertical: "center", wrapText: true },
+    border: thinBorder("FFE2A500"),
+  };
+}
+
+function buildManagerFinalizationComparisonSheet(workbook, result, rows, year, monthNo) {
+  buildAuditTableSheet(workbook, "관리자수정 비교", `${year}년 ${monthNo}월 관리자수정 비교`, "상담사근태_증빙반영과 상담사근태_관리자반영이 다른 날짜만 표시합니다.", rows || [], [
+    ["지역장", (row) => row.regionalManager], ["수정매니저", (row) => row.manager], ["지역", (row) => row.region], ["매장명", (row) => row.store],
+    ["사번", (row) => row.employeeId], ["이름", (row) => row.name], ["일자", (row) => row.date], ["증빙반영값", (row) => row.before],
+    ["관리자반영값", (row) => row.after], ["차이유형", (row) => row.changeType], ["수정본 파일", (row) => row.fileName],
+  ]);
+}
+
+function buildManagerFinalizationConflictSheet(workbook, result, year, monthNo) {
+  const conflicts = result.managerFinalization?.conflicts || [];
+  const rows = [];
+  for (const conflict of conflicts) {
+    const records = conflict.records || [];
+    rows.push({
+      employeeId: conflict.employeeId || "",
+      name: conflict.name || "",
+      store: conflict.store || "",
+      date: conflict.date || "",
+      valueSummary: records.map((record) => `${record.manager || "-"}: ${record.value || record.rawValue || ""}`).join(" / "),
+      fileSummary: records.map((record) => `${record.manager || "-"}(${record.fileName || ""})`).join(" / "),
+      note: "같은 사번·일자에 서로 다른 값이 있어 자동 반영 제외",
+    });
+  }
+  buildAuditTableSheet(workbook, "관리자수정 충돌", `${year}년 ${monthNo}월 관리자수정 충돌`, "충돌 건은 상담사근태_관리자반영에 자동 반영하지 않고 확인 대상으로 남깁니다.", rows, [
+    ["사번", (row) => row.employeeId], ["이름", (row) => row.name], ["매장명", (row) => row.store], ["일자", (row) => row.date],
+    ["매니저별 값", (row) => row.valueSummary], ["파일", (row) => row.fileSummary], ["비고", (row) => row.note],
+  ]);
 }
 
 function buildAnnualLedgerSheet(workbook, result, ctx, year, monthNo) {

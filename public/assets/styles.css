@@ -113,3 +113,52 @@
   opacity: .45;
   cursor: not-allowed;
 }
+
+/* v62 manager monthly closing uploads */
+.manager-upload-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+}
+.manager-upload-card {
+  border: 1px solid #d9e1ef;
+  border-radius: 16px;
+  padding: 14px;
+  background: #fff;
+  box-shadow: 0 8px 22px rgba(18, 59, 114, 0.06);
+}
+.manager-upload-card.has-file {
+  border-color: #2f5597;
+  background: #f7fbff;
+}
+.manager-upload-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+.manager-upload-head strong { display: block; font-size: 16px; color: #123b72; }
+.manager-upload-head small { display: block; color: #6b7280; margin-top: 3px; }
+.manager-file-drop {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 64px;
+  border: 1px dashed #aebbd0;
+  border-radius: 12px;
+  background: #f8fafc;
+  cursor: pointer;
+  text-align: center;
+  padding: 10px;
+  color: #334155;
+  font-weight: 700;
+}
+.manager-upload-card.has-file .manager-file-drop {
+  border-color: #2f5597;
+  background: #eaf3ff;
+  color: #123b72;
+}
+.manager-correction-summary { margin-top: 12px; }
+.manager-quick-box .compact-box { margin-bottom: 10px; }

@@ -1,9 +1,25 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=61";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=62";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 
 const ROUTE_LABELS = { homeplus: "홈플러스", electroland: "전자랜드" };
+const ELECTROLAND_MANAGER_UPLOADS = [
+  { regionalManager: "김태권", region: "1지역", area: "서울", manager: "서지원" },
+  { regionalManager: "신종철", region: "1지역", area: "경인", manager: "윤시원" },
+  { regionalManager: "신종철", region: "1지역", area: "경인", manager: "최강욱" },
+  { regionalManager: "오상섭", region: "2지역", area: "전라", manager: "강윤민" },
+  { regionalManager: "오상섭", region: "2지역", area: "전라", manager: "강지훈" },
+  { regionalManager: "오상섭", region: "2지역", area: "전라", manager: "서재민" },
+  { regionalManager: "한건수", region: "2지역", area: "충청", manager: "이창우" },
+  { regionalManager: "한건수", region: "2지역", area: "충청", manager: "임익현" },
+  { regionalManager: "강기림", region: "3지역", area: "경남", manager: "김윤나" },
+  { regionalManager: "강기림", region: "3지역", area: "경남", manager: "김준희" },
+  { regionalManager: "강기림", region: "3지역", area: "경남", manager: "박성건" },
+  { regionalManager: "강기림", region: "3지역", area: "경남", manager: "원재식" },
+  { regionalManager: "정준호", region: "3지역", area: "경북", manager: "유지웅" },
+  { regionalManager: "정준호", region: "3지역", area: "경북", manager: "정해건" },
+];
 const WEEKDAY_LABELS = ["일", "월", "화", "수", "목", "금", "토"];
 const REQUIRED_CLOCK_PLANS = new Set(["근무", "근무A", "근무B", "근무C", "교육", "오전반차", "오후반차", "공백"]);
 const UNEXPECTED_CLOCK_PLANS = new Set([
@@ -40,6 +56,8 @@ const state = {
   annualMonthlyPreviews: { homeplus: null, electroland: null },
   archiveUploadPreviews: { homeplus: [], electroland: [] },
   midmonthSnapshots: [],
+  managerCorrectionFiles: {},
+  managerFinalizationPreview: null,
 };
 
 init();
@@ -47,6 +65,8 @@ init();
 async function init() {
   setDefaultDates();
   bindEvents();
+  renderManagerCorrectionUploadList();
+  syncManagerCorrectionSummary();
   setupDropzone("planDropzone", "planFile", setPlanFile);
   setupDropzone("attendanceDropzone", "attendanceFile", setAttendanceFile);
   setupDropzone("annualDropzone", "annualFile", setAnnualFile);
@@ -75,6 +95,10 @@ function bindEvents() {
   $("#deleteSnapshotButton")?.addEventListener("click", deleteSelectedMidmonthSnapshot);
   $("#midmonthSnapshotSelect")?.addEventListener("change", syncMidmonthSnapshotHelp);
   $("#fullReanalyzeCheck")?.addEventListener("change", syncMidmonthSnapshotHelp);
+  $("#openManagerFinalButton")?.addEventListener("click", () => switchView("managerFinal"));
+  $("#managerCorrectionList")?.addEventListener("change", handleManagerCorrectionFileChange);
+  $("#managerCorrectionList")?.addEventListener("click", handleManagerCorrectionListClick);
+  $("#clearAllManagerCorrections")?.addEventListener("click", clearAllManagerCorrections);
   $("#refreshGrantButton").addEventListener("click", loadGrants);
   $("#grantRouteFilter").addEventListener("change", loadGrants);
   $("#grantForm").addEventListener("submit", saveGrant);
@@ -250,6 +274,236 @@ function setReferenceFile(file) {
   syncSelectedFileUi("referenceDropzone", "referenceFileClear", file);
 }
 
+function renderManagerCorrectionUploadList() {
+  const container = $("#managerCorrectionList");
+  if (!container) return;
+  container.innerHTML = ELECTROLAND_MANAGER_UPLOADS.map((item) => {
+    const manager = item.manager;
+    const file = state.managerCorrectionFiles?.[manager] || null;
+    return `<article class="manager-upload-card ${file ? "has-file" : ""}" data-manager-card="${escapeHtml(manager)}">
+      <div class="manager-upload-head">
+        <div><strong>${escapeHtml(manager)}</strong><small>${escapeHtml([item.regionalManager, item.region, item.area].filter(Boolean).join(" · "))}</small></div>
+        <button class="text-button manager-correction-clear ${file ? "" : "hidden"}" data-manager-clear="${escapeHtml(manager)}" type="button">제거</button>
+      </div>
+      <label class="manager-file-drop">
+        <input type="file" accept=".xlsx,.xls,.xlsb" data-manager-correction="${escapeHtml(manager)}" hidden />
+        <span>${file ? escapeHtml(file.name) : "수정본 엑셀 선택"}</span>
+      </label>
+    </article>`;
+  }).join("");
+  syncManagerCorrectionSummary();
+}
+
+function handleManagerCorrectionFileChange(event) {
+  const input = event.target?.closest?.("input[data-manager-correction]");
+  if (!input) return;
+  const manager = input.dataset.managerCorrection || "";
+  const file = input.files?.[0] || null;
+  if (file) state.managerCorrectionFiles[manager] = file;
+  else delete state.managerCorrectionFiles[manager];
+  state.managerFinalizationPreview = null;
+  renderManagerCorrectionUploadList();
+}
+
+function handleManagerCorrectionListClick(event) {
+  const clearButton = event.target?.closest?.("[data-manager-clear]");
+  if (!clearButton) return;
+  const manager = clearButton.dataset.managerClear || "";
+  delete state.managerCorrectionFiles[manager];
+  state.managerFinalizationPreview = null;
+  renderManagerCorrectionUploadList();
+}
+
+function clearAllManagerCorrections() {
+  const count = Object.keys(state.managerCorrectionFiles || {}).length;
+  if (!count) return showToast("제거할 매니저 수정본이 없습니다.");
+  if (!confirm(`등록된 매니저 수정본 ${count}개를 모두 제거할까요?`)) return;
+  state.managerCorrectionFiles = {};
+  state.managerFinalizationPreview = null;
+  renderManagerCorrectionUploadList();
+  showToast("매니저별 월마감 수정본을 모두 제거했습니다.");
+}
+
+function syncManagerCorrectionSummary() {
+  const entries = Object.entries(state.managerCorrectionFiles || {}).filter(([, file]) => Boolean(file));
+  const managers = entries.map(([manager]) => manager);
+  const text = entries.length
+    ? `등록 ${entries.length}개 · ${managers.join(", ")}`
+    : "등록된 매니저 수정본이 없습니다.";
+  const summary = $("#managerCorrectionSummary");
+  if (summary) {
+    summary.className = `alert ${entries.length ? "success" : "info"} manager-correction-summary`;
+    summary.textContent = text;
+  }
+  const quick = $("#managerCorrectionQuickSummary");
+  if (quick) quick.textContent = entries.length
+    ? `매니저 수정본 ${entries.length}개 선택됨 · 엑셀 저장 시 관리자반영 시트 생성`
+    : "등록된 매니저 수정본 없음";
+}
+
+async function parseManagerFinalizationFiles(targetMonth, route) {
+  const entries = Object.entries(state.managerCorrectionFiles || {}).filter(([, file]) => Boolean(file));
+  if (!entries.length) return emptyManagerFinalization();
+  if (route !== "electroland") {
+    return { ...emptyManagerFinalization(), skipped: true, note: "관리자 월마감 수정본은 v62 기준 전자랜드 매니저 목록에만 적용됩니다." };
+  }
+  const collected = [];
+  const files = [];
+  const conflictMap = new Map();
+  const byKey = new Map();
+  for (const [manager, file] of entries) {
+    const sheets = await fileToWorkbookSheets(file);
+    const parsed = parseReferenceFinalWorkbook(sheets, targetMonth, route);
+    if (parsed.month && parsed.month !== targetMonth) {
+      throw new Error(`${manager} 수정본(${file.name})의 대상월 ${parsed.month}이 현재 대상월 ${targetMonth}와 다릅니다.`);
+    }
+    files.push({ manager, fileName: file.name, employeeCount: parsed.employeeCount || 0, sheetName: parsed.mainSheetName || "", valueCount: parsed.values?.size || 0 });
+    for (const [key, item] of parsed.values || []) {
+      const rawValue = text(item?.value).trim();
+      if (!rawValue || rawValue === "#NAME?") continue;
+      const [employeeIdRaw, date] = String(key).split("|");
+      const employeeId = normalizeEmployeeId(employeeIdRaw);
+      if (!employeeId || !date?.startsWith(`${targetMonth}-`)) continue;
+      const value = managerFinalDisplay(rawValue);
+      const record = {
+        key: `${employeeId}|${date}`,
+        employeeId,
+        name: item?.name || "",
+        store: item?.store || "",
+        date,
+        value,
+        rawValue,
+        manager,
+        fileName: file.name,
+      };
+      const existing = byKey.get(record.key);
+      if (existing && managerFinalComparable(existing.value) !== managerFinalComparable(value)) {
+        const conflictKey = record.key;
+        const rows = conflictMap.get(conflictKey) || [existing];
+        rows.push(record);
+        conflictMap.set(conflictKey, rows);
+      } else if (!existing) {
+        byKey.set(record.key, record);
+      }
+    }
+  }
+  const conflictKeys = new Set(conflictMap.keys());
+  for (const [key, record] of byKey.entries()) {
+    if (!conflictKeys.has(key)) collected.push(record);
+  }
+  const conflicts = [...conflictMap.entries()].map(([key, records]) => {
+    const base = records[0] || {};
+    return { key, employeeId: base.employeeId || key.split("|")[0], name: base.name || "", store: base.store || "", date: base.date || key.split("|")[1], records };
+  });
+  const result = {
+    supplied: true,
+    files,
+    values: collected.sort((a, b) => a.manager.localeCompare(b.manager, "ko") || a.date.localeCompare(b.date) || a.name.localeCompare(b.name, "ko")),
+    conflicts,
+    managerCount: files.length,
+    appliedValueCount: collected.length,
+    conflictCount: conflicts.length,
+  };
+  state.managerFinalizationPreview = result;
+  return result;
+}
+
+function emptyManagerFinalization() {
+  return { supplied: false, files: [], values: [], conflicts: [], managerCount: 0, appliedValueCount: 0, conflictCount: 0 };
+}
+
+function managerFinalDisplay(value) {
+  const raw = text(value).trim();
+  if (!raw) return "";
+  const clock = raw.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if (clock) return `${String(Number(clock[1])).padStart(2, "0")}:${clock[2]}`;
+  const normalized = normalizeActualCode(raw) || normalizePlanCode(raw);
+  if (comparableCode(normalized) === "근무") return "출근";
+  return normalized && normalized !== "공백" ? normalized : raw;
+}
+
+function managerFinalComparable(value) {
+  const display = managerFinalDisplay(value);
+  if (/^\d{2}:\d{2}$/.test(display)) return "출근";
+  return comparableCode(normalizeActualCode(display) || normalizePlanCode(display)) || display;
+}
+
+function managerFinalizationFilesForArchive() {
+  return Object.entries(state.managerCorrectionFiles || {})
+    .filter(([, file]) => Boolean(file))
+    .map(([manager, file]) => ({ manager, file }));
+}
+
+function buildEmployeeFactsForSave(result) {
+  const facts = JSON.parse(JSON.stringify(result?.employeeFacts || []));
+  const managerValues = result?.managerFinalization?.values || [];
+  if (!managerValues.length) return facts;
+  const factsById = new Map(facts.map((row) => [normalizeEmployeeId(row.employeeId), row]));
+  const byEmployee = groupBy(managerValues, (row) => normalizeEmployeeId(row.employeeId));
+  for (const [employeeId, values] of byEmployee.entries()) {
+    const fact = factsById.get(employeeId);
+    if (!fact) continue;
+    const valueByDate = new Map(values.map((row) => [row.date, row]));
+    const daily = Array.isArray(fact.dailyStatuses) ? fact.dailyStatuses : [];
+    for (const dayRow of daily) {
+      const override = valueByDate.get(dayRow.date);
+      if (!override) continue;
+      const display = managerFinalDisplay(override.value);
+      const comparable = managerFinalComparable(display);
+      const clock = /^\d{2}:\d{2}$/.test(display) ? display : "";
+      dayRow.displayStatus = display;
+      dayRow.actualStatus = comparable === "출근" ? "출근" : display;
+      dayRow.actualIn = clock;
+      dayRow.changedIn = "";
+      dayRow.hasClockIn = comparable === "출근" || Boolean(clock);
+      dayRow.planStatus = dayRow.hasClockIn ? (dayRow.planStatus || "근무") : (normalizePlanCode(display) || display);
+      dayRow.managerFinalOverride = true;
+      dayRow.manager = override.manager || "";
+      dayRow.managerFileName = override.fileName || "";
+    }
+    recomputeFactFromDailyStatuses(fact, result.targetMonth);
+    fact.managerFinalized = true;
+  }
+  return facts;
+}
+
+function recomputeFactFromDailyStatuses(fact, targetMonth) {
+  const daily = Array.isArray(fact.dailyStatuses) ? fact.dailyStatuses : [];
+  const workedDates = [];
+  const basicDayoffDates = [];
+  const substituteEvents = [];
+  const compensationEvents = [];
+  const annualLeaveEvents = [];
+  for (const row of daily) {
+    const date = row.date || "";
+    if (targetMonth && !date.startsWith(targetMonth)) continue;
+    const display = managerFinalDisplay(row.displayStatus || row.actualStatus || row.planStatus || "");
+    const comparable = managerFinalComparable(display);
+    if (row.hasClockIn || comparable === "출근") workedDates.push(date);
+    if (String(display).startsWith("휴무")) basicDayoffDates.push(date);
+    const substituteDays = substitutePlanValue(display);
+    if (substituteDays > 0) substituteEvents.push({ date, days: substituteDays, source: row.managerFinalOverride ? "관리자 월마감 수정본" : "표기 대체휴무", planStatus: display });
+    const compensationDays = compensationPlanValue(display);
+    if (compensationDays > 0) compensationEvents.push({ date, days: compensationDays, source: row.managerFinalOverride ? "관리자 월마감 수정본" : "표기 보상휴가", planStatus: display });
+    const annualDays = annualLeaveValue(display);
+    if (annualDays > 0) annualLeaveEvents.push({ date, days: annualDays, source: row.managerFinalOverride ? "관리자 월마감 수정본" : "표기 연차", planStatus: display });
+  }
+  const baseAllowance = roundHalf(Number(fact.baseAllowance || fact.baseAllowanceRaw || 0));
+  const basicDayoffUsed = roundHalf(basicDayoffDates.length);
+  const baseExcessEvents = basicDayoffDates.slice(Math.max(0, Math.floor(baseAllowance))).map((date) => ({ date, days: 1, source: "관리자반영 기본 휴무 초과", planStatus: "휴무" }));
+  fact.workedDates = [...new Set(workedDates)].sort();
+  fact.basicDayoffUsed = basicDayoffUsed;
+  fact.baseExcess = roundHalf(Math.max(0, basicDayoffUsed - baseAllowance));
+  fact.baseExcessEvents = baseExcessEvents;
+  fact.substituteEvents = substituteEvents;
+  fact.compensationEvents = compensationEvents;
+  fact.annualLeaveEvents = annualLeaveEvents;
+  fact.substituteNeeded = roundHalf(substituteEvents.reduce((sum, row) => sum + Number(row.days || 0), 0));
+  fact.compensationNeeded = roundHalf(compensationEvents.reduce((sum, row) => sum + Number(row.days || 0), 0));
+  fact.compensationLeaveUsed = fact.compensationNeeded;
+  fact.annualLeaveUsed = roundHalf(annualLeaveEvents.reduce((sum, row) => sum + Number(row.days || 0), 0));
+}
+
 function setClosureBaseFile(file) {
   state.closureBaseFile = file;
   state.closureComparison = null;
@@ -359,6 +613,7 @@ async function analyzeFiles() {
       ? compareReferenceFinal(parsedReference, result, targetMonth, cutoffDate, workforce)
       : emptyReferenceComparison();
     const managerRequests = buildManagerRequests(result, annualComparison, workforce, targetMonth, workflowOverrides);
+    const managerFinalization = await parseManagerFinalizationFiles(targetMonth, route);
     const weeklyAttendanceChecks = buildWeeklyAttendanceChecks({
       employeeFacts: result.employeeFacts || [],
       previousMonthDailyFacts: state.priorLedger.previousMonthDailyFacts || [],
@@ -391,6 +646,7 @@ async function analyzeFiles() {
       personnelChecks: personnelOverrides,
       personnelOverrides: (parsedReference?.personnelOverrides || []).map((item) => ({ ...item, sourceType: "evidence" })),
       managerRequests,
+      managerFinalization,
       weeklyAttendanceChecks,
       analyzedAt: new Date().toISOString(),
       workforce,
@@ -401,6 +657,8 @@ async function analyzeFiles() {
     const correctionMessage = [
       finalCorrectionSummary.appliedCount ? `수정 최종본 ${finalCorrectionSummary.appliedCount}건 재반영` : "",
       workflowStatusSummary.appliedCount ? `확인시트 ${workflowStatusSummary.appliedCount}건 반영` : "",
+      managerFinalization?.managerCount ? `관리자 수정본 ${managerFinalization.managerCount}개 읽음` : "",
+      managerFinalization?.conflictCount ? `관리자 수정 충돌 ${managerFinalization.conflictCount}건` : "",
       fullReanalysis ? "전체 재분석: 이전 중간 확인 기록 미적용" : (savedContinuationSummary.appliedCount ? `이전 확정 ${savedContinuationSummary.appliedCount}건 이어받음` : ""),
     ].filter(Boolean).join(" · ");
     const correctionMessageText = correctionMessage ? ` · ${correctionMessage}` : "";
@@ -4102,7 +4360,7 @@ async function saveClosure() {
     matchRate: result.matchRate,
     issueRows: [...result.missingRows, ...result.unexpectedRows],
     mismatchRows: result.mismatchRows,
-    employeeFacts: (result.employeeFacts || []).map((row) => ({
+    employeeFacts: buildEmployeeFactsForSave(result).map((row) => ({
       ...row,
       dailyStatuses: [
         ...(row.dailyStatuses || []),
@@ -4181,6 +4439,10 @@ async function saveClosure() {
         file: state.referenceFile, route: result.route, month: result.targetMonth, fileKind: "other",
         note: "증빙 O 반영·최종본 비교 원본", sourceType: "closure", closureId: data.id, replace: false,
       })] : []),
+      ...managerFinalizationFilesForArchive().map(({ manager, file }) => uploadArchiveFile({
+        file, route: result.route, month: result.targetMonth, fileKind: "other",
+        note: `관리자 월마감 수정본 · ${manager}`, sourceType: "closure", closureId: data.id, replace: false,
+      })),
     ]);
     await Promise.all([loadHistory(), loadGrants(), loadArchiveFiles(), loadWorkforceUploads(), loadAnnualLeaveDashboard(), loadPersonnelChecks(), loadMidmonthSnapshots()]);
     const action = midMonthSave
@@ -6327,6 +6589,8 @@ async function logout() {
   state.workforce = null;
   state.annualLeaveDashboard = null;
   state.midmonthSnapshots = [];
+  state.managerCorrectionFiles = {};
+  state.managerFinalizationPreview = null;
   renderMidmonthSnapshotOptions();
   renderArchiveFiles([]);
   renderWorkforceUploads([]);
@@ -6355,6 +6619,8 @@ function resetAll() {
   state.closureComparison = null;
   state.result = null;
   state.priorLedger = emptyLedger();
+  state.managerCorrectionFiles = {};
+  state.managerFinalizationPreview = null;
   $("#planFile").value = "";
   $("#attendanceFile").value = "";
   $("#annualFile").value = "";
@@ -6363,6 +6629,8 @@ function resetAll() {
   setAttendanceFile(null);
   setAnnualFile(null);
   setReferenceFile(null);
+  renderManagerCorrectionUploadList();
+  syncManagerCorrectionSummary();
   setDefaultDates();
   syncRouteRuleHelp();
   $("#resultArea").classList.add("hidden");

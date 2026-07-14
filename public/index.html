@@ -5,14 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#123B72" />
   <title>전자랜드 · 홈플러스 근태 관리</title>
-  <link rel="stylesheet" href="./assets/styles.css?v=41" />
+  <link rel="stylesheet" href="./assets/styles.css?v=62" />
 </head>
 <body>
   <div class="app-shell">
     <header class="topbar">
       <div>
         <p class="eyebrow">ATTENDANCE MANAGEMENT</p>
-        <h1>전자랜드 · 홈플러스 근태 관리 <span class="version-tag">v61</span></h1>
+        <h1>전자랜드 · 홈플러스 근태 관리 <span class="version-tag">v62</span></h1>
       </div>
       <div class="topbar-actions">
         <span id="storageBadge" class="badge neutral">저장 방식 확인 중</span>
@@ -23,6 +23,7 @@
 
     <nav class="tabs" aria-label="근태 관리 메뉴">
       <button class="tab active" data-view="checker" type="button">근태 종합 점검</button>
+      <button class="tab" data-view="managerFinal" type="button">월마감 수정본 반영</button>
       <button class="tab" data-view="annualLeave" type="button">연차 누적 관리</button>
       <button class="tab" data-view="substitute" type="button">대체휴무·보상휴가 부여</button>
       <button class="tab" data-view="system" type="button">인력 매칭</button>
@@ -136,6 +137,12 @@
               <p id="midmonthSnapshotHelp" class="field-help">저장본을 선택하면 해당 기준일까지는 저장값을 쓰고, 이후 날짜만 새로 분석합니다.</p>
             </div>
 
+            <div class="field-group optional-upload manager-quick-box">
+              <label class="field-label">관리자 월마감 수정본 <span class="optional-label">선택</span></label>
+              <div id="managerCorrectionQuickSummary" class="auto-rule-box compact-box">등록된 매니저 수정본 없음</div>
+              <button id="openManagerFinalButton" class="btn secondary full" type="button">매니저별 수정본 목록 열기</button>
+            </div>
+
             <div class="field-group reanalyze-option">
               <label class="inline-check">
                 <input id="fullReanalyzeCheck" type="checkbox" />
@@ -216,6 +223,21 @@
               </div>
             </div>
           </section>
+        </div>
+      </section>
+
+      <section id="managerFinalView" class="view">
+        <div class="panel result-panel manager-final-panel">
+          <div class="panel-heading">
+            <div>
+              <span class="step-label">MANAGER CLOSING FILES</span>
+              <h2>전자랜드 매니저별 월마감 수정본</h2>
+            </div>
+            <button id="clearAllManagerCorrections" class="btn danger small" type="button">전체 파일 제거</button>
+          </div>
+          <p class="muted">각 매니저가 월마감 때 수정해서 준 상담사근태 파일을 매니저별로 넣습니다. 근태 종합 분석 후 엑셀 저장 시 <strong>상담사근태_증빙반영</strong>과 <strong>상담사근태_관리자반영</strong>이 함께 생성됩니다.</p>
+          <div id="managerCorrectionSummary" class="alert info manager-correction-summary">등록된 월마감 수정본이 없습니다.</div>
+          <div id="managerCorrectionList" class="manager-upload-grid"></div>
         </div>
       </section>
 
