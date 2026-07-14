@@ -160,5 +160,10 @@
   background: #eaf3ff;
   color: #123b72;
 }
+.manager-file-drop.dragover {
+  border-color: #2468d7;
+  background: #eef6ff;
+  box-shadow: 0 0 0 3px rgba(36,104,215,.12);
+}
 .manager-correction-summary { margin-top: 12px; }
 .manager-quick-box .compact-box { margin-bottom: 10px; }

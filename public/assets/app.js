@@ -98,6 +98,10 @@ function bindEvents() {
   $("#openManagerFinalButton")?.addEventListener("click", () => switchView("managerFinal"));
   $("#managerCorrectionList")?.addEventListener("change", handleManagerCorrectionFileChange);
   $("#managerCorrectionList")?.addEventListener("click", handleManagerCorrectionListClick);
+  ["dragenter", "dragover", "dragleave"].forEach((eventName) => {
+    $("#managerCorrectionList")?.addEventListener(eventName, handleManagerCorrectionDrag);
+  });
+  $("#managerCorrectionList")?.addEventListener("drop", handleManagerCorrectionDrop);
   $("#clearAllManagerCorrections")?.addEventListener("click", clearAllManagerCorrections);
   $("#refreshGrantButton").addEventListener("click", loadGrants);
   $("#grantRouteFilter").addEventListener("change", loadGrants);
@@ -285,9 +289,9 @@ function renderManagerCorrectionUploadList() {
         <div><strong>${escapeHtml(manager)}</strong><small>${escapeHtml([item.regionalManager, item.region, item.area].filter(Boolean).join(" · "))}</small></div>
         <button class="text-button manager-correction-clear ${file ? "" : "hidden"}" data-manager-clear="${escapeHtml(manager)}" type="button">제거</button>
       </div>
-      <label class="manager-file-drop">
+      <label class="manager-file-drop" data-manager-drop="${escapeHtml(manager)}">
         <input type="file" accept=".xlsx,.xls,.xlsb" data-manager-correction="${escapeHtml(manager)}" hidden />
-        <span>${file ? escapeHtml(file.name) : "수정본 엑셀 선택"}</span>
+        <span>${file ? escapeHtml(file.name) : "수정본 엑셀 선택 또는 끌어놓기"}</span>
       </label>
     </article>`;
   }).join("");
@@ -299,10 +303,7 @@ function handleManagerCorrectionFileChange(event) {
   if (!input) return;
   const manager = input.dataset.managerCorrection || "";
   const file = input.files?.[0] || null;
-  if (file) state.managerCorrectionFiles[manager] = file;
-  else delete state.managerCorrectionFiles[manager];
-  state.managerFinalizationPreview = null;
-  renderManagerCorrectionUploadList();
+  setManagerCorrectionFile(manager, file);
 }
 
 function handleManagerCorrectionListClick(event) {
@@ -312,6 +313,43 @@ function handleManagerCorrectionListClick(event) {
   delete state.managerCorrectionFiles[manager];
   state.managerFinalizationPreview = null;
   renderManagerCorrectionUploadList();
+}
+
+function setManagerCorrectionFile(manager, file) {
+  if (!manager) return;
+  if (!file) {
+    delete state.managerCorrectionFiles[manager];
+  } else {
+    const ext = String(file.name || "").toLowerCase().split(".").pop();
+    if (!["xlsx", "xls", "xlsb"].includes(ext)) {
+      showToast("월마감 수정본은 엑셀 파일(.xlsx/.xls/.xlsb)만 넣을 수 있습니다.");
+      return;
+    }
+    state.managerCorrectionFiles[manager] = file;
+  }
+  state.managerFinalizationPreview = null;
+  renderManagerCorrectionUploadList();
+  if (file) showToast(`${manager} 매니저 월마감 수정본을 등록했습니다.`);
+}
+
+function handleManagerCorrectionDrop(event) {
+  const dropTarget = event.target?.closest?.("[data-manager-drop]");
+  if (!dropTarget) return;
+  event.preventDefault();
+  event.stopPropagation();
+  dropTarget.classList.remove("dragover");
+  const manager = dropTarget.dataset.managerDrop || "";
+  const file = event.dataTransfer?.files?.[0] || null;
+  setManagerCorrectionFile(manager, file);
+}
+
+function handleManagerCorrectionDrag(event) {
+  const dropTarget = event.target?.closest?.("[data-manager-drop]");
+  if (!dropTarget) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (event.type === "dragenter" || event.type === "dragover") dropTarget.classList.add("dragover");
+  if (event.type === "dragleave") dropTarget.classList.remove("dragover");
 }
 
 function clearAllManagerCorrections() {
@@ -358,7 +396,7 @@ async function parseManagerFinalizationFiles(targetMonth, route, workforce = nul
   const entries = Object.entries(state.managerCorrectionFiles || {}).filter(([, file]) => Boolean(file));
   if (!entries.length) return emptyManagerFinalization();
   if (route !== "electroland") {
-    return { ...emptyManagerFinalization(), skipped: true, note: "관리자 월마감 수정본은 v63 기준 전자랜드 매니저 목록에만 적용됩니다." };
+    return { ...emptyManagerFinalization(), skipped: true, note: "관리자 월마감 수정본은 v64 기준 전자랜드 매니저 목록에만 적용됩니다." };
   }
   const files = [];
   const byKey = new Map();
