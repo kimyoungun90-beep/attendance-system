@@ -1543,7 +1543,7 @@ function buildManagerFinalizationStatusMap(result) {
     const date = String(item.date || "");
     if (!employeeId || !date) continue;
     const value = normalizeManagerFinalSheetValue(item.value || item.rawValue || "");
-    if (!value) continue;
+    if (!value || isManagerFinalSheetAttendanceValue(value)) continue;
     map.set(`${employeeId}|${date}`, value);
   }
   return map;
@@ -2859,7 +2859,7 @@ function applyManagerFinalizationToSheet(managerSheet, baseSheet, result, year, 
     const address = XLSX.utils.encode_cell({ r: sheetRow.rowIndex0, c: col0 });
     const before = cellDisplayValue(baseSheet, address);
     const after = normalizeManagerFinalSheetValue(item.value || item.rawValue || "");
-    if (!after) continue;
+    if (!after || isManagerFinalSheetAttendanceValue(after)) continue;
     setValue(managerSheet, address, after);
     applyNeutralDayStyle(managerSheet, address);
     applyStatusStyle(managerSheet, address, after);
@@ -2942,6 +2942,13 @@ function comparableFinalSheetValue(value) {
   if (/^\d{2}:\d{2}$/.test(normalized)) return "출근";
   const actual = normalizeActual(normalized);
   return actual === "근무" ? "출근" : (actual || normalized || "");
+}
+
+function isManagerFinalSheetAttendanceValue(value) {
+  const normalized = normalizeManagerFinalSheetValue(value);
+  if (!normalized) return false;
+  if (/^\d{2}:\d{2}$/.test(normalized)) return true;
+  return comparableFinalSheetValue(normalized) === "출근";
 }
 
 function applyManagerChangedStyle(sheet, address, value) {

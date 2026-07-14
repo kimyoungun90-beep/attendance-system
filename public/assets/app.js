@@ -428,6 +428,7 @@ async function parseManagerFinalizationFiles(targetMonth, route, workforce = nul
   const byKey = new Map();
   const assignedManagerByEmployee = buildAssignedManagerByEmployee(workforce, route);
   let skippedManagerMismatchCount = 0;
+  let skippedAttendanceValueCount = 0;
   for (const [manager, file] of entries) {
     const sheets = await fileToWorkbookSheets(file);
     const parsed = parseReferenceFinalWorkbook(sheets, targetMonth, route);
@@ -442,6 +443,12 @@ async function parseManagerFinalizationFiles(targetMonth, route, workforce = nul
       const employeeId = normalizeEmployeeId(employeeIdRaw);
       if (!employeeId || !date?.startsWith(`${targetMonth}-`)) continue;
       const value = managerFinalDisplay(rawValue);
+      if (isManagerFinalAttendanceValue(rawValue)) {
+        // 매니저 월마감 수정본에 수기로 적힌 출근/근무/09:00 등은 출근 증빙이 확인되기 전까지 반영하지 않습니다.
+        // 실제 출근 기록은 원본 근태 또는 출근증빙·휴무확인 재업로드로만 상담사근태와 관리자반영본에 반영됩니다.
+        skippedAttendanceValueCount += 1;
+        continue;
+      }
       const record = {
         key: `${employeeId}|${date}`,
         employeeId,
@@ -471,13 +478,14 @@ async function parseManagerFinalizationFiles(targetMonth, route, workforce = nul
     managerCount: files.length,
     appliedValueCount: collected.length,
     skippedManagerMismatchCount,
+    skippedAttendanceValueCount,
   };
   state.managerFinalizationPreview = result;
   return result;
 }
 
 function emptyManagerFinalization() {
-  return { supplied: false, files: [], values: [], managerCount: 0, appliedValueCount: 0, skippedManagerMismatchCount: 0 };
+  return { supplied: false, files: [], values: [], managerCount: 0, appliedValueCount: 0, skippedManagerMismatchCount: 0, skippedAttendanceValueCount: 0 };
 }
 
 function managerFinalDisplay(value) {
@@ -494,6 +502,13 @@ function managerFinalComparable(value) {
   const display = managerFinalDisplay(value);
   if (/^\d{2}:\d{2}$/.test(display)) return "출근";
   return comparableCode(normalizeActualCode(display) || normalizePlanCode(display)) || display;
+}
+
+function isManagerFinalAttendanceValue(value) {
+  const display = managerFinalDisplay(value);
+  if (!display) return false;
+  if (/^\d{2}:\d{2}$/.test(display)) return true;
+  return managerFinalComparable(display) === "출근";
 }
 
 function managerFinalizationFilesForArchive() {
@@ -727,6 +742,7 @@ async function analyzeFiles() {
       workflowStatusSummary.appliedCount ? `확인시트 ${workflowStatusSummary.appliedCount}건 반영` : "",
       managerFinalization?.managerCount ? `관리자 수정본 ${managerFinalization.managerCount}개 읽음` : "",
       managerFinalization?.skippedManagerMismatchCount ? `담당 매니저 불일치 ${managerFinalization.skippedManagerMismatchCount}건 제외` : "",
+      managerFinalization?.skippedAttendanceValueCount ? `수기 출근 ${managerFinalization.skippedAttendanceValueCount}건은 증빙 확인 대상으로 제외` : "",
       fullReanalysis ? "전체 재분석: 이전 중간 확인 기록 미적용" : (savedContinuationSummary.appliedCount ? `이전 확정 ${savedContinuationSummary.appliedCount}건 이어받음` : ""),
     ].filter(Boolean).join(" · ");
     const correctionMessageText = correctionMessage ? ` · ${correctionMessage}` : "";
