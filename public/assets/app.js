@@ -584,8 +584,16 @@ function isAutoBlankDayoffMissingDisplay(value = "") {
   return compact === "공백"
     || compact === "미등록"
     || compact === "미입력"
+    || compact === "출근미입력"
+    || compact === "출근미등록"
+    || compact === "근태미입력"
+    || compact === "근태미등록"
+    || compact === "계획미입력"
+    || compact === "계획미등록"
     || compact === "출계미입력"
-    || compact === "출계미등록";
+    || compact === "출계미등록"
+    || compact === "출근계획미입력"
+    || compact === "출근계획미등록";
 }
 
 function recomputeFactFromDailyStatuses(fact, targetMonth) {
@@ -3261,6 +3269,29 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
     // 보상휴가 발생일에 미출근한 대상자만 발생일 1건당 기본휴무를 1일 추가합니다.
     const occurrenceRestDays = roundHalf(occurrenceRestAllowances.reduce((sum, row) => sum + Number(row.days || 0), 0));
     const personBaseAllowance = roundHalf(baseAllowance + occurrenceRestDays);
+
+    // v69: 출근 미입력/출ㆍ계 미입력도 기본 휴무 기준 미달이면 증빙으로 띄우기 전에 휴무(공백)으로 확정합니다.
+    // 이후 집계·초과·증빙 판단은 자동 휴무가 반영된 일별 표시값 기준으로 다시 계산합니다.
+    applyAutoBlankDayoffToFact({ dailyStatuses, baseAllowance: personBaseAllowance }, targetMonth);
+    basicDayoffDates.length = 0;
+    explicitSubstituteEvents.length = 0;
+    compensationEvents.length = 0;
+    annualLeaveEvents.length = 0;
+    workedDates.length = 0;
+    for (const statusRow of dailyStatuses) {
+      const date = statusRow.date || "";
+      if (targetMonth && !date.startsWith(targetMonth)) continue;
+      const displayedStatus = managerFinalDisplay(statusRow.displayStatus || statusRow.actualStatus || statusRow.planStatus || "");
+      if (String(displayedStatus).startsWith("휴무")) basicDayoffDates.push(date);
+      const substituteDays = substitutePlanValue(displayedStatus);
+      if (substituteDays > 0) explicitSubstituteEvents.push({ date, days: substituteDays, source: "표기 대체휴무", planStatus: displayedStatus });
+      const compensationDays = compensationPlanValue(displayedStatus);
+      if (compensationDays > 0) compensationEvents.push({ date, days: compensationDays, source: "표기 보상휴가", planStatus: displayedStatus });
+      const annualDays = annualLeaveValue(displayedStatus);
+      if (annualDays > 0) annualLeaveEvents.push({ date, days: annualDays, planStatus: displayedStatus });
+      if (statusRow.hasClockIn) workedDates.push(date);
+    }
+
     const baseExcessEvents = basicDayoffDates.slice(Math.max(0, Math.floor(personBaseAllowance))).map((date) => ({
       date,
       days: 1,
@@ -3277,6 +3308,11 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
       const dateObject = new Date(`${date}T00:00:00`);
       const evidenceKey = `${normalizeEmployeeId(person.employeeId)}|${date}`;
       const attendanceValue = withEvidenceAttendance(attendanceMap.get(`${person.employeeId}|${date}`) || emptyAttendanceValue(), evidenceSet.has(evidenceKey));
+      const dayStatus = dailyStatuses.find((row) => row.date === date);
+      if (dayStatus?.autoBlankDayoff || String(dayStatus?.displayStatus || "") === "휴무(공백)") {
+        // 기본 휴무 8개 미만 보정으로 휴무(공백) 처리된 날짜는 출근증빙·휴무확인 대상으로 띄우지 않습니다.
+        continue;
+      }
       let hasPrimaryIssue = false;
 
       if (attendanceValue.finalOverride && !String(attendanceValue.finalDisplay || "").includes("미입력")) {

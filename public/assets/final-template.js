@@ -330,8 +330,16 @@ function isAutoBlankDayoffMissingDisplay(value = "") {
   return compact === "공백"
     || compact === "미등록"
     || compact === "미입력"
+    || compact === "출근미입력"
+    || compact === "출근미등록"
+    || compact === "근태미입력"
+    || compact === "근태미등록"
+    || compact === "계획미입력"
+    || compact === "계획미등록"
     || compact === "출계미입력"
-    || compact === "출계미등록";
+    || compact === "출계미등록"
+    || compact === "출근계획미입력"
+    || compact === "출근계획미등록";
 }
 
 function isDayoffAutoDisplay(value = "") {
@@ -1594,6 +1602,52 @@ function buildManagerFinalizationStatusMap(result) {
   return map;
 }
 
+function buildManagerFinalizationMissingEvidenceRows(ctx, result, managerFinalStatusByKey = new Map()) {
+  const rows = [];
+  for (const [key, value] of managerFinalStatusByKey.entries()) {
+    if (isEvidenceResolvedByManagerFinalization(value)) continue;
+    const [employeeIdRaw, date] = String(key).split("|");
+    const employeeId = normalizeId(employeeIdRaw);
+    if (!employeeId || !date || (result?.targetMonth && !date.startsWith(`${result.targetMonth}-`))) continue;
+    const day = Number(date.slice(-2));
+    let dailyItem = null;
+    for (const person of ctx.people || []) {
+      if (normalizeId(person.employeeId) !== employeeId) continue;
+      dailyItem = ctx.dailyByKey?.get(person.key)?.[day] || null;
+      if (dailyItem) break;
+    }
+    if (dailyItem?.attendance?.hasClockIn) continue;
+    const display = normalizeManagerFinalSheetValue(value);
+    rows.push({
+      issueType: "manager_final_missing",
+      missingType: managerFinalMissingType(display),
+      route: result.route,
+      routeLabel: result.routeLabel,
+      store: dailyItem?.store || "",
+      employeeId,
+      name: "",
+      date,
+      weekday: WEEKDAYS[new Date(`${date}T00:00:00`).getDay()],
+      planStatus: display || "공백",
+      actualStatus: "",
+      actualIn: "",
+      changedIn: "",
+      clockStatus: "미기록",
+      result: "관리자반영 기준 확인 필요",
+      reason: `관리자반영 시트 기준 ${display || "미입력"} 상태로 남아 있어 휴무/출근/연차/휴직 등 처리 확인 필요`,
+    });
+  }
+  return rows;
+}
+
+function managerFinalMissingType(value = "") {
+  const compact = String(value || "").trim().replace(/\s+/g, "").replace(/[ㆍ·\/\-]/g, "");
+  if (!compact || compact === "공백" || compact === "출계미입력" || compact === "출계미등록") return "출ㆍ계 미입력";
+  if (compact.includes("계획") && (compact.includes("미입력") || compact.includes("미등록"))) return "계획 미입력";
+  return "출근 미입력";
+}
+
+
 function isEvidenceResolvedByManagerFinalization(value) {
   const display = normalizeManagerFinalSheetValue(value);
   if (!display) return false;
@@ -1631,10 +1685,18 @@ function buildEvidenceDashboardSheet(workbook, result, ctx, year, monthNo) {
 
   const managerFinalStatusByKey = buildManagerFinalizationStatusMap(result);
   const managerAutoBlankDayoffSet = buildManagerAwareAutoBlankDayoffSet(result, ctx);
+  const seenEvidenceRowKeys = new Set();
   const rows = [
     ...(result.missingRows || []),
     ...buildUnapprovedPlannedLeaveEvidenceRows(ctx, result),
+    ...buildManagerFinalizationMissingEvidenceRows(ctx, result, managerFinalStatusByKey),
   ]
+    .filter((row) => {
+      const key = `${normalizeId(row.employeeId)}|${row.date || ""}|${row.missingType || row.planStatus || ""}`;
+      if (seenEvidenceRowKeys.has(key)) return false;
+      seenEvidenceRowKeys.add(key);
+      return true;
+    })
     .filter((row) => !isResolvedByApprovedLeave(row, ctx))
     .filter((row) => !isAutoBlankDayoffEvidenceRow(row, ctx))
     .filter((row) => !managerAutoBlankDayoffSet.has(`${normalizeId(row.employeeId)}|${row.date || ""}`))
