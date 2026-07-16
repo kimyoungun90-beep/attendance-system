@@ -544,16 +544,32 @@ function buildEmployeeFactsForSave(result) {
       dayRow.manager = override.manager || "";
       dayRow.managerFileName = override.fileName || "";
     }
-    applyAutoBlankDayoffToFact(fact, result.targetMonth);
-    recomputeFactFromDailyStatuses(fact, result.targetMonth);
+    const resolvedBaseAllowance = resolveBaseAllowanceForRoute(fact, result.route, result.targetMonth);
+    if (resolvedBaseAllowance > 0) {
+      fact.baseAllowanceRaw = Number(fact.baseAllowanceRaw || resolvedBaseAllowance) || resolvedBaseAllowance;
+      fact.baseAllowance = resolvedBaseAllowance;
+    }
+    applyAutoBlankDayoffToFact(fact, result.targetMonth, result.route);
+    recomputeFactFromDailyStatuses(fact, result.targetMonth, result.route);
     fact.managerFinalized = true;
   }
   return facts;
 }
 
-function applyAutoBlankDayoffToFact(fact, targetMonth) {
+
+function resolveBaseAllowanceForRoute(source = {}, route = "", targetMonth = "") {
+  const direct = roundHalf(Number(source?.baseAllowance || source?.baseAllowanceRaw || 0));
+  if (direct > 0) return direct;
+  const normalizedRoute = String(route || source?.route || "").toLowerCase();
+  const label = String(source?.routeLabel || "");
+  if (normalizedRoute === "homeplus" || normalizedRoute.includes("home") || label.includes("홈플")) return 6;
+  if (/^\d{4}-\d{2}$/.test(targetMonth || "")) return countWeekendDays(targetMonth);
+  return 0;
+}
+
+function applyAutoBlankDayoffToFact(fact, targetMonth, route = "") {
   const daily = Array.isArray(fact.dailyStatuses) ? fact.dailyStatuses : [];
-  const baseAllowance = roundHalf(Number(fact.baseAllowance || fact.baseAllowanceRaw || 0));
+  const baseAllowance = resolveBaseAllowanceForRoute(fact, route || fact.route, targetMonth);
   if (!(baseAllowance > 0)) return;
   const monthRows = daily
     .filter((row) => String(row.date || "").startsWith(`${targetMonth}-`))
@@ -596,7 +612,7 @@ function isAutoBlankDayoffMissingDisplay(value = "") {
     || compact === "출근계획미등록";
 }
 
-function recomputeFactFromDailyStatuses(fact, targetMonth) {
+function recomputeFactFromDailyStatuses(fact, targetMonth, route = "") {
   const daily = Array.isArray(fact.dailyStatuses) ? fact.dailyStatuses : [];
   const workedDates = [];
   const basicDayoffDates = [];
@@ -617,7 +633,11 @@ function recomputeFactFromDailyStatuses(fact, targetMonth) {
     const annualDays = annualLeaveValue(display);
     if (annualDays > 0) annualLeaveEvents.push({ date, days: annualDays, source: row.managerFinalOverride ? "관리자 월마감 수정본" : "표기 연차", planStatus: display });
   }
-  const baseAllowance = roundHalf(Number(fact.baseAllowance || fact.baseAllowanceRaw || 0));
+  const baseAllowance = resolveBaseAllowanceForRoute(fact, route || fact.route, targetMonth);
+  if (baseAllowance > 0) {
+    fact.baseAllowanceRaw = Number(fact.baseAllowanceRaw || baseAllowance) || baseAllowance;
+    fact.baseAllowance = baseAllowance;
+  }
   const basicDayoffUsed = roundHalf(basicDayoffDates.length);
   const baseExcessEvents = basicDayoffDates.slice(Math.max(0, Math.floor(baseAllowance))).map((date) => ({ date, days: 1, source: "관리자반영 기본 휴무 초과", planStatus: "휴무" }));
   fact.workedDates = [...new Set(workedDates)].sort();

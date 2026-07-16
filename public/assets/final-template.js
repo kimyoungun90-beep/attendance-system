@@ -243,15 +243,15 @@ function buildContext(result, daysInMonth) {
         issues: evidenceResolvesMissing ? [] : [...new Set(issues)],
       };
     }
-    applyAutoBlankDayoffAndExcess(daily, summary, person.employeeId, issueMap);
+    applyAutoBlankDayoffAndExcess(daily, summary, person.employeeId, issueMap, result, year, monthNo);
     dailyByKey.set(person.key, daily);
   }
 
   return { workforce, workforceById, planById, attendanceByKey, summaryById, issueMap, approvedLeaveStatusByKey, leaveApplicationStatusByKey, people, dailyByKey };
 }
 
-function applyAutoBlankDayoffAndExcess(daily = {}, summary = {}, employeeId = "", issueMap = new Map()) {
-  const baseAllowance = roundHalf(Number(summary.baseAllowance || 0));
+function applyAutoBlankDayoffAndExcess(daily = {}, summary = {}, employeeId = "", issueMap = new Map(), result = {}, year = null, monthNo = null) {
+  const baseAllowance = resolveBaseAllowance(summary, result, year, monthNo);
   if (!(baseAllowance > 0)) return;
 
   const days = Object.keys(daily)
@@ -1565,7 +1565,7 @@ function buildManagerAwareAutoBlankDayoffSet(result, ctx) {
   for (const person of ctx.people || []) {
     const employeeId = normalizeId(person.employeeId);
     const summary = ctx.summaryById?.get(employeeId) || {};
-    const baseAllowance = roundHalf(Number(summary.baseAllowance || result.baseAllowance || 0));
+    const baseAllowance = resolveBaseAllowance(summary, result, year, monthNo);
     if (!employeeId || !(baseAllowance > 0)) continue;
     const daily = ctx.dailyByKey?.get(person.key) || {};
     let dayoffCount = 0;
@@ -2864,7 +2864,7 @@ function fillMainSheet(sheet, result, ctx, year, monthNo, daysInMonth) {
     const evidenceNeeded = (result.missingRows || []).some((item) => normalizeId(item.employeeId) === person.employeeId);
     const evidenceCompleted = Object.values(daily).some((item) => Boolean(item?.evidence));
 
-    const baseAllowance = roundHalf(Number(summary.baseAllowance || 0));
+    const baseAllowance = resolveBaseAllowance(summary, result, year, monthNo);
     const additionalAvailable = roundHalf(Number(summary.availableSubstitute || 0) + Number(summary.availableCompensation || 0));
     const displayedDayoffExcess = roundHalf(Math.max(0, displayedDayoffCount - baseAllowance));
     const explicitSubstituteUsed = roundHalf(Number(summary.explicitSubDayoffUsed || 0));
@@ -2957,7 +2957,7 @@ function applySheetAutoBlankDayoff(sheet, result, daysInMonth) {
     for (const sheetRow of rows) {
       const employeeId = normalizeId(sheetRow.employeeId);
       const summary = summaries.get(employeeId) || {};
-      const baseAllowance = roundHalf(Number(summary.baseAllowance || result.baseAllowance || 0));
+      const baseAllowance = resolveBaseAllowance(summary, result);
       if (!(baseAllowance > 0)) continue;
       let dayoffCount = 0;
       const candidates = [];
@@ -3580,6 +3580,27 @@ function compactNumber(value) {
 function daysText(value) {
   const number = roundHalf(value);
   return `${Number.isInteger(number) ? number : number.toFixed(1)}일`;
+}
+
+
+function resolveBaseAllowance(summary = {}, result = {}, year = null, monthNo = null) {
+  const summaryAllowance = roundHalf(Number(summary?.baseAllowance || summary?.baseAllowanceRaw || 0));
+  if (summaryAllowance > 0) return summaryAllowance;
+  const resultAllowance = roundHalf(Number(result?.baseAllowance || result?.baseAllowanceRaw || 0));
+  if (resultAllowance > 0) return resultAllowance;
+  const targetMonth = String(result?.targetMonth || "");
+  let resolvedYear = Number(year || 0);
+  let resolvedMonth = Number(monthNo || 0);
+  if ((!resolvedYear || !resolvedMonth) && /^\d{4}-\d{2}$/.test(targetMonth)) {
+    const parts = targetMonth.split("-").map(Number);
+    resolvedYear = parts[0];
+    resolvedMonth = parts[1];
+  }
+  const route = String(result?.route || "").toLowerCase();
+  const label = String(result?.routeLabel || "");
+  if (route.includes("home") || route.includes("homeplus") || label.includes("홈플")) return 6;
+  if (resolvedYear && resolvedMonth) return countWeekendDays(resolvedYear, resolvedMonth);
+  return 0;
 }
 
 function countWeekendDays(year, monthNo) {
