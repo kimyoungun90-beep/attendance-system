@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=68";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=72";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -549,7 +549,6 @@ function buildEmployeeFactsForSave(result) {
       fact.baseAllowanceRaw = Number(fact.baseAllowanceRaw || resolvedBaseAllowance) || resolvedBaseAllowance;
       fact.baseAllowance = resolvedBaseAllowance;
     }
-    applyAutoBlankDayoffToFact(fact, result.targetMonth, result.route);
     recomputeFactFromDailyStatuses(fact, result.targetMonth, result.route);
     fact.managerFinalized = true;
   }
@@ -3296,9 +3295,9 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
     const occurrenceRestDays = roundHalf(occurrenceRestAllowances.reduce((sum, row) => sum + Number(row.days || 0), 0));
     const personBaseAllowance = roundHalf(baseAllowance + occurrenceRestDays);
 
-    // v69: 출근 미입력/출ㆍ계 미입력도 기본 휴무 기준 미달이면 증빙으로 띄우기 전에 휴무(공백)으로 확정합니다.
-    // 이후 집계·초과·증빙 판단은 자동 휴무가 반영된 일별 표시값 기준으로 다시 계산합니다.
-    applyAutoBlankDayoffToFact({ dailyStatuses, baseAllowance: personBaseAllowance }, targetMonth);
+    // 휴무 날짜는 매니저 월마감 수정본으로 확정합니다.
+    // 공백/미입력 날짜를 앞에서부터 휴무(공백)으로 자동 배정하지 않습니다.
+    // 시스템이 임의로 휴무일을 고르면 실제 출근 누락일을 휴무로 오인할 수 있기 때문입니다.
     basicDayoffDates.length = 0;
     explicitSubstituteEvents.length = 0;
     compensationEvents.length = 0;
