@@ -271,8 +271,8 @@ function applyAutoBlankDayoffAndExcess(daily = {}, summary = {}, employeeId = ""
     .sort((a, b) => a - b);
 
   const explicitDayoffDays = days.filter((day) => isExplicitDayoffItem(daily[day]));
-  // 공백/미입력 날짜는 날짜 순서로 자동 휴무 처리하지 않습니다.
-  // 매니저 월마감 수정본에서 휴무로 지정된 날짜만 확정 휴무로 반영합니다.
+  // 공백·미입력 날짜를 날짜 순서대로 휴무(공백) 처리하지 않습니다.
+  // 실제 휴무 초과 계산은 명시적으로 등록되거나 관리자 수정본으로 확정된 휴무만 사용합니다.
 
   // 상담사가 실제로 휴무를 등록/사용한 건이 기준 휴무보다 많을 때만 초과 휴무로 표시합니다.
   // 초과분은 대체휴무+보상휴가 잔여가 있으면 살구색 휴무(잔여), 잔여가 없으면 빨간색 휴무(초과)로 구분합니다.

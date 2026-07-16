@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=72";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=72-year-dayoff-fix";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -3295,9 +3295,8 @@ function compareAttendance({ plan, attendance, route, targetMonth, cutoffDate, l
     const occurrenceRestDays = roundHalf(occurrenceRestAllowances.reduce((sum, row) => sum + Number(row.days || 0), 0));
     const personBaseAllowance = roundHalf(baseAllowance + occurrenceRestDays);
 
-    // 휴무 날짜는 매니저 월마감 수정본으로 확정합니다.
-    // 공백/미입력 날짜를 앞에서부터 휴무(공백)으로 자동 배정하지 않습니다.
-    // 시스템이 임의로 휴무일을 고르면 실제 출근 누락일을 휴무로 오인할 수 있기 때문입니다.
+    // 공백·미입력 날짜는 시스템이 임의로 휴무 처리하지 않습니다.
+    // 매니저 월마감 수정본에서 지정된 날짜만 확정 휴무로 반영합니다.
     basicDayoffDates.length = 0;
     explicitSubstituteEvents.length = 0;
     compensationEvents.length = 0;
