@@ -21,15 +21,27 @@ const KOREAN_PUBLIC_HOLIDAYS = {
   ]),
 };
 
+
+function parseTargetMonthParts(targetMonth = "") {
+  const match = String(targetMonth || "").match(/^(\d{4})-(\d{2})$/);
+  if (!match) return { year: 0, monthNo: 0, daysInMonth: 0 };
+  const parsedYear = Number(match[1]);
+  const parsedMonthNo = Number(match[2]);
+  const parsedDaysInMonth = parsedYear && parsedMonthNo ? new Date(parsedYear, parsedMonthNo, 0).getDate() : 0;
+  return { year: parsedYear, monthNo: parsedMonthNo, daysInMonth: parsedDaysInMonth };
+}
+
 export async function buildFinalTemplateWorkbook(result) {
   const response = await fetch("./assets/attendance-final-template.xlsx", { cache: "no-store" });
   if (!response.ok) throw new Error("최종본 엑셀 양식 파일을 불러오지 못했습니다.");
   const buffer = await response.arrayBuffer();
   const workbook = XLSX.read(buffer, { type: "array", cellStyles: true, cellDates: true, bookVBA: true });
 
-  const monthNo = Number(String(result.targetMonth || "").slice(5, 7));
-  const year = Number(String(result.targetMonth || "").slice(0, 4));
-  const daysInMonth = new Date(year, monthNo, 0).getDate();
+  const monthParts = parseTargetMonthParts(result.targetMonth);
+  const year = monthParts.year;
+  const monthNo = monthParts.monthNo;
+  const daysInMonth = monthParts.daysInMonth;
+  if (!year || !monthNo || !daysInMonth) throw new Error("대상월 형식이 올바르지 않습니다. 예: 2026-06");
 
   renameSheet(workbook, "5월 상담사근태", "상담사근태");
   renameSheet(workbook, "상담사 근태", "상담사근태");
@@ -41,7 +53,7 @@ export async function buildFinalTemplateWorkbook(result) {
 
   const context = buildContext(result, daysInMonth);
   fillMainSheet(workbook.Sheets["상담사근태"], result, context, year, monthNo, daysInMonth);
-  applySheetAutoBlankDayoff(workbook.Sheets["상담사근태"], result, daysInMonth);
+  applySheetAutoBlankDayoff(workbook.Sheets["상담사근태"], result, daysInMonth, year, monthNo);
   const managerComparisonRows = buildManagerFinalizationSheets(workbook, result, year, monthNo, daysInMonth);
   buildEvidenceDashboardSheet(workbook, result, context, year, monthNo);
   buildDayoffReplacementSheet(workbook, result, context, year, monthNo);
@@ -2942,13 +2954,13 @@ function buildManagerFinalizationSheets(workbook, result, year, monthNo, daysInM
   if (!baseSheet) return [];
   const managerSheet = cloneSheet(baseSheet);
   const comparisonRows = applyManagerFinalizationToSheet(managerSheet, baseSheet, result, year, monthNo, daysInMonth);
-  applySheetAutoBlankDayoff(managerSheet, result, daysInMonth);
+  applySheetAutoBlankDayoff(managerSheet, result, daysInMonth, year, monthNo);
   workbook.Sheets["상담사근태_관리자반영"] = managerSheet;
   buildManagerFinalizationComparisonSheet(workbook, result, comparisonRows, year, monthNo);
   return comparisonRows;
 }
 
-function applySheetAutoBlankDayoff(sheet, result, daysInMonth) {
+function applySheetAutoBlankDayoff(sheet, result, daysInMonth, year = null, monthNo = null) {
   if (!sheet) return;
   const summaries = new Map((result.employeeSummaries || []).map((row) => [normalizeId(row.employeeId), row]));
   const lookup = buildMainAttendanceSheetLookup(sheet, result.targetMonth, daysInMonth);
@@ -2957,7 +2969,7 @@ function applySheetAutoBlankDayoff(sheet, result, daysInMonth) {
     for (const sheetRow of rows) {
       const employeeId = normalizeId(sheetRow.employeeId);
       const summary = summaries.get(employeeId) || {};
-      const baseAllowance = resolveBaseAllowance(summary, result);
+      const baseAllowance = resolveBaseAllowance(summary, result, year, monthNo);
       if (!(baseAllowance > 0)) continue;
       let dayoffCount = 0;
       const candidates = [];

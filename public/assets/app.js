@@ -557,6 +557,12 @@ function buildEmployeeFactsForSave(result) {
 }
 
 
+function parseTargetMonthForAllowance(targetMonth = "") {
+  const match = String(targetMonth || "").match(/^(\d{4})-(\d{2})$/);
+  if (!match) return { year: 0, month: 0 };
+  return { year: Number(match[1]), month: Number(match[2]) };
+}
+
 function resolveBaseAllowanceForRoute(source = {}, route = "", targetMonth = "") {
   const direct = roundHalf(Number(source?.baseAllowance || source?.baseAllowanceRaw || 0));
   if (direct > 0) return direct;
@@ -6818,12 +6824,14 @@ function selectedRoute() {
 }
 
 function countWeekendDays(monthText) {
-  if (!/^\d{4}-\d{2}$/.test(monthText || "")) return 0;
-  const [year, month] = monthText.split("-").map(Number);
-  const days = new Date(year, month, 0).getDate();
+  const parsed = parseTargetMonthForAllowance(monthText);
+  const monthYear = parsed.year;
+  const monthNumber = parsed.month;
+  if (!monthYear || !monthNumber) return 0;
+  const days = new Date(monthYear, monthNumber, 0).getDate();
   let count = 0;
   for (let day = 1; day <= days; day += 1) {
-    const weekday = new Date(year, month - 1, day).getDay();
+    const weekday = new Date(monthYear, monthNumber - 1, day).getDay();
     if (weekday === 0 || weekday === 6) count += 1;
   }
   return count;
