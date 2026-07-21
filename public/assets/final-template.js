@@ -51,7 +51,7 @@ export async function buildFinalTemplateWorkbook(result) {
   renameSheet(workbook, "근무계획", "근무 계획");
   renameSheet(workbook, "근태RAW", "근태 RAW");
 
-  const context = buildContext(result, daysInMonth);
+  const context = buildContext(result, daysInMonth, year, monthNo);
   fillMainSheet(workbook.Sheets["상담사근태"], result, context, year, monthNo, daysInMonth);
   const managerComparisonRows = buildManagerFinalizationSheets(workbook, result, year, monthNo, daysInMonth);
   buildEvidenceDashboardSheet(workbook, result, context, year, monthNo);
@@ -113,7 +113,7 @@ export async function buildFinalTemplateFile(result) {
   });
 }
 
-function buildContext(result, daysInMonth) {
+function buildContext(result, daysInMonth, year = null, monthNo = null) {
   const workforce = [...(result.workforce?.members || [])]
     .filter((row) => row.route === result.route)
     .sort(workforceSort);
@@ -270,7 +270,6 @@ function applyAutoBlankDayoffAndExcess(daily = {}, summary = {}, employeeId = ""
     .filter((day) => day > 0)
     .sort((a, b) => a - b);
 
-  const explicitDayoffDays = days.filter((day) => isExplicitDayoffItem(daily[day]));
   // 공백·미입력 날짜를 날짜 순서대로 휴무(공백) 처리하지 않습니다.
   // 실제 휴무 초과 계산은 명시적으로 등록되거나 관리자 수정본으로 확정된 휴무만 사용합니다.
 
