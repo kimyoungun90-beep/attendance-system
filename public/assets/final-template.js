@@ -51,8 +51,9 @@ export async function buildFinalTemplateWorkbook(result) {
   renameSheet(workbook, "근무계획", "근무 계획");
   renameSheet(workbook, "근태RAW", "근태 RAW");
 
-  const context = buildContext(result, daysInMonth, year, monthNo);
+  const context = buildContext(result, daysInMonth);
   fillMainSheet(workbook.Sheets["상담사근태"], result, context, year, monthNo, daysInMonth);
+  applySheetAutoBlankDayoff(workbook.Sheets["상담사근태"], result, daysInMonth, year, monthNo);
   const managerComparisonRows = buildManagerFinalizationSheets(workbook, result, year, monthNo, daysInMonth);
   buildEvidenceDashboardSheet(workbook, result, context, year, monthNo);
   buildDayoffReplacementSheet(workbook, result, context, year, monthNo);
@@ -113,7 +114,7 @@ export async function buildFinalTemplateFile(result) {
   });
 }
 
-function buildContext(result, daysInMonth, year = null, monthNo = null) {
+function buildContext(result, daysInMonth) {
   const workforce = [...(result.workforce?.members || [])]
     .filter((row) => row.route === result.route)
     .sort(workforceSort);
@@ -270,8 +271,23 @@ function applyAutoBlankDayoffAndExcess(daily = {}, summary = {}, employeeId = ""
     .filter((day) => day > 0)
     .sort((a, b) => a - b);
 
-  // 공백·미입력 날짜를 날짜 순서대로 휴무(공백) 처리하지 않습니다.
-  // 실제 휴무 초과 계산은 명시적으로 등록되거나 관리자 수정본으로 확정된 휴무만 사용합니다.
+  const explicitDayoffDays = days.filter((day) => isExplicitDayoffItem(daily[day]));
+  let recognizedDayoffCount = roundHalf(explicitDayoffDays.length);
+
+  // 계획을 공백으로 둔 인원이 많아, 기본 휴무 기준 안에서는 공백 미출근일을 먼저 휴무로 채웁니다.
+  // 단, 기준 휴무 수를 초과해서 자동 휴무를 만들지는 않습니다.
+  for (const day of days) {
+    if (recognizedDayoffCount >= baseAllowance) break;
+    const item = daily[day];
+    if (!isAutoBlankDayoffCandidate(item)) continue;
+    item.display = "휴무(공백)";
+    item.autoBlankDayoff = true;
+    item.dayoffExcess = false;
+    item.substituteShortage = false;
+    item.compensationShortage = false;
+    item.issues = [];
+    recognizedDayoffCount = roundHalf(recognizedDayoffCount + 1);
+  }
 
   // 상담사가 실제로 휴무를 등록/사용한 건이 기준 휴무보다 많을 때만 초과 휴무로 표시합니다.
   // 초과분은 대체휴무+보상휴가 잔여가 있으면 살구색 휴무(잔여), 잔여가 없으면 빨간색 휴무(초과)로 구분합니다.
@@ -2938,6 +2954,7 @@ function buildManagerFinalizationSheets(workbook, result, year, monthNo, daysInM
   if (!baseSheet) return [];
   const managerSheet = cloneSheet(baseSheet);
   const comparisonRows = applyManagerFinalizationToSheet(managerSheet, baseSheet, result, year, monthNo, daysInMonth);
+  applySheetAutoBlankDayoff(managerSheet, result, daysInMonth, year, monthNo);
   workbook.Sheets["상담사근태_관리자반영"] = managerSheet;
   buildManagerFinalizationComparisonSheet(workbook, result, comparisonRows, year, monthNo);
   return comparisonRows;
