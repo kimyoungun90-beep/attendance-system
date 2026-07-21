@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=68";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=73-excel-year-hotfix";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];

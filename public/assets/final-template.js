@@ -51,7 +51,7 @@ export async function buildFinalTemplateWorkbook(result) {
   renameSheet(workbook, "근무계획", "근무 계획");
   renameSheet(workbook, "근태RAW", "근태 RAW");
 
-  const context = buildContext(result, daysInMonth);
+  const context = buildContext(result, daysInMonth, year, monthNo);
   fillMainSheet(workbook.Sheets["상담사근태"], result, context, year, monthNo, daysInMonth);
   applySheetAutoBlankDayoff(workbook.Sheets["상담사근태"], result, daysInMonth, year, monthNo);
   const managerComparisonRows = buildManagerFinalizationSheets(workbook, result, year, monthNo, daysInMonth);
@@ -114,7 +114,7 @@ export async function buildFinalTemplateFile(result) {
   });
 }
 
-function buildContext(result, daysInMonth) {
+function buildContext(result, daysInMonth, year = null, monthNo = null) {
   const workforce = [...(result.workforce?.members || [])]
     .filter((row) => row.route === result.route)
     .sort(workforceSort);
