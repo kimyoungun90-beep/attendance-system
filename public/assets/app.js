@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=72-year-dayoff-fix";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=72-cacheproof-year-dayoff-fix";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
