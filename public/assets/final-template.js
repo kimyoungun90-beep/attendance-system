@@ -53,13 +53,13 @@ export async function buildFinalTemplateWorkbook(result) {
 
   const context = buildContext(result, daysInMonth, year, monthNo);
   fillMainSheet(workbook.Sheets["상담사근태"], result, context, year, monthNo, daysInMonth);
-  applySheetAutoBlankDayoff(workbook.Sheets["상담사근태"], result, daysInMonth, year, monthNo);
   const managerComparisonRows = buildManagerFinalizationSheets(workbook, result, year, monthNo, daysInMonth);
   buildEvidenceDashboardSheet(workbook, result, context, year, monthNo);
-  buildDayoffReplacementSheet(workbook, result, context, year, monthNo);
   buildPlanAttendanceMatchSheet(workbook, result, context, year, monthNo);
-  buildDayoffSubstituteSheet(workbook, result, context, year, monthNo);
-  buildAnnualComparisonSheet(workbook, result, year, monthNo);
+  buildDayoffSubstituteSheet(workbook, result, context, year, monthNo, daysInMonth);
+  buildSubstituteCompensationLedgerSheet(workbook, result, context, year, monthNo, daysInMonth);
+  buildAnnualUserSheet(workbook, result, context, year, monthNo, daysInMonth);
+  buildAnnualPromotionSheet(workbook, result, context, year, monthNo);
   buildIssueSummarySheet(workbook, result, context, year, monthNo);
   buildManagerRequestSheet(workbook, result, year, monthNo);
   buildWeeklyAttendanceCheckSheet(workbook, result, year, monthNo);
@@ -74,9 +74,11 @@ export async function buildFinalTemplateWorkbook(result) {
     "상담사근태_관리자반영",
     "관리자수정 비교",
     "출근증빙·휴무확인",
-    "대체+보상 대체 인원",
-    "계획&근태 상이 인원",
     "휴무 초과자",
+    "대체ㆍ보상",
+    "연차 사용자",
+    "연차 촉진",
+    "계획&근태 상이 인원",
     "인사팀 급여 확정표",
     "출근 미달자 정산",
     "연차 사용 필요자",
@@ -84,7 +86,6 @@ export async function buildFinalTemplateWorkbook(result) {
     "전체 요약본",
     "매니저별 이상 근태",
     "주 근태 확인자",
-    "해당 월 연차 등록 현황 및 일자",
     "연차 누적 현황",
     "인력 변동 확인",
     "근무 계획",
@@ -255,7 +256,6 @@ function buildContext(result, daysInMonth, year = null, monthNo = null) {
         issues: evidenceResolvesMissing ? [] : [...new Set(issues)],
       };
     }
-    applyAutoBlankDayoffAndExcess(daily, summary, person.employeeId, issueMap, result, year, monthNo);
     dailyByKey.set(person.key, daily);
   }
 
@@ -1511,6 +1511,406 @@ function buildAnnualComparisonSheet(workbook, result, year, monthNo) {
   if (!workbook.SheetNames.includes("해당 월 연차 등록 현황 및 일자")) workbook.SheetNames.push("해당 월 연차 등록 현황 및 일자");
 }
 
+function buildAnnualUserSheet(workbook, result, ctx, year, monthNo, daysInMonth) {
+  const regionOrder = ["서울", "경인", "충청", "경북", "경남", "전라"];
+  const applicationMap = buildAnnualApplicationMap(result.annualApplications || [], result.targetMonth);
+  const rows = [];
+  const seenManagerKeys = new Set();
+  const seenOutputKeys = new Set();
+  const monthlyRows = buildManagerReflectedMonthlyRows(
+    workbook.Sheets["상담사근태_관리자반영"],
+    result,
+    ctx,
+    year,
+    monthNo,
+    daysInMonth,
+  );
+
+  const pushRow = (row) => {
+    const uniqueKey = `${normalizeId(row.employeeId)}|${row.date}|${row.category}|${row.managerStatus || ""}`;
+    if (seenOutputKeys.has(uniqueKey)) return;
+    seenOutputKeys.add(uniqueKey);
+    rows.push(row);
+  };
+
+  for (const person of monthlyRows) {
+    for (const daily of person.dailyStatuses || []) {
+      if (!isAnnualLeaveDisplay(daily.value)) continue;
+      const key = `${normalizeId(person.employeeId)}|${daily.date}`;
+      seenManagerKeys.add(key);
+      const application = chooseAnnualApplication(applicationMap.get(key) || []);
+      const appStatus = application ? leaveApprovalStatus(application) : "신청없음";
+      const managerKind = annualKindFromDisplay(daily.value);
+      const applicationKind = application ? annualApplicationKind(application) : "-";
+      const sameKind = application && (applicationKind === managerKind || (applicationKind === "반차" && managerKind === "반차"));
+      let category = "승인 인정";
+      let accepted = "인정";
+      let sortOrder = 1;
+      let note = "연차 신청 양식 승인 기준 정상 인정";
+      if (!application) {
+        category = "계획 연차·신청 없음";
+        accepted = "미인정";
+        sortOrder = 2;
+        note = "관리자반영에는 연차/반차이나 연차 신청 양식에 해당 일자 신청 없음";
+      } else if (appStatus === "반려") {
+        category = "반려/취소/철회";
+        accepted = "미인정";
+        sortOrder = 3;
+        note = "연차 신청 양식 상태가 반려/취소/철회";
+      } else if (appStatus === "미승인") {
+        category = "승인 전";
+        accepted = "미인정";
+        sortOrder = 4;
+        note = "연차 신청 양식은 있으나 승인 완료 전";
+      } else if (!sameKind) {
+        category = "신청구분 확인";
+        accepted = "확인";
+        sortOrder = 5;
+        note = `관리자반영 ${managerKind} / 신청 양식 ${applicationKind}`;
+      }
+      pushRow({
+        date: daily.date,
+        dateObject: new Date(`${daily.date}T00:00:00`),
+        regionalManager: person.regionalManager || "",
+        manager: person.manager || "",
+        region: person.regionGroup || normalizeDashboardRegion(person.region || "", person.store || ""),
+        store: person.store || "",
+        employeeId: person.employeeId,
+        name: person.name || "",
+        managerStatus: daily.value || "",
+        requestedKind: applicationKind,
+        requestedDays: application ? annualApplicationDays(application) : 0,
+        applicationStatus: application ? annualApplicationStatusText(application) : "-",
+        category,
+        accepted,
+        note,
+        sortOrder,
+      });
+    }
+  }
+
+  for (const [key, applications] of applicationMap.entries()) {
+    if (seenManagerKeys.has(key)) continue;
+    const application = chooseAnnualApplication(applications);
+    if (!application) continue;
+    const [employeeId, date] = key.split("|");
+    const member = findMember(ctx, employeeId, application.store || "") || {};
+    const appStatus = leaveApprovalStatus(application);
+    const accepted = appStatus === "승인" ? "확인" : "미인정";
+    const category = appStatus === "승인" ? "양식 승인·관리자반영 없음" : appStatus === "반려" ? "반려/취소/철회" : "승인 전";
+    pushRow({
+      date,
+      dateObject: new Date(`${date}T00:00:00`),
+      regionalManager: member.regionalManager || application.regionalManager || "",
+      manager: member.manager || application.manager || "",
+      region: normalizeDashboardRegion(member.region2 || member.region1 || application.region || "", member.storeName || application.store || ""),
+      store: member.storeName || application.store || "",
+      employeeId,
+      name: member.employeeName || application.name || "",
+      managerStatus: "관리자반영 미표시",
+      requestedKind: annualApplicationKind(application),
+      requestedDays: annualApplicationDays(application),
+      applicationStatus: annualApplicationStatusText(application),
+      category,
+      accepted,
+      note: appStatus === "승인" ? "연차 신청 양식은 승인이나 관리자반영 시트 날짜 셀에는 연차/반차 표시가 없음" : "관리자반영 시트에 연차/반차 표시는 없으나 신청 양식 상태 확인 필요",
+      sortOrder: appStatus === "승인" ? 6 : appStatus === "반려" ? 3 : 4,
+    });
+  }
+
+  for (const row of result.annualComparison?.rows || []) {
+    if (row.category !== "계획 연차·신청 없음") continue;
+    const employeeId = normalizeId(row.employeeId);
+    const date = String(row.date || "");
+    if (!employeeId || !date || seenOutputKeys.has(`${employeeId}|${date}|계획 연차·신청 없음|${row.planStatus || ""}`)) continue;
+    pushRow({
+      date,
+      dateObject: new Date(`${date}T00:00:00`),
+      regionalManager: row.regionalManager || "",
+      manager: row.manager || "",
+      region: normalizeDashboardRegion(row.region || "", row.store || ""),
+      store: row.store || "",
+      employeeId,
+      name: row.name || "",
+      managerStatus: row.planStatus || "연차",
+      requestedKind: "-",
+      requestedDays: 0,
+      applicationStatus: "-",
+      category: "계획 연차·신청 없음",
+      accepted: "미인정",
+      note: "근무계획에는 연차/반차이나 연차 신청 양식에 해당 일자 신청 없음",
+      sortOrder: 2,
+    });
+  }
+
+  rows.sort((a, b) => Number(a.sortOrder || 9) - Number(b.sortOrder || 9)
+    || regionOrder.indexOf(a.region) - regionOrder.indexOf(b.region)
+    || String(a.date).localeCompare(String(b.date))
+    || String(a.store || "").localeCompare(String(b.store || ""), "ko")
+    || String(a.name || "").localeCompare(String(b.name || ""), "ko"));
+
+  const matrix = Array.from({ length: 7 }, () => Array(15).fill(""));
+  matrix[0][0] = `${year}년 ${monthNo}월 연차 사용자`;
+  matrix[1][0] = "연차 신청 양식의 승인/반려 상태를 기준으로 인정 여부를 판단하고, 관리자반영 또는 근무계획에는 연차이나 양식에 없는 건을 별도 표시합니다.";
+  const cards = [
+    [0, "전체 대조", `${rows.length}건`],
+    [2, "승인 인정", `${rows.filter((row) => row.category === "승인 인정").length}건`],
+    [4, "신청 없음", `${rows.filter((row) => row.category === "계획 연차·신청 없음").length}건`],
+    [6, "반려/취소/철회", `${rows.filter((row) => row.category === "반려/취소/철회").length}건`],
+    [8, "확인 필요", `${rows.filter((row) => row.accepted !== "인정").length}건`],
+  ];
+  for (const [col, label, value] of cards) {
+    matrix[2][col] = label;
+    matrix[3][col] = value;
+  }
+  matrix[2][10] = "구분 색상 안내";
+  matrix[3][10] = "● 승인 인정";
+  matrix[3][13] = "● 신청 없음";
+  matrix[4][10] = "● 반려/승인 전/구분 확인";
+  matrix[4][13] = "● 관리자반영 누락";
+  matrix[6] = [
+    "No", "휴가일자", "지역장", "매니저", "지역", "매장명", "이름", "사번",
+    "관리자반영값", "양식구분", "신청일수", "신청상태", "대조구분", "인정여부", "비고",
+  ];
+
+  const regionRows = [];
+  const dataRows = [];
+  let no = 1;
+  for (const region of regionOrder) {
+    const group = rows.filter((row) => row.region === region);
+    const regionRow = matrix.length;
+    matrix.push([
+      `▼  ${region} (총 ${group.length}건)`, "", "", "", "", "", "", "",
+      `승인 ${group.filter((row) => row.category === "승인 인정").length}건  |  신청 없음 ${group.filter((row) => row.category === "계획 연차·신청 없음").length}건  |  확인 ${group.filter((row) => row.accepted !== "인정").length}건`,
+      "", "", "", "", "", "",
+    ]);
+    regionRows.push({ row: regionRow, region });
+    for (const row of group) {
+      const rowIndex = matrix.length;
+      matrix.push([
+        no++, row.dateObject || row.date || "", row.regionalManager || "", row.manager || "", region,
+        row.store || "", row.name || "", normalizeId(row.employeeId), row.managerStatus || "",
+        row.requestedKind || "-", row.requestedDays || 0, row.applicationStatus || "-",
+        row.category || "", row.accepted || "", row.note || "",
+      ]);
+      dataRows.push({ row: rowIndex, ...row });
+    }
+  }
+
+  const sheet = XLSX.utils.aoa_to_sheet(matrix);
+  sheet["!merges"] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: 14 } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: 14 } },
+    { s: { r: 2, c: 0 }, e: { r: 2, c: 1 } }, { s: { r: 3, c: 0 }, e: { r: 4, c: 1 } },
+    { s: { r: 2, c: 2 }, e: { r: 2, c: 3 } }, { s: { r: 3, c: 2 }, e: { r: 4, c: 3 } },
+    { s: { r: 2, c: 4 }, e: { r: 2, c: 5 } }, { s: { r: 3, c: 4 }, e: { r: 4, c: 5 } },
+    { s: { r: 2, c: 6 }, e: { r: 2, c: 7 } }, { s: { r: 3, c: 6 }, e: { r: 4, c: 7 } },
+    { s: { r: 2, c: 8 }, e: { r: 2, c: 9 } }, { s: { r: 3, c: 8 }, e: { r: 4, c: 9 } },
+    { s: { r: 2, c: 10 }, e: { r: 2, c: 14 } },
+    { s: { r: 3, c: 10 }, e: { r: 3, c: 12 } },
+    { s: { r: 3, c: 13 }, e: { r: 3, c: 14 } },
+    { s: { r: 4, c: 10 }, e: { r: 4, c: 12 } },
+    { s: { r: 4, c: 13 }, e: { r: 4, c: 14 } },
+  ];
+  for (const item of regionRows) {
+    sheet["!merges"].push(
+      { s: { r: item.row, c: 0 }, e: { r: item.row, c: 7 } },
+      { s: { r: item.row, c: 8 }, e: { r: item.row, c: 14 } },
+    );
+  }
+  sheet["!cols"] = [
+    { wch: 6 }, { wch: 13 }, { wch: 11 }, { wch: 11 }, { wch: 9 }, { wch: 18 }, { wch: 11 }, { wch: 13 },
+    { wch: 16 }, { wch: 12 }, { wch: 10 }, { wch: 14 }, { wch: 24 }, { wch: 12 }, { wch: 52 },
+  ];
+  sheet["!rows"] = matrix.map((_, index) => ({ hpt: index === 0 ? 34 : index === 1 ? 30 : index >= 2 && index <= 4 ? 28 : index === 5 ? 8 : index === 6 ? 34 : regionRows.some((item) => item.row === index) ? 26 : 25 }));
+  sheet["!freeze"] = { xSplit: 0, ySplit: 7, topLeftCell: "A8", activePane: "bottomLeft", state: "frozen" };
+  sheet["!views"] = [{ showGridLines: false, zoomScale: 70, zoomScaleNormal: 70 }];
+
+  styleDashboardShell(sheet, matrix.length, 15, cards, regionRows);
+  applyLegendBlocks(sheet, [
+    { row: 3, startCol: 10, endCol: 12, fill: "FFDDEBF7", font: "FF1F4E78" },
+    { row: 3, startCol: 13, endCol: 14, fill: "FFF4CCCC", font: "FF9C0006" },
+    { row: 4, startCol: 10, endCol: 12, fill: "FFFFE699", font: "FF9C6500" },
+    { row: 4, startCol: 13, endCol: 14, fill: "FFFFF8EF", font: "FFC55A11" },
+  ]);
+  dataRows.forEach((item, index) => {
+    styleCellRange(sheet, item.row, 0, item.row, 14, {
+      fill: { patternType: "solid", fgColor: { rgb: index % 2 ? "FFF9FBFD" : "FFFFFFFF" } },
+      font: { name: "맑은 고딕", sz: 9, color: { rgb: "FF1F2937" } },
+      alignment: { horizontal: "center", vertical: "center", wrapText: true },
+      border: thinBorder("FFDCE3EC"),
+    });
+    setNumberFormat(sheet, `B${item.row + 1}`, "yyyy-mm-dd");
+    applyAnnualCategoryStyle(sheet, XLSX.utils.encode_cell({ r: item.row, c: 12 }), item.category, item.accepted !== "인정");
+    applyAnnualApprovalStatusStyle(sheet, XLSX.utils.encode_cell({ r: item.row, c: 13 }), item.accepted === "인정" ? "승인 완료" : item.accepted === "확인" ? "승인 대기" : "확인 요청");
+    const noteAddr = XLSX.utils.encode_cell({ r: item.row, c: 14 });
+    if (sheet[noteAddr]) sheet[noteAddr].s.alignment = { horizontal: "left", vertical: "center", wrapText: true };
+  });
+
+  setRef(sheet, matrix.length, 15);
+  workbook.Sheets["연차 사용자"] = sheet;
+  if (!workbook.SheetNames.includes("연차 사용자")) workbook.SheetNames.push("연차 사용자");
+  delete workbook.Sheets["해당 월 연차 등록 현황 및 일자"];
+  workbook.SheetNames = workbook.SheetNames.filter((name) => name !== "해당 월 연차 등록 현황 및 일자");
+}
+
+function buildAnnualPromotionSheet(workbook, result, ctx, year, monthNo) {
+  const reminders = [...(result.annualLedger?.reminders || [])].sort((a, b) => String(a.dueDate || "").localeCompare(String(b.dueDate || ""))
+    || String(a.manager || "").localeCompare(String(b.manager || ""), "ko")
+    || String(a.employeeName || "").localeCompare(String(b.employeeName || ""), "ko"));
+  const matrix = Array.from({ length: 7 }, () => Array(12).fill(""));
+  matrix[0][0] = `${year}년 ${monthNo}월 연차 촉진`;
+  matrix[1][0] = "연차 누적 관리의 촉진 대상 목록을 그대로 분리해 확인합니다. 촉진일 1개월 경과 후 자동 제외 기준은 기존 연차 누적 관리와 동일합니다.";
+  const cards = [
+    [0, "촉진 대상", `${reminders.length}명`],
+    [2, "1차 촉진", `${reminders.filter((row) => String(row.promotionType || "").includes("1차")).length}명`],
+    [4, "2차 촉진", `${reminders.filter((row) => String(row.promotionType || "").includes("2차")).length}명`],
+    [6, "잔여 합계", `${daysText(reminders.reduce((sum, row) => sum + Number(row.remaining || 0), 0))}`],
+    [8, "기준", `${year}-${String(monthNo).padStart(2, "0")}`],
+  ];
+  for (const [col, label, value] of cards) {
+    matrix[2][col] = label;
+    matrix[3][col] = value;
+  }
+  matrix[2][10] = "확인 기준";
+  matrix[3][10] = "연차 생성일 기준 6개월 / 9개월";
+  matrix[4][10] = "기존 연차 누적 현황 데이터 사용";
+  matrix[6] = ["No", "상태", "촉진 구분", "촉진일", "지역장", "매니저", "점포", "사번", "이름", "잔여 연차", "연차 사용기간", "비고"];
+
+  const dataRows = [];
+  if (reminders.length) {
+    reminders.forEach((row, index) => {
+      const rowIndex = matrix.length;
+      matrix.push([
+        index + 1,
+        row.status || "",
+        row.promotionType || "",
+        row.dueDate || "",
+        row.regionalManager || "",
+        row.manager || "",
+        row.storeName || "",
+        normalizeId(row.employeeId),
+        row.employeeName || "",
+        roundHalf(Number(row.remaining || 0)),
+        [row.cycleStart, row.cycleEnd].filter(Boolean).join(" ~ "),
+        row.note || "",
+      ]);
+      dataRows.push({ row: rowIndex, status: row.status || "", promotionType: row.promotionType || "" });
+    });
+  } else {
+    const rowIndex = matrix.length;
+    matrix.push(["", "대상 없음", "", "", "", "", "", "", "", 0, "", ""]);
+    dataRows.push({ row: rowIndex, status: "대상 없음", promotionType: "" });
+  }
+
+  const sheet = XLSX.utils.aoa_to_sheet(matrix);
+  sheet["!merges"] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: 11 } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: 11 } },
+    { s: { r: 2, c: 0 }, e: { r: 2, c: 1 } }, { s: { r: 3, c: 0 }, e: { r: 4, c: 1 } },
+    { s: { r: 2, c: 2 }, e: { r: 2, c: 3 } }, { s: { r: 3, c: 2 }, e: { r: 4, c: 3 } },
+    { s: { r: 2, c: 4 }, e: { r: 2, c: 5 } }, { s: { r: 3, c: 4 }, e: { r: 4, c: 5 } },
+    { s: { r: 2, c: 6 }, e: { r: 2, c: 7 } }, { s: { r: 3, c: 6 }, e: { r: 4, c: 7 } },
+    { s: { r: 2, c: 8 }, e: { r: 2, c: 9 } }, { s: { r: 3, c: 8 }, e: { r: 4, c: 9 } },
+    { s: { r: 2, c: 10 }, e: { r: 2, c: 11 } },
+    { s: { r: 3, c: 10 }, e: { r: 3, c: 11 } },
+    { s: { r: 4, c: 10 }, e: { r: 4, c: 11 } },
+  ];
+  sheet["!cols"] = [
+    { wch: 6 }, { wch: 13 }, { wch: 13 }, { wch: 13 }, { wch: 11 }, { wch: 11 },
+    { wch: 18 }, { wch: 13 }, { wch: 11 }, { wch: 11 }, { wch: 25 }, { wch: 42 },
+  ];
+  sheet["!rows"] = matrix.map((_, index) => ({ hpt: index === 0 ? 34 : index === 1 ? 30 : index >= 2 && index <= 4 ? 28 : index === 5 ? 8 : index === 6 ? 32 : 25 }));
+  sheet["!freeze"] = { xSplit: 0, ySplit: 7, topLeftCell: "A8", activePane: "bottomLeft", state: "frozen" };
+  sheet["!views"] = [{ showGridLines: false, zoomScale: 75, zoomScaleNormal: 75 }];
+
+  styleDashboardShell(sheet, matrix.length, 12, cards, []);
+  dataRows.forEach((item, index) => {
+    styleCellRange(sheet, item.row, 0, item.row, 11, {
+      fill: { patternType: "solid", fgColor: { rgb: index % 2 ? "FFF9FBFD" : "FFFFFFFF" } },
+      font: { name: "맑은 고딕", sz: 9, color: { rgb: "FF1F2937" } },
+      alignment: { horizontal: "center", vertical: "center", wrapText: true },
+      border: thinBorder("FFDCE3EC"),
+    });
+    applyAnnualPromotionStatusStyle(sheet, XLSX.utils.encode_cell({ r: item.row, c: 1 }), item.status);
+    const noteAddr = XLSX.utils.encode_cell({ r: item.row, c: 11 });
+    if (sheet[noteAddr]) sheet[noteAddr].s.alignment = { horizontal: "left", vertical: "center", wrapText: true };
+  });
+  setRef(sheet, matrix.length, 12);
+  workbook.Sheets["연차 촉진"] = sheet;
+  if (!workbook.SheetNames.includes("연차 촉진")) workbook.SheetNames.push("연차 촉진");
+}
+
+function buildAnnualApplicationMap(applications = [], targetMonth = "") {
+  const map = new Map();
+  for (const application of applications || []) {
+    const employeeId = normalizeId(application.employeeId);
+    const date = String(application.leaveDate || application.date || "");
+    if (!employeeId || !/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+    if (targetMonth && !date.startsWith(`${targetMonth}-`)) continue;
+    if (!isAnnualApplicationLike(application)) continue;
+    const key = `${employeeId}|${date}`;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(application);
+  }
+  for (const rows of map.values()) {
+    rows.sort((a, b) => leaveApplicationStatusPriority({ approvalStatus: leaveApprovalStatus(a) }) - leaveApplicationStatusPriority({ approvalStatus: leaveApprovalStatus(b) })
+      || Number(annualApplicationDays(b)) - Number(annualApplicationDays(a)));
+  }
+  return map;
+}
+
+function chooseAnnualApplication(applications = []) {
+  return applications?.[0] || null;
+}
+
+function isAnnualApplicationLike(application = {}) {
+  const type = normalizeTextKey(`${application.leaveType || ""}${application.requestedKind || ""}`);
+  return type.includes("연차") || type.includes("반차") || ["연차", "반차"].includes(String(application.requestedKind || ""));
+}
+
+function annualApplicationKind(application = {}) {
+  const type = normalizeTextKey(`${application.leaveType || ""}${application.requestedKind || ""}`);
+  const days = Number(application.days ?? application.requestedDays ?? 0);
+  if (type.includes("반차") || days === 0.5 || String(application.requestedKind || "") === "반차") return "반차";
+  return "연차";
+}
+
+function annualApplicationDays(application = {}) {
+  const fallback = annualApplicationKind(application) === "반차" ? 0.5 : 1;
+  return roundHalf(Number(application.requestedDays ?? application.days ?? fallback));
+}
+
+function annualApplicationStatusText(application = {}) {
+  return String(application.applicationStatus || application.status || "").trim() || "-";
+}
+
+function isAnnualLeaveDisplay(value = "") {
+  const normalized = normalizeManagerFinalSheetValue(value);
+  return ["연차", "오전반차", "오후반차"].includes(normalized);
+}
+
+function annualKindFromDisplay(value = "") {
+  const normalized = normalizeManagerFinalSheetValue(value);
+  return ["오전반차", "오후반차"].includes(normalized) ? "반차" : "연차";
+}
+
+function applyAnnualPromotionStatusStyle(sheet, address, status) {
+  if (!sheet[address]) return;
+  const palette = String(status || "").includes("대상 없음")
+    ? { fill: "FFE2F0D9", font: "FF107C41" }
+    : String(status || "").includes("경과") || String(status || "").includes("초과")
+      ? { fill: "FFF4CCCC", font: "FF9C0006" }
+      : { fill: "FFFFE699", font: "FF9C6500" };
+  sheet[address].s = {
+    ...(sheet[address].s || {}),
+    fill: { patternType: "solid", fgColor: { rgb: palette.fill } },
+    font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: palette.font } },
+    alignment: { horizontal: "center", vertical: "center", wrapText: true },
+    border: thinBorder("FFDCE3EC"),
+  };
+}
+
 function isResolvedByApprovedLeave(row = {}, ctx = {}) {
   const employeeId = normalizeId(row.employeeId);
   const date = String(row.date || row.leaveDate || "");
@@ -1568,36 +1968,7 @@ function isAutoBlankDayoffEvidenceRow(row, ctx) {
 }
 
 function buildManagerAwareAutoBlankDayoffSet(result, ctx) {
-  const set = new Set();
-  const targetMonth = result?.targetMonth || "";
-  const monthNo = Number(targetMonth.slice(5, 7));
-  const year = Number(targetMonth.slice(0, 4));
-  const daysInMonth = year && monthNo ? new Date(year, monthNo, 0).getDate() : 31;
-  const managerFinalStatusByKey = buildManagerFinalizationStatusMap(result);
-  for (const person of ctx.people || []) {
-    const employeeId = normalizeId(person.employeeId);
-    const summary = ctx.summaryById?.get(employeeId) || {};
-    const baseAllowance = resolveBaseAllowance(summary, result, year, monthNo);
-    if (!employeeId || !(baseAllowance > 0)) continue;
-    const daily = ctx.dailyByKey?.get(person.key) || {};
-    let dayoffCount = 0;
-    const candidates = [];
-    for (let day = 1; day <= daysInMonth; day += 1) {
-      const date = `${targetMonth}-${String(day).padStart(2, "0")}`;
-      const key = `${employeeId}|${date}`;
-      const item = daily[day] || {};
-      const managerValue = managerFinalStatusByKey.get(key);
-      const display = managerValue ? normalizeManagerFinalSheetValue(managerValue) : String(item.display || "");
-      if (isDayoffLikeDisplay(display)) dayoffCount = roundHalf(dayoffCount + 1);
-      else if (!item.attendance?.hasClockIn && !item.approvedLeaveStatus && isAutoBlankDayoffMissingDisplay(display)) candidates.push(key);
-    }
-    for (const key of candidates) {
-      if (dayoffCount >= baseAllowance) break;
-      set.add(key);
-      dayoffCount = roundHalf(dayoffCount + 1);
-    }
-  }
-  return set;
+  return new Set();
 }
 
 function buildManagerFinalizationStatusMap(result) {
@@ -2432,9 +2803,125 @@ function buildDayoffReplacementSheet(workbook, result, ctx, year, monthNo) {
   if (!workbook.SheetNames.includes("대체+보상 대체 인원")) workbook.SheetNames.push("대체+보상 대체 인원");
 }
 
-function buildDayoffSubstituteSheet(workbook, result, ctx, year, monthNo) {
+function buildManagerReflectedMonthlyRows(managerSheet, result, ctx, year, monthNo, daysInMonth) {
+  if (!managerSheet) return [];
+  const lookup = buildMainAttendanceSheetLookup(managerSheet, result.targetMonth, daysInMonth);
+  const summaryById = ctx.summaryById || new Map();
+  const rows = [];
+  const firstDayCol0 = 14;
+
+  for (const sheetRows of lookup.rowsById.values()) {
+    for (const sheetRow of sheetRows) {
+      const employeeId = normalizeId(sheetRow.employeeId);
+      if (!employeeId) continue;
+      const summary = summaryById.get(employeeId) || {};
+
+      let basicDayoffUsed = 0;
+      let explicitSubDayoffUsed = 0;
+      let compensationLeaveUsed = 0;
+      const dailyStatuses = [];
+      for (let day = 1; day <= daysInMonth; day += 1) {
+        const date = `${result.targetMonth}-${String(day).padStart(2, "0")}`;
+        const address = XLSX.utils.encode_cell({ r: sheetRow.rowIndex0, c: firstDayCol0 + day - 1 });
+        const value = normalizeManagerFinalSheetValue(cellDisplayValue(managerSheet, address));
+        dailyStatuses.push({ day, date, value, address });
+        if (isManagerSheetBasicDayoffDisplay(value)) basicDayoffUsed = roundHalf(basicDayoffUsed + 1);
+        explicitSubDayoffUsed = roundHalf(explicitSubDayoffUsed + managerSheetSubstituteDays(value));
+        compensationLeaveUsed = roundHalf(compensationLeaveUsed + managerSheetCompensationDays(value));
+      }
+
+      const baseAllowance = resolveBaseAllowance(summary, result, year, monthNo);
+      if (!(baseAllowance > 0)) continue;
+      const openingCarryoverSubstitute = roundHalf(Number(summary.openingCarryoverSubstitute || 0));
+      const openingCarryoverCompensation = roundHalf(Number(summary.openingCarryoverCompensation || 0));
+      const openingCarryoverTotal = roundHalf(summary.openingCarryoverTotal !== undefined
+        ? Number(summary.openingCarryoverTotal || 0)
+        : openingCarryoverSubstitute + openingCarryoverCompensation);
+      const availableSubstitute = roundHalf(Number(summary.availableSubstitute || 0));
+      const availableCompensation = roundHalf(Number(summary.availableCompensation || 0));
+      const combinedAvailable = roundHalf(summary.combinedAvailable !== undefined
+        ? Number(summary.combinedAvailable || 0)
+        : availableSubstitute + availableCompensation);
+      const explicitLeaveUsed = roundHalf(explicitSubDayoffUsed + compensationLeaveUsed);
+      const totalOffUsed = roundHalf(basicDayoffUsed + explicitLeaveUsed);
+      const dayoffExcess = roundHalf(Math.max(0, basicDayoffUsed - baseAllowance));
+      const substituteExcess = roundHalf(Math.max(0, explicitLeaveUsed - combinedAvailable));
+      const combinedRemaining = roundHalf(baseAllowance + combinedAvailable - totalOffUsed);
+      const currentGrant = roundHalf(Math.max(0, combinedAvailable - openingCarryoverTotal));
+      const usableAfterDirectLeave = roundHalf(Math.max(0, combinedAvailable - explicitLeaveUsed));
+      const dayoffExcessAfterSubstitution = roundHalf(Math.max(0, dayoffExcess - usableAfterDirectLeave));
+
+      const member = findMember(ctx, employeeId, sheetRow.store) || {};
+      rows.push({
+        ...summary,
+        employeeId,
+        name: sheetRow.name || summary.name || member.employeeName || "",
+        store: sheetRow.store || summary.store || member.storeName || "",
+        region: sheetRow.region || summary.region || member.region2 || member.region1 || "",
+        manager: sheetRow.manager || summary.manager || member.manager || "",
+        regionalManager: sheetRow.regionalManager || summary.regionalManager || member.regionalManager || "",
+        baseAllowance,
+        basicDayoffUsed,
+        explicitSubDayoffUsed,
+        compensationLeaveUsed,
+        explicitLeaveUsed,
+        totalOffUsed,
+        openingCarryoverSubstitute,
+        openingCarryoverCompensation,
+        openingCarryoverTotal,
+        availableSubstitute,
+        availableCompensation,
+        combinedAvailable,
+        currentGrant,
+        dayoffExcess,
+        substituteExcess,
+        combinedRemaining,
+        usableAfterDirectLeave,
+        dayoffExcessAfterSubstitution,
+        dailyStatuses,
+        dayoffResolved: Boolean(summary.dayoffResolved),
+        managerReflectedDayoffBasis: true,
+      });
+    }
+  }
+  return rows;
+}
+
+function buildManagerReflectedDayoffExcessRows(managerSheet, result, ctx, year, monthNo, daysInMonth) {
+  return buildManagerReflectedMonthlyRows(managerSheet, result, ctx, year, monthNo, daysInMonth)
+    .filter((row) => Number(row.dayoffExcess || 0) > 0);
+}
+
+function isManagerSheetBasicDayoffDisplay(value = "") {
+  const compact = String(value || "").trim().replace(/\s+/g, "");
+  if (!compact) return false;
+  return compact === "휴무" || compact.startsWith("휴무(") || compact === "휴무초과" || compact === "휴무잔여";
+}
+
+function managerSheetSubstituteDays(value = "") {
+  const compact = String(value || "").trim().replace(/\s+/g, "");
+  if (!compact.includes("대체")) return 0;
+  return compact.includes("0.5") || compact.includes("반") ? 0.5 : 1;
+}
+
+function managerSheetCompensationDays(value = "") {
+  const compact = String(value || "").trim().replace(/\s+/g, "");
+  if (!compact.includes("보상")) return 0;
+  return compact.includes("0.5") || compact.includes("반") ? 0.5 : 1;
+}
+
+function buildDayoffSubstituteSheet(workbook, result, ctx, year, monthNo, daysInMonth = 31) {
   const regions = ["서울", "경인", "충청", "경북", "경남", "전라"];
-  const rows = [...(result.dayoffExcessRows || [])].map((row) => {
+  const managerBasedRows = buildManagerReflectedDayoffExcessRows(
+    workbook.Sheets["상담사근태_관리자반영"],
+    result,
+    ctx,
+    year,
+    monthNo,
+    daysInMonth,
+  );
+  const sourceRows = managerBasedRows || [...(result.dayoffExcessRows || [])];
+  const rows = sourceRows.map((row) => {
     const member = findMember(ctx, row.employeeId, row.store) || {};
     const openingBalance = roundHalf(row.openingCarryoverTotal || 0);
     const totalGrant = roundHalf(row.combinedAvailable || 0);
@@ -2465,7 +2952,7 @@ function buildDayoffSubstituteSheet(workbook, result, ctx, year, monthNo) {
       ...row,
       member,
       regionGroup: normalizeDashboardRegion(member.region2 || member.region1 || row.region || "", member.storeName || row.store || ""),
-      resolved: Boolean(row.dayoffResolved),
+      resolved: false,
       openingBalance,
       currentGrant,
       totalGrant,
@@ -2487,7 +2974,7 @@ function buildDayoffSubstituteSheet(workbook, result, ctx, year, monthNo) {
   const adjustCount = rows.filter((row) => row.judgmentType === "adjust" && !row.resolved).length;
   const matrix = Array.from({ length: 7 }, () => Array(19).fill(""));
   matrix[0][0] = `${year}년 ${monthNo}월 기본 휴무 초과자`;
-  matrix[1][0] = "이월 잔여와 당월 발생을 합산해 비교합니다. R열에 O 입력 후 재업로드하면 같은 사번·회사·월의 휴무 초과와 휴무 관련 계획&근태 상이가 함께 제거됩니다.";
+  matrix[1][0] = "상담사근태_관리자반영 시트 기준으로 휴무 초과를 다시 계산합니다. R열에 O 입력 후 재업로드하면 같은 사번·회사·월의 휴무 초과와 휴무 관련 계획&근태 상이가 함께 제거됩니다.";
 
   const cards = [
     [0, "총 대상 인원", `${rows.length}명`],
@@ -2665,6 +3152,165 @@ function buildDayoffSubstituteSheet(workbook, result, ctx, year, monthNo) {
   setRef(sh, matrix.length, 19);
   workbook.Sheets["휴무 초과자"] = sh;
   if (!workbook.SheetNames.includes("휴무 초과자")) workbook.SheetNames.push("휴무 초과자");
+}
+
+function buildSubstituteCompensationLedgerSheet(workbook, result, ctx, year, monthNo, daysInMonth) {
+  const regionOrder = ["서울", "경인", "충청", "경북", "경남", "전라"];
+  const rows = buildManagerReflectedMonthlyRows(
+    workbook.Sheets["상담사근태_관리자반영"],
+    result,
+    ctx,
+    year,
+    monthNo,
+    daysInMonth,
+  ).map((row) => {
+    const regionGroup = normalizeDashboardRegion(row.region || row.member?.region2 || row.member?.region1 || "", row.store || row.member?.storeName || "");
+    let status = "정상";
+    let statusType = "safe";
+    if (Number(row.substituteExcess || 0) > 0) {
+      status = `대체ㆍ보상 ${daysText(row.substituteExcess)} 초과`;
+      statusType = "danger";
+    } else if (Number(row.dayoffExcessAfterSubstitution || 0) > 0) {
+      status = `휴무초과 ${daysText(row.dayoffExcessAfterSubstitution)} 부족`;
+      statusType = "danger";
+    } else if (Number(row.dayoffExcess || 0) > 0) {
+      status = `휴무초과 ${daysText(row.dayoffExcess)} 있음`;
+      statusType = "warning";
+    }
+    return { ...row, regionGroup, status, statusType };
+  }).sort((a, b) => regionOrder.indexOf(a.regionGroup) - regionOrder.indexOf(b.regionGroup)
+    || String(a.manager || "").localeCompare(String(b.manager || ""), "ko")
+    || String(a.store || "").localeCompare(String(b.store || ""), "ko")
+    || String(a.name || "").localeCompare(String(b.name || ""), "ko"));
+
+  const dayoffExcessPeople = rows.filter((row) => Number(row.dayoffExcess || 0) > 0).length;
+  const extraLeaveOverPeople = rows.filter((row) => Number(row.substituteExcess || 0) > 0).length;
+  const dangerPeople = rows.filter((row) => row.statusType === "danger").length;
+  const normalPeople = rows.filter((row) => row.statusType === "safe").length;
+  const matrix = Array.from({ length: 7 }, () => Array(14).fill(""));
+  matrix[0][0] = `${year}년 ${monthNo}월 대체ㆍ보상 현황`;
+  matrix[1][0] = "상담사근태_관리자반영 시트 기준 전 인원의 대체휴무·보상휴가 사용 가능/사용/이월/초과 여부를 집계합니다.";
+  const cards = [
+    [0, "전체 인원", `${rows.length}명`],
+    [2, "휴무 초과 인원", `${dayoffExcessPeople}명`],
+    [4, "대체ㆍ보상 초과", `${extraLeaveOverPeople}명`],
+    [6, "부족 확인", `${dangerPeople}명`],
+    [8, "정상", `${normalPeople}명`],
+  ];
+  for (const [col, label, value] of cards) {
+    matrix[2][col] = label;
+    matrix[3][col] = value;
+  }
+  matrix[2][10] = "집계 기준";
+  matrix[3][10] = "O열부터 대상월 말일까지 관리자반영 값을 재집계";
+  matrix[4][10] = "사용 가능 개수 좌측에 당월 휴무 초과를 표시";
+  matrix[6] = [
+    "No", "지역장", "매니저", "지역", "매장명", "이름", "사번",
+    "당월 휴무 초과", "대체ㆍ보상 사용 가능 개수", "당월 사용 개수", "이월 개수",
+    "당월 발생 개수", "초과 여부", "비고",
+  ];
+
+  const regionRows = [];
+  const dataRows = [];
+  let no = 1;
+  for (const region of regionOrder) {
+    const group = rows.filter((row) => row.regionGroup === region);
+    const regionRow = matrix.length;
+    matrix.push([
+      `▼  ${region} (총 ${group.length}명)`, "", "", "", "", "", "",
+      `휴무초과 ${group.filter((row) => Number(row.dayoffExcess || 0) > 0).length}명  |  대체ㆍ보상 초과 ${group.filter((row) => Number(row.substituteExcess || 0) > 0).length}명`,
+      "", "", "", "", "", "",
+    ]);
+    regionRows.push({ row: regionRow, region });
+    for (const row of group) {
+      const rowIndex = matrix.length;
+      matrix.push([
+        no++, row.regionalManager || "", row.manager || "", region,
+        row.store || "", row.name || "", normalizeId(row.employeeId),
+        row.dayoffExcess || 0,
+        row.combinedAvailable || 0,
+        row.explicitLeaveUsed || 0,
+        row.openingCarryoverTotal || 0,
+        row.currentGrant || 0,
+        row.status,
+        `대체 가용 ${compactNumber(row.availableSubstitute || 0)} / 보상 가용 ${compactNumber(row.availableCompensation || 0)} · 대체 사용 ${compactNumber(row.explicitSubDayoffUsed || 0)} / 보상 사용 ${compactNumber(row.compensationLeaveUsed || 0)}`,
+      ]);
+      dataRows.push({ row: rowIndex, ...row });
+    }
+  }
+
+  const sheet = XLSX.utils.aoa_to_sheet(matrix);
+  sheet["!merges"] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: 13 } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: 13 } },
+    { s: { r: 2, c: 0 }, e: { r: 2, c: 1 } }, { s: { r: 3, c: 0 }, e: { r: 4, c: 1 } },
+    { s: { r: 2, c: 2 }, e: { r: 2, c: 3 } }, { s: { r: 3, c: 2 }, e: { r: 4, c: 3 } },
+    { s: { r: 2, c: 4 }, e: { r: 2, c: 5 } }, { s: { r: 3, c: 4 }, e: { r: 4, c: 5 } },
+    { s: { r: 2, c: 6 }, e: { r: 2, c: 7 } }, { s: { r: 3, c: 6 }, e: { r: 4, c: 7 } },
+    { s: { r: 2, c: 8 }, e: { r: 2, c: 9 } }, { s: { r: 3, c: 8 }, e: { r: 4, c: 9 } },
+    { s: { r: 2, c: 10 }, e: { r: 2, c: 13 } },
+    { s: { r: 3, c: 10 }, e: { r: 3, c: 13 } },
+    { s: { r: 4, c: 10 }, e: { r: 4, c: 13 } },
+  ];
+  for (const item of regionRows) {
+    sheet["!merges"].push(
+      { s: { r: item.row, c: 0 }, e: { r: item.row, c: 6 } },
+      { s: { r: item.row, c: 7 }, e: { r: item.row, c: 13 } },
+    );
+  }
+  sheet["!cols"] = [
+    { wch: 6 }, { wch: 11 }, { wch: 11 }, { wch: 9 }, { wch: 18 }, { wch: 11 }, { wch: 13 },
+    { wch: 13 }, { wch: 20 }, { wch: 13 }, { wch: 11 }, { wch: 13 }, { wch: 18 }, { wch: 48 },
+  ];
+  sheet["!rows"] = matrix.map((_, index) => ({ hpt: index === 0 ? 34 : index === 1 ? 30 : index >= 2 && index <= 4 ? 28 : index === 5 ? 8 : index === 6 ? 38 : regionRows.some((item) => item.row === index) ? 26 : 25 }));
+  sheet["!freeze"] = { xSplit: 0, ySplit: 7, topLeftCell: "A8", activePane: "bottomLeft", state: "frozen" };
+  sheet["!views"] = [{ showGridLines: false, zoomScale: 70, zoomScaleNormal: 70 }];
+
+  styleDashboardShell(sheet, matrix.length, 14, cards, regionRows);
+  dataRows.forEach((item, index) => {
+    styleCellRange(sheet, item.row, 0, item.row, 13, {
+      fill: { patternType: "solid", fgColor: { rgb: index % 2 ? "FFF9FBFD" : "FFFFFFFF" } },
+      font: { name: "맑은 고딕", sz: 9, color: { rgb: "FF1F2937" } },
+      alignment: { horizontal: "center", vertical: "center", wrapText: true },
+      border: thinBorder("FFDCE3EC"),
+    });
+    applySubstituteLedgerStatusStyle(sheet, XLSX.utils.encode_cell({ r: item.row, c: 12 }), item.statusType);
+    for (const col of [7, 8, 9, 10, 11]) {
+      const addr = XLSX.utils.encode_cell({ r: item.row, c: col });
+      if (!sheet[addr]) continue;
+      const isWarn = (col === 7 && Number(sheet[addr].v || 0) > 0) || (col === 9 && Number(item.substituteExcess || 0) > 0);
+      sheet[addr].s = {
+        ...(sheet[addr].s || {}),
+        fill: { patternType: "solid", fgColor: { rgb: isWarn ? "FFFFE699" : "FFF3F8FF" } },
+        font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: isWarn ? "FF9C6500" : "FF1F4E78" } },
+        alignment: { horizontal: "center", vertical: "center" },
+        border: thinBorder("FFDCE3EC"),
+      };
+    }
+    const noteAddr = XLSX.utils.encode_cell({ r: item.row, c: 13 });
+    if (sheet[noteAddr]) sheet[noteAddr].s.alignment = { horizontal: "left", vertical: "center", wrapText: true };
+  });
+  setRef(sheet, matrix.length, 14);
+  workbook.Sheets["대체ㆍ보상"] = sheet;
+  if (!workbook.SheetNames.includes("대체ㆍ보상")) workbook.SheetNames.push("대체ㆍ보상");
+  delete workbook.Sheets["대체+보상 대체 인원"];
+  workbook.SheetNames = workbook.SheetNames.filter((name) => name !== "대체+보상 대체 인원");
+}
+
+function applySubstituteLedgerStatusStyle(sheet, address, statusType) {
+  if (!sheet[address]) return;
+  const palette = statusType === "danger"
+    ? { fill: "FFF4CCCC", font: "FF9C0006" }
+    : statusType === "warning"
+      ? { fill: "FFFFE699", font: "FF9C6500" }
+      : { fill: "FFE2F0D9", font: "FF107C41" };
+  sheet[address].s = {
+    ...(sheet[address].s || {}),
+    fill: { patternType: "solid", fgColor: { rgb: palette.fill } },
+    font: { name: "맑은 고딕", sz: 9, bold: true, color: { rgb: palette.font } },
+    alignment: { horizontal: "center", vertical: "center", wrapText: true },
+    border: thinBorder("FFDCE3EC"),
+  };
 }
 
 function buildReferenceComparisonSheet(workbook, result, year, monthNo) {
@@ -2954,7 +3600,8 @@ function buildManagerFinalizationSheets(workbook, result, year, monthNo, daysInM
   if (!baseSheet) return [];
   const managerSheet = cloneSheet(baseSheet);
   const comparisonRows = applyManagerFinalizationToSheet(managerSheet, baseSheet, result, year, monthNo, daysInMonth);
-  applySheetAutoBlankDayoff(managerSheet, result, daysInMonth, year, monthNo);
+  managerSheet["!freeze"] = { xSplit: 13, ySplit: 6, topLeftCell: "N7", activePane: "bottomRight", state: "frozen" };
+  managerSheet["!views"] = [{ showGridLines: false, zoomScale: 70, zoomScaleNormal: 70 }];
   workbook.Sheets["상담사근태_관리자반영"] = managerSheet;
   buildManagerFinalizationComparisonSheet(workbook, result, comparisonRows, year, monthNo);
   return comparisonRows;
@@ -4109,15 +4756,13 @@ async function applyLiveEvidenceConditionalFormatting(buffer, result) {
     const dxf=appendConditionalDxfs(stylesXml);
     const configs=[
       ["출근증빙·휴무확인",[{sqref:"K8:W1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(K8))="O",K8="○",K8="ㅇ")'}]},{sqref:"Y8:Y1000",rules:[{dxfId:dxf.completed,formula:'$Y8="처리 완료"'},{dxfId:dxf.pending,formula:'$Y8="미처리"'}]}]],
-      ["대체+보상 대체 인원",[{sqref:"O8:S1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(O8))="O",O8="○",O8="ㅇ")'}]},{sqref:"U8:U1000",rules:[{dxfId:dxf.completed,formula:'$U8="처리 완료"'},{dxfId:dxf.pending,formula:'$U8="미처리"'}]}]],
       ["계획&근태 상이 인원",[{sqref:"M8:M1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(M8))="O",M8="○",M8="ㅇ")'}]},{sqref:"N8:N1000",rules:[{dxfId:dxf.completed,formula:'$N8="처리 완료"'},{dxfId:dxf.pending,formula:'$N8="미처리"'}]}]],
       ["휴무 초과자",[{sqref:"R8:R1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(R8))="O",R8="○",R8="ㅇ")'}]},{sqref:"S8:S1000",rules:[{dxfId:dxf.completed,formula:'$S8="처리 완료"'},{dxfId:dxf.pending,formula:'$S8="미처리"'}]}]],
       ["매니저별 이상 근태",[{sqref:"L8:L1000",rules:[{dxfId:dxf.evidence,formula:'OR(UPPER(TRIM(L8))="O",L8="○",L8="ㅇ")'}]},{sqref:"M8:M1000",rules:[{dxfId:dxf.completed,formula:'$M8="전달 완료"'},{dxfId:dxf.pending,formula:'$M8="미전달"'}]}]],
-      ["해당 월 연차 등록 현황 및 일자",[{sqref:"O8:O1000",rules:[
-        {dxfId:dxf.annualApproved,formula:'$O8="승인 완료"'},
-        {dxfId:dxf.annualWaiting,formula:'$O8="승인 대기"'},
-        {dxfId:dxf.annualReview,formula:'$O8="확인 요청"'},
-        {dxfId:dxf.completed,formula:'$O8="확인 완료"'}
+      ["연차 사용자",[{sqref:"N8:N1000",rules:[
+        {dxfId:dxf.annualApproved,formula:'$N8="인정"'},
+        {dxfId:dxf.annualWaiting,formula:'$N8="확인"'},
+        {dxfId:dxf.annualReview,formula:'$N8="미인정"'}
       ]}]],
     ];
     const changed=[];
@@ -4135,9 +4780,9 @@ async function applyWorkbookOpenViewSettings(buffer) {
     if (!workbookXml || !relsXml) return buffer;
 
     const frozenDashboardSheets = new Set([
-      "계획&근태 상이 인원", "출근증빙·휴무확인", "대체+보상 대체 인원", "휴무 초과자", "인사팀 급여 확정표", "출근 미달자 정산", "연차 사용 필요자", "최종 문제자", "전체 요약본", "매니저별 이상 근태", "주 근태 확인자", "해당 월 연차 등록 현황 및 일자", "인력 변동 확인",
+      "계획&근태 상이 인원", "출근증빙·휴무확인", "대체ㆍ보상", "휴무 초과자", "연차 사용자", "연차 촉진", "인사팀 급여 확정표", "출근 미달자 정산", "연차 사용 필요자", "최종 문제자", "전체 요약본", "매니저별 이상 근태", "주 근태 확인자", "인력 변동 확인",
     ]);
-    const attendanceFreezeSheet = "상담사근태";
+    const attendanceFreezeSheets = new Set(["상담사근태", "상담사근태_관리자반영"]);
     const sheetTags = workbookXml.match(/<sheet\b[^>]*\/?\s*>/g) || [];
     const changedPaths = [];
     for (const tag of sheetTags) {
@@ -4176,11 +4821,11 @@ async function applyWorkbookOpenViewSettings(buffer) {
       sheetView.setAttribute("zoomScale", "70");
       sheetView.setAttribute("zoomScaleNormal", "70");
 
-      if (sheetName === attendanceFreezeSheet || frozenDashboardSheets.has(sheetName)) {
+      if (attendanceFreezeSheets.has(sheetName) || frozenDashboardSheets.has(sheetName)) {
         for (const pane of xmlElementChildren(sheetView).filter((node) => node.localName === "pane")) sheetView.removeChild(pane);
         const pane = doc.createElementNS(namespace, "pane");
-        if (sheetName === attendanceFreezeSheet) {
-          // 상담사근태: 1~6행과 A~M열 고정, N7부터 스크롤합니다.
+        if (attendanceFreezeSheets.has(sheetName)) {
+          // 상담사근태/관리자반영: 1~6행과 A~M열 고정, N7부터 스크롤합니다.
           pane.setAttribute("xSplit", "13");
           pane.setAttribute("ySplit", "6");
           pane.setAttribute("topLeftCell", "N7");
@@ -4208,13 +4853,13 @@ async function applyWorkbookOpenViewSettings(buffer) {
       const doc = parseXmlOrThrow(xml || "", `${item.name || item.path} 저장 후 보기 설정 XML`);
       const view = doc.getElementsByTagNameNS("*", "sheetView")[0];
       if (!view || view.getAttribute("zoomScale") !== "70") throw new Error(`${item.name} 확대 비율 저장 실패`);
-      if (item.name === attendanceFreezeSheet) {
+      if (attendanceFreezeSheets.has(item.name)) {
         const pane = doc.getElementsByTagNameNS("*", "pane")[0];
         if (!pane
           || pane.getAttribute("xSplit") !== "13"
           || pane.getAttribute("ySplit") !== "6"
           || pane.getAttribute("topLeftCell") !== "N7") {
-          throw new Error("상담사근태 6행·M열 고정 저장 실패");
+          throw new Error(`${item.name} 6행·M열 고정 저장 실패`);
         }
       } else if (frozenDashboardSheets.has(item.name)) {
         const pane = doc.getElementsByTagNameNS("*", "pane")[0];

@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=73-excel-year-hotfix";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=75-manager-based-reports";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -2806,7 +2806,7 @@ function normalizeFinalCompareValue(value) {
 function compareReferenceFinal(reference, result, targetMonth, cutoffDate, workforce) {
   const rows = [];
   if (reference.month && reference.month !== targetMonth) {
-    const currentNames = ["상담사근태", "계획&근태 상이 인원", "출근 미등록", "휴무 초과자", "전체 요약본", "매니저별 이상 근태", "해당 월 연차 등록 현황 및 일자", "연차 누적 현황", "근무 계획", "근태 RAW"];
+    const currentNames = ["상담사근태", "상담사근태_관리자반영", "관리자수정 비교", "출근증빙·휴무확인", "휴무 초과자", "대체ㆍ보상", "연차 사용자", "연차 촉진", "전체 요약본", "매니저별 이상 근태", "연차 누적 현황", "근무 계획", "근태 RAW"];
     const normalizeName = (name) => String(name).replace(/^\d+월/, "O월");
     const currentSet = new Set(currentNames.map(normalizeName));
     const referenceSet = new Set(reference.sheetNames.map(normalizeName));
