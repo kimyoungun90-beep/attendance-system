@@ -1,4 +1,4 @@
-import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=75-manager-based-reports";
+import { buildFinalTemplateWorkbook, buildFinalTemplateFile } from "./final-template.js?v=76-halfday-dayoff-simple";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
