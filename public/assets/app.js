@@ -5,14 +5,13 @@ import {
   buildAnnualWorkbookFile,
   buildAttendanceWorkbookFile,
   buildClosingWorkbookFile,
-  buildWorkbookFile,
   getDayoffAllowance,
   parseClosingWorkbook,
   parseLedgerWorkbook,
   parseMasterWorkbook,
   parseTargetMonth,
   readWorkbook,
-} from "./attendance-engine.js?v=clean3";
+} from "./attendance-engine.js?v=clean4";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -27,9 +26,9 @@ const state = {
   managerFiles: new Map(),
   workforceRows: [],
   annualLedgerRows: [],
-  subcompLedgerRows: [],
+  substituteGrants: [],
+  webEvidenceRows: [],
   analysis: null,
-  snapshots: [],
 };
 
 init();
@@ -43,8 +42,39 @@ function init() {
   setupDropzone("annualDropzone", "annualFile", "annualFileName", "annualFile");
   setupDropzone("evidenceDropzone", "evidenceFile", "evidenceFileName", "evidenceFile");
   setupDropzone("closingDropzone", "closingFile", "closingFileName", "closingFile");
-  checkBackend();
+  checkBackend().then(loadScopedData);
   syncRouteHelp();
+  syncSubstituteDefaults();
+  renderSubstituteGrants();
+  renderWebEvidenceQueue();
+}
+
+function bindEvents() {
+  $$(".tab").forEach((tab) => tab.addEventListener("click", () => switchView(tab.dataset.view)));
+  $$("[data-jump]").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.jump)));
+  $("#routeSelect").addEventListener("change", handleScopeChange);
+  $("#targetMonth").addEventListener("change", handleScopeChange);
+  $("#resetButton").addEventListener("click", resetAnalysisInputs);
+  $("#clearManagerFiles").addEventListener("click", clearManagerFiles);
+  $("#analyzeButton").addEventListener("click", () => runAnalysis());
+  $("#searchInput").addEventListener("input", renderPreview);
+
+  $("#exportAttendanceButton").addEventListener("click", () => exportSpecificWorkbook("attendance"));
+  $("#exportAnnualButton").addEventListener("click", () => exportSpecificWorkbook("annual"));
+  $("#exportClosingButton").addEventListener("click", () => exportSpecificWorkbook("closing"));
+  $("#exportAttendanceButtonTop").addEventListener("click", () => exportSpecificWorkbook("attendance"));
+  $("#exportAnnualButtonTop").addEventListener("click", () => exportSpecificWorkbook("annual"));
+  $("#exportClosingButtonTop").addEventListener("click", () => exportSpecificWorkbook("closing"));
+
+  $("#saveWorkforceButton").addEventListener("click", () => saveMasterFile("workforce", $("#workforceFile"), parseMasterWorkbook, "workforceRows", "workforceStatus", "인력 DB"));
+  $("#loadWorkforceButton").addEventListener("click", () => loadMasterData("workforce", "workforceRows", "workforceStatus", "인력 DB"));
+  $("#saveAnnualLedgerButton").addEventListener("click", () => saveMasterFile("annual-ledger", $("#annualLedgerFile"), parseLedgerWorkbook, "annualLedgerRows", "annualLedgerStatus", "연차 누적 DB"));
+  $("#loadAnnualLedgerButton").addEventListener("click", () => loadMasterData("annual-ledger", "annualLedgerRows", "annualLedgerStatus", "연차 누적 DB"));
+
+  $("#substituteGrantForm").addEventListener("submit", saveSubstituteGrant);
+  $("#loadSubstituteGrantsButton").addEventListener("click", loadSubstituteGrants);
+  $("#loadWebEvidenceButton").addEventListener("click", loadWebEvidenceData);
+  $("#clearWebEvidenceButton").addEventListener("click", clearWebEvidenceData);
 }
 
 function setDefaultDates() {
@@ -52,49 +82,77 @@ function setDefaultDates() {
   const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
   $("#targetMonth").value = month;
   $("#cutoffDate").value = toISODate(now);
+  $("#substituteGrantMonth").value = month;
+  $("#substituteValidFrom").value = `${month}-01`;
+  $("#substituteValidTo").value = `${month}-${String(new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()).padStart(2, "0")}`;
 }
 
-function bindEvents() {
-  $$(".tab").forEach((tab) => tab.addEventListener("click", () => switchView(tab.dataset.view)));
-  $$('input[name="route"]').forEach((input) => input.addEventListener("change", syncRouteHelp));
-  $("#targetMonth").addEventListener("change", () => {
-    syncRouteHelp();
-    state.analysis = null;
-    syncActionState();
-  });
-  $("#resetButton").addEventListener("click", resetAnalysisInputs);
-  $("#openManagerButton").addEventListener("click", () => switchView("manager"));
-  $("#clearManagerFiles").addEventListener("click", clearManagerFiles);
-  $("#analyzeButton").addEventListener("click", runAnalysis);
-  $("#exportButton").addEventListener("click", exportWorkbook);
-  $("#exportAttendanceButton")?.addEventListener("click", () => exportSpecificWorkbook("attendance"));
-  $("#exportAnnualButton")?.addEventListener("click", () => exportSpecificWorkbook("annual"));
-  $("#exportClosingButton")?.addEventListener("click", () => exportSpecificWorkbook("closing"));
-  $("#exportAttendanceButtonTop")?.addEventListener("click", () => exportSpecificWorkbook("attendance"));
-  $("#exportAnnualButtonTop")?.addEventListener("click", () => exportSpecificWorkbook("annual"));
-  $("#exportClosingButtonTop")?.addEventListener("click", () => exportSpecificWorkbook("closing"));
-  $("#searchInput").addEventListener("input", renderPreview);
-  $("#saveWorkforceButton").addEventListener("click", () => saveMasterFile("workforce", $("#workforceFile"), parseMasterWorkbook, "workforceRows", "workforceStatus"));
-  $("#loadWorkforceButton").addEventListener("click", () => loadMasterData("workforce", "workforceRows", "workforceStatus", "인력 DB"));
-  $("#saveAnnualLedgerButton").addEventListener("click", () => saveMasterFile("annual-ledger", $("#annualLedgerFile"), parseLedgerWorkbook, "annualLedgerRows", "annualLedgerStatus"));
-  $("#loadAnnualLedgerButton").addEventListener("click", () => loadMasterData("annual-ledger", "annualLedgerRows", "annualLedgerStatus", "연차 누적 DB"));
-  $("#saveSubcompLedgerButton").addEventListener("click", () => saveMasterFile("subcomp-ledger", $("#subcompLedgerFile"), parseLedgerWorkbook, "subcompLedgerRows", "subcompLedgerStatus"));
-  $("#loadSubcompLedgerButton").addEventListener("click", () => loadMasterData("subcomp-ledger", "subcompLedgerRows", "subcompLedgerStatus", "대체·보상 DB"));
-  $("#saveSnapshotButton").addEventListener("click", saveSnapshot);
-  $("#loadSnapshotsButton").addEventListener("click", loadSnapshots);
+async function handleScopeChange() {
+  state.analysis = null;
+  state.workforceRows = [];
+  state.annualLedgerRows = [];
+  state.substituteGrants = [];
+  state.webEvidenceRows = [];
+  syncRouteHelp();
+  syncSubstituteDefaults();
+  syncScopedStatuses();
+  await loadScopedData();
+  renderEmptyPreview();
+  syncActionState();
+}
+
+function selectedRoute() {
+  return $("#routeSelect").value || "electroland";
+}
+
+function syncRouteHelp() {
+  const route = selectedRoute();
+  const month = parseTargetMonth($("#targetMonth").value);
+  if (route === "electroland" && month.valid) {
+    $("#routeHelp").textContent = `${$("#targetMonth").value} · 전자랜드 토/일 기준 휴무 ${getDayoffAllowance(route, month)}회`;
+  } else {
+    $("#routeHelp").textContent = `${$("#targetMonth").value} · 홈플러스 기본 휴무 월 6회`;
+  }
+}
+
+function syncSubstituteDefaults() {
+  const month = parseTargetMonth($("#targetMonth").value);
+  $("#substituteRoute").value = selectedRoute();
+  $("#substituteGrantMonth").value = $("#targetMonth").value;
+  if (month.valid) {
+    $("#substituteValidFrom").value = `${month.key}-01`;
+    $("#substituteValidTo").value = `${month.key}-${String(month.daysInMonth).padStart(2, "0")}`;
+  }
+}
+
+function syncScopedStatuses() {
+  const scope = `${ROUTE_LABELS[selectedRoute()]} ${$("#targetMonth").value}`;
+  $("#workforceStatus").textContent = `${scope} 기준 인력 DB 불러오기 전`;
+  $("#annualLedgerStatus").textContent = `${scope} 기준 연차 누적 DB 불러오기 전`;
+  $("#grantCount").textContent = "0건";
+}
+
+async function loadScopedData() {
+  const workforce = await loadJson("workforce");
+  const annualLedger = await loadJson("annual-ledger");
+  const substituteGrants = await loadJson("substitute-grants");
+  const webEvidence = await loadJson("web-evidence");
+  state.workforceRows = workforce?.rows || [];
+  state.annualLedgerRows = annualLedger?.rows || [];
+  state.substituteGrants = substituteGrants?.rows || [];
+  state.webEvidenceRows = webEvidence?.rows || [];
+  $("#workforceStatus").textContent = state.workforceRows.length ? `${scopeText()} 기준 ${state.workforceRows.length}건 불러옴 · ${workforce.fileName || "인력 DB"}` : `${scopeText()} 기준 등록된 인력 DB 없음`;
+  $("#annualLedgerStatus").textContent = state.annualLedgerRows.length ? `${scopeText()} 기준 ${state.annualLedgerRows.length}건 불러옴 · ${annualLedger.fileName || "연차 누적 DB"}` : `${scopeText()} 기준 등록된 연차 누적 DB 없음`;
+  renderSubstituteGrants();
+  renderWebEvidenceQueue();
 }
 
 function setupDropzone(dropzoneId, inputId, labelId, stateKey) {
   const dropzone = $(`#${dropzoneId}`);
   const input = $(`#${inputId}`);
   const label = $(`#${labelId}`);
-  input.addEventListener("change", () => {
-    const file = input.files?.[0] || null;
-    state[stateKey] = file;
-    label.textContent = file ? file.name : "파일 선택";
-    state.analysis = null;
-    syncActionState();
-  });
+  if (!dropzone || !input || !label) return;
+  input.addEventListener("change", () => setFileState(input.files?.[0] || null, input, label, stateKey));
   ["dragenter", "dragover"].forEach((eventName) => {
     dropzone.addEventListener(eventName, (event) => {
       event.preventDefault();
@@ -110,12 +168,16 @@ function setupDropzone(dropzoneId, inputId, labelId, stateKey) {
   dropzone.addEventListener("drop", (event) => {
     const file = [...(event.dataTransfer?.files || [])].find(isExcelFile);
     if (!file) return showToast("엑셀 파일만 등록할 수 있습니다.");
-    state[stateKey] = file;
-    label.textContent = file.name;
-    input.value = "";
-    state.analysis = null;
-    syncActionState();
+    setFileState(file, input, label, stateKey);
   });
+}
+
+function setFileState(file, input, label, stateKey) {
+  state[stateKey] = file;
+  label.textContent = file ? file.name : "파일 선택";
+  if (input) input.value = "";
+  state.analysis = null;
+  syncActionState();
 }
 
 function renderManagerUploadGrid() {
@@ -150,26 +212,12 @@ function switchView(viewName) {
   $(`#${viewName}View`)?.classList.add("active");
 }
 
-function selectedRoute() {
-  return $('input[name="route"]:checked')?.value || "homeplus";
-}
-
-function syncRouteHelp() {
-  const route = selectedRoute();
-  const month = parseTargetMonth($("#targetMonth").value);
-  if (route === "electroland" && month.valid) {
-    $("#routeHelp").textContent = `전자랜드 기본 휴무는 대상 월 토요일+일요일 ${getDayoffAllowance(route, month)}회입니다.`;
-  } else {
-    $("#routeHelp").textContent = "홈플러스 기본 휴무는 월 6회입니다.";
-  }
-}
-
 async function checkBackend() {
   try {
     const response = await fetch("/api/health", { cache: "no-store" });
     const data = response.ok ? await response.json() : null;
     state.backendAvailable = Boolean(data?.ok);
-    $("#backendBadge").textContent = state.backendAvailable ? "D1 clean 저장 연결" : "브라우저 임시 저장";
+    $("#backendBadge").textContent = state.backendAvailable ? "D1 연결" : "브라우저 임시 저장";
     $("#backendBadge").className = `badge ${state.backendAvailable ? "ok" : "warn"}`;
   } catch {
     state.backendAvailable = false;
@@ -178,10 +226,10 @@ async function checkBackend() {
   }
 }
 
-async function runAnalysis() {
+async function runAnalysis({ silent = false } = {}) {
   try {
-    if (!state.planFile && !state.attendanceFile) {
-      showToast("근무계획 또는 근태기록 파일을 먼저 넣어주세요.");
+    if (!state.planFile && !state.attendanceFile && !state.annualFile && !state.managerFiles.size && !state.workforceRows.length) {
+      if (!silent) showToast("제모스 근태기록, 매니저 파일, 연차 기록, 인력 DB 중 하나 이상을 넣어주세요.");
       return;
     }
     $("#analyzeButton").disabled = true;
@@ -190,7 +238,7 @@ async function runAnalysis() {
     for (const [manager, file] of state.managerFiles.entries()) {
       managerWorkbooks.push({ manager, workbook: await readWorkbook(file) });
     }
-    const input = {
+    state.analysis = buildAnalysis({
       route: selectedRoute(),
       targetMonth: $("#targetMonth").value,
       cutoffDate: $("#cutoffDate").value,
@@ -202,17 +250,17 @@ async function runAnalysis() {
       managerWorkbooks,
       workforceRows: state.workforceRows,
       annualLedgerRows: state.annualLedgerRows,
-      subcompLedgerRows: state.subcompLedgerRows,
-    };
-    state.analysis = buildAnalysis(input);
+      substituteGrants: state.substituteGrants,
+      webEvidenceRows: state.webEvidenceRows,
+    });
     renderAnalysis();
-    showToast("새 기준 분석이 완료됐습니다.");
+    if (!silent) showToast("분석이 완료됐습니다.");
   } catch (error) {
     console.error(error);
     showToast(error.message || "분석 중 오류가 발생했습니다.");
   } finally {
     $("#analyzeButton").disabled = false;
-    $("#analyzeButton").textContent = "근태 분석 실행";
+    $("#analyzeButton").textContent = "엑셀 생성 준비";
     syncActionState();
   }
 }
@@ -220,20 +268,18 @@ async function runAnalysis() {
 function renderAnalysis() {
   const analysis = state.analysis;
   if (!analysis) return;
-  $("#emptyState").classList.add("hidden");
-  $("#resultArea").classList.remove("hidden");
-  $("#peopleCount").textContent = analysis.stats.people;
-  $("#evidenceCount").textContent = analysis.stats.evidence;
-  $("#dayoffExcessCount").textContent = analysis.stats.dayoffExcess;
-  $("#subcompUserCount").textContent = analysis.stats.subcompUsers;
-  $("#annualIssueCount").textContent = analysis.stats.annualIssues;
-  $("#resultDescription").textContent = `${analysis.targetMonth} ${analysis.routeLabel} 기준 · 출근시간 있는 날짜는 경고 제외 · 휴무 초과자는 기본 휴무 초과자만 별도 표시`;
+  $("#peopleCount").textContent = `${analysis.stats.people}명`;
+  $("#evidenceCount").textContent = `${analysis.stats.evidence}건`;
+  $("#dayoffExcessCount").textContent = `${analysis.stats.dayoffExcess}명`;
+  $("#subcompUserCount").textContent = `${analysis.stats.subcompUsers}명`;
+  $("#resultDescription").textContent = `${analysis.targetMonth} ${analysis.routeLabel} 기준 · 웹 증빙 확인값과 대체휴무 웹 부여값을 반영`;
   renderPreview();
+  renderWebEvidenceQueue();
 }
 
 function renderPreview() {
   const analysis = state.analysis;
-  if (!analysis) return;
+  if (!analysis) return renderEmptyPreview();
   const query = ($("#searchInput").value || "").trim().toLowerCase();
   const rows = analysis.evidenceRows.filter((row) => {
     if (!query) return true;
@@ -254,52 +300,28 @@ function renderPreview() {
   `).join("") || `<tr><td colspan="9">확인 대상이 없습니다.</td></tr>`;
 }
 
-async function exportWorkbook() {
-  if (!state.analysis) {
-    showToast("먼저 분석을 실행해주세요.");
-    return;
-  }
-  try {
-    $("#exportButton").disabled = true;
-    $("#exportButton").textContent = "엑셀 생성 중...";
-    const file = await buildWorkbookFile(state.analysis);
-    downloadFile(file);
-    showToast("엑셀 파일을 생성했습니다.");
-  } catch (error) {
-    console.error(error);
-    showToast(error.message || "엑셀 생성 중 오류가 발생했습니다.");
-  } finally {
-    $("#exportButton").textContent = "엑셀 생성";
-    syncActionState();
-  }
+function renderEmptyPreview() {
+  $("#previewBody").innerHTML = `<tr><td colspan="9">아직 분석 결과가 없습니다.</td></tr>`;
+  $("#webEvidenceBody").innerHTML = `<tr><td colspan="7">분석 후 출근증빙 대상이 표시됩니다.</td></tr>`;
 }
 
 async function exportSpecificWorkbook(type) {
-  if (!state.analysis) {
-    showToast("먼저 분석을 실행해주세요.");
-    return;
-  }
+  if (!state.analysis) return showToast("먼저 분석을 실행해주세요.");
   const buttonMap = {
-    attendance: $("#exportAttendanceButton"),
-    annual: $("#exportAnnualButton"),
-    closing: $("#exportClosingButton"),
+    attendance: [$("#exportAttendanceButton"), $("#exportAttendanceButtonTop")],
+    annual: [$("#exportAnnualButton"), $("#exportAnnualButtonTop")],
+    closing: [$("#exportClosingButton"), $("#exportClosingButtonTop")],
   };
-  const labelMap = {
-    attendance: "근태 엑셀",
-    annual: "연차 엑셀",
-    closing: "월 마감 누적 파일",
-  };
-  const buildMap = {
-    attendance: buildAttendanceWorkbookFile,
-    annual: buildAnnualWorkbookFile,
-    closing: buildClosingWorkbookFile,
-  };
-  const button = buttonMap[type];
+  const labelMap = { attendance: "근태 엑셀", annual: "연차 엑셀", closing: "월 마감 누적 파일" };
+  const buildMap = { attendance: buildAttendanceWorkbookFile, annual: buildAnnualWorkbookFile, closing: buildClosingWorkbookFile };
+  const buttons = buttonMap[type] || [];
   try {
-    if (button) {
-      button.disabled = true;
-      button.textContent = "생성 중...";
-    }
+    buttons.forEach((button) => {
+      if (button) {
+        button.disabled = true;
+        button.textContent = "생성 중...";
+      }
+    });
     const file = await buildMap[type](state.analysis);
     downloadFile(file);
     showToast(`${labelMap[type]}을 생성했습니다.`);
@@ -307,23 +329,22 @@ async function exportSpecificWorkbook(type) {
     console.error(error);
     showToast(error.message || `${labelMap[type]} 생성 중 오류가 발생했습니다.`);
   } finally {
-    if (button) {
-      button.textContent = labelMap[type];
-      syncActionState();
-    }
+    buttons.forEach((button) => {
+      if (button) button.textContent = labelMap[type];
+    });
+    syncActionState();
   }
 }
 
-async function saveMasterFile(type, input, parser, stateKey, statusId) {
+async function saveMasterFile(type, input, parser, stateKey, statusId, label) {
   const file = input.files?.[0];
   if (!file) return showToast("저장할 엑셀 파일을 먼저 선택해주세요.");
   try {
-    const workbook = await readWorkbook(file);
-    const rows = parser(workbook);
+    const rows = parser(await readWorkbook(file));
     state[stateKey] = rows;
     await saveJson(type, { rows, fileName: file.name, savedAt: new Date().toISOString() });
-    $(`#${statusId}`).textContent = `${rows.length}건 저장됨 · ${file.name}`;
-    showToast("저장했습니다.");
+    $(`#${statusId}`).textContent = `${scopeText()} 기준 ${rows.length}건 저장됨 · ${file.name}`;
+    showToast(`${label}을 월별로 저장했습니다.`);
   } catch (error) {
     console.error(error);
     showToast(error.message || "저장 중 오류가 발생했습니다.");
@@ -335,7 +356,7 @@ async function loadMasterData(type, stateKey, statusId, label) {
     const data = await loadJson(type);
     const rows = data?.rows || [];
     state[stateKey] = rows;
-    $(`#${statusId}`).textContent = rows.length ? `${rows.length}건 불러옴 · ${data.fileName || label}` : `등록된 ${label} 없음`;
+    $(`#${statusId}`).textContent = rows.length ? `${scopeText()} 기준 ${rows.length}건 불러옴 · ${data.fileName || label}` : `${scopeText()} 기준 등록된 ${label} 없음`;
     showToast(`${label}을 불러왔습니다.`);
   } catch (error) {
     console.error(error);
@@ -343,63 +364,123 @@ async function loadMasterData(type, stateKey, statusId, label) {
   }
 }
 
-async function saveSnapshot() {
-  if (!state.analysis) return;
-  const name = $("#snapshotName").value.trim() || `${state.analysis.targetMonth} ${ROUTE_LABELS[state.analysis.route]} 중간 저장`;
-  const snapshot = {
+async function saveSubstituteGrant(event) {
+  event.preventDefault();
+  const grant = {
     id: crypto.randomUUID(),
-    name,
-    targetMonth: state.analysis.targetMonth,
-    route: state.analysis.route,
-    cutoffDate: $("#cutoffDate").value,
-    savedAt: new Date().toISOString(),
-    analysis: state.analysis,
+    route: $("#substituteRoute").value,
+    grantMonth: $("#substituteGrantMonth").value,
+    grantedDays: Number($("#substituteGrantDays").value || 0),
+    validFrom: $("#substituteValidFrom").value,
+    validTo: $("#substituteValidTo").value,
+    note: $("#substituteGrantNote").value.trim(),
+    createdAt: new Date().toISOString(),
   };
-  const current = (await loadJson("snapshots"))?.rows || [];
-  current.unshift(snapshot);
-  await saveJson("snapshots", { rows: current.slice(0, 20), savedAt: new Date().toISOString() });
-  $("#snapshotName").value = "";
-  await loadSnapshots();
-  showToast("중간 저장했습니다.");
+  if (!grant.grantMonth || !grant.grantedDays) return showToast("발생 월과 부여 일수를 입력해주세요.");
+  state.substituteGrants = [grant, ...state.substituteGrants];
+  await saveJson("substitute-grants", { rows: state.substituteGrants, savedAt: new Date().toISOString() });
+  $("#substituteGrantNote").value = "";
+  renderSubstituteGrants();
+  state.analysis = null;
+  syncActionState();
+  showToast("대체휴무 부여 내역을 저장했습니다.");
 }
 
-async function loadSnapshots() {
-  const data = await loadJson("snapshots");
-  state.snapshots = data?.rows || [];
-  const list = $("#snapshotList");
-  list.innerHTML = "";
-  if (!state.snapshots.length) {
-    list.innerHTML = `<div class="snapshot-item"><span>저장된 중간 결과가 없습니다.</span></div>`;
+async function loadSubstituteGrants() {
+  const data = await loadJson("substitute-grants");
+  state.substituteGrants = data?.rows || [];
+  renderSubstituteGrants();
+  showToast("대체휴무 부여 내역을 불러왔습니다.");
+}
+
+function renderSubstituteGrants() {
+  $("#grantCount").textContent = `${state.substituteGrants.length}건`;
+  const rows = state.substituteGrants;
+  $("#substituteGrantBody").innerHTML = rows.map((row) => `
+    <tr>
+      <td>${escapeHtml(ROUTE_LABELS[row.route] || row.route)}</td>
+      <td>${escapeHtml(row.grantMonth)}</td>
+      <td>${escapeHtml(daysText(row.grantedDays))}</td>
+      <td>${escapeHtml([row.validFrom, row.validTo].filter(Boolean).join(" ~ "))}</td>
+      <td>${escapeHtml(row.note)}</td>
+      <td><button class="text-button danger-text" data-delete-grant="${row.id}" type="button">삭제</button></td>
+    </tr>
+  `).join("") || `<tr><td colspan="6">등록된 대체휴무 부여 내역이 없습니다.</td></tr>`;
+  $$("[data-delete-grant]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      state.substituteGrants = state.substituteGrants.filter((row) => row.id !== button.dataset.deleteGrant);
+      await saveJson("substitute-grants", { rows: state.substituteGrants, savedAt: new Date().toISOString() });
+      renderSubstituteGrants();
+      state.analysis = null;
+      syncActionState();
+    });
+  });
+}
+
+function renderWebEvidenceQueue() {
+  const rows = state.analysis?.evidenceRows || [];
+  if (!rows.length) {
+    $("#webEvidenceBody").innerHTML = `<tr><td colspan="7">분석 후 출근증빙 대상이 표시됩니다.</td></tr>`;
     return;
   }
-  for (const item of state.snapshots) {
-    const node = document.createElement("div");
-    node.className = "snapshot-item";
-    node.innerHTML = `
-      <div>
-        <strong>${escapeHtml(item.name)}</strong>
-        <small>${escapeHtml(item.targetMonth)} · ${escapeHtml(ROUTE_LABELS[item.route] || item.route)} · ${formatDateTime(item.savedAt)}</small>
-      </div>
-      <div class="button-row">
-        <button class="btn secondary" type="button" data-load="${item.id}">불러오기</button>
-        <button class="btn danger" type="button" data-delete="${item.id}">삭제</button>
-      </div>
+  $("#webEvidenceBody").innerHTML = rows.slice(0, 300).map((row) => {
+    const saved = findWebEvidence(row.employeeId, row.date);
+    return `
+      <tr data-evidence-key="${escapeHtml(`${row.employeeId}|${row.date}`)}">
+        <td>${escapeHtml(row.employeeName)}</td>
+        <td>${escapeHtml(row.employeeId)}</td>
+        <td>${escapeHtml(row.date)}</td>
+        <td>${escapeHtml(row.issue)}</td>
+        <td>
+          <select class="input compact-select" data-evidence-status>
+            ${["", "출근확인", "휴무", "연차", "오전반차", "오후반차", "공가", "휴가", "경조", "대체휴무", "보상휴가", "제외"].map((value) => `<option value="${value}" ${saved?.status === value ? "selected" : ""}>${value || "선택"}</option>`).join("")}
+          </select>
+        </td>
+        <td><input class="input compact-input" data-evidence-note value="${escapeHtml(saved?.note || "")}" /></td>
+        <td><button class="btn secondary" data-save-evidence type="button">저장</button></td>
+      </tr>
     `;
-    node.querySelector("[data-load]").addEventListener("click", () => {
-      state.analysis = item.analysis;
-      $("#targetMonth").value = item.targetMonth;
-      $$(`input[name="route"]`).forEach((input) => { input.checked = input.value === item.route; });
-      renderAnalysis();
-      syncActionState();
-      switchView("analysis");
-    });
-    node.querySelector("[data-delete]").addEventListener("click", async () => {
-      const rows = state.snapshots.filter((snapshot) => snapshot.id !== item.id);
-      await saveJson("snapshots", { rows, savedAt: new Date().toISOString() });
-      await loadSnapshots();
-    });
-    list.appendChild(node);
-  }
+  }).join("");
+  $$("[data-save-evidence]").forEach((button) => button.addEventListener("click", () => saveWebEvidenceRow(button.closest("tr"))));
+}
+
+async function saveWebEvidenceRow(rowNode) {
+  const [employeeId, date] = rowNode.dataset.evidenceKey.split("|");
+  const source = state.analysis?.evidenceRows.find((row) => row.employeeId === employeeId && row.date === date);
+  const status = rowNode.querySelector("[data-evidence-status]").value;
+  const note = rowNode.querySelector("[data-evidence-note]").value.trim();
+  if (!status) return showToast("처리값을 선택해주세요.");
+  const item = {
+    employeeId,
+    employeeName: source?.employeeName || "",
+    date,
+    status,
+    note,
+    savedAt: new Date().toISOString(),
+  };
+  state.webEvidenceRows = state.webEvidenceRows.filter((row) => !(row.employeeId === employeeId && row.date === date));
+  state.webEvidenceRows.push(item);
+  await saveJson("web-evidence", { rows: state.webEvidenceRows, savedAt: new Date().toISOString() });
+  showToast("웹 출근증빙을 저장했습니다. 재분석에 바로 반영합니다.");
+  await runAnalysis({ silent: true });
+}
+
+async function loadWebEvidenceData() {
+  const data = await loadJson("web-evidence");
+  state.webEvidenceRows = data?.rows || [];
+  renderWebEvidenceQueue();
+  showToast("웹 출근증빙 저장값을 불러왔습니다.");
+}
+
+async function clearWebEvidenceData() {
+  state.webEvidenceRows = [];
+  await saveJson("web-evidence", { rows: [], savedAt: new Date().toISOString() });
+  renderWebEvidenceQueue();
+  showToast("현재 경로·월의 웹 출근증빙을 초기화했습니다.");
+}
+
+function findWebEvidence(employeeId, date) {
+  return state.webEvidenceRows.find((row) => row.employeeId === employeeId && row.date === date);
 }
 
 async function saveJson(type, payload) {
@@ -429,8 +510,7 @@ async function loadJson(type) {
 }
 
 function storeKey(type) {
-  const scoped = ["snapshots"].includes(type) ? "global" : `${selectedRoute()}|${$("#targetMonth").value}`;
-  return `attendance-clean-v1|${type}|${scoped}`;
+  return `attendance-clean-v4|${type}|${selectedRoute()}|${$("#targetMonth").value}`;
 }
 
 function clearManagerFiles() {
@@ -444,32 +524,30 @@ function clearManagerFiles() {
 
 function resetAnalysisInputs() {
   for (const key of ["planFile", "attendanceFile", "annualFile", "evidenceFile", "closingFile"]) state[key] = null;
-  for (const inputId of ["planFile", "attendanceFile", "annualFile", "evidenceFile", "closingFile"]) $(`#${inputId}`).value = "";
+  for (const inputId of ["planFile", "attendanceFile", "annualFile", "evidenceFile", "closingFile"]) {
+    const input = $(`#${inputId}`);
+    if (input) input.value = "";
+  }
   $("#planFileName").textContent = "근무계획 파일 선택";
   $("#attendanceFileName").textContent = "근태기록 파일 선택";
   $("#annualFileName").textContent = "연차 승인·반려 양식 선택";
   $("#evidenceFileName").textContent = "출근증빙·휴무확인 O 파일 선택";
   $("#closingFileName").textContent = "전월 연차 마감 파일 선택";
   state.analysis = null;
-  $("#resultArea").classList.add("hidden");
-  $("#emptyState").classList.remove("hidden");
+  renderEmptyPreview();
   syncActionState();
 }
 
 function syncManagerSummary() {
-  const count = state.managerFiles.size;
-  $("#managerSummary").textContent = count ? `등록된 매니저 수정본 ${count}개` : "등록된 매니저 수정본 없음";
+  $("#managerSummary").textContent = state.managerFiles.size ? `등록된 매니저 증빙 파일 ${state.managerFiles.size}개` : "등록된 매니저 수정본 없음";
 }
 
 function syncActionState() {
-  $("#exportButton").disabled = !state.analysis;
-  $("#exportAttendanceButton").disabled = !state.analysis;
-  $("#exportAnnualButton").disabled = !state.analysis;
-  $("#exportClosingButton").disabled = !state.analysis;
-  $("#exportAttendanceButtonTop").disabled = !state.analysis;
-  $("#exportAnnualButtonTop").disabled = !state.analysis;
-  $("#exportClosingButtonTop").disabled = !state.analysis;
-  $("#saveSnapshotButton").disabled = !state.analysis;
+  const hasAnalysis = Boolean(state.analysis);
+  for (const id of ["exportAttendanceButton", "exportAnnualButton", "exportClosingButton", "exportAttendanceButtonTop", "exportAnnualButtonTop", "exportClosingButtonTop"]) {
+    const button = $(`#${id}`);
+    if (button) button.disabled = !hasAnalysis;
+  }
 }
 
 function downloadFile(file) {
@@ -491,19 +569,21 @@ function showToast(message) {
   showToast.timer = setTimeout(() => toast.classList.remove("show"), 3000);
 }
 
+function scopeText() {
+  return `${ROUTE_LABELS[selectedRoute()] || selectedRoute()} ${$("#targetMonth").value}`;
+}
+
+function daysText(value) {
+  const num = Number(value || 0);
+  return Number.isInteger(num) ? `${num}일` : `${num}일`;
+}
+
 function isExcelFile(file) {
   return /\.(xlsx|xls|xlsb)$/i.test(file?.name || "");
 }
 
 function toISODate(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-}
-
-function formatDateTime(value) {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
 function escapeHtml(value) {

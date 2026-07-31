@@ -25,9 +25,9 @@ const ATTENDANCE_REQUIRED = new Set(["근무", "근무A", "근무B", "근무C", 
 const HALF_DAY_STATUSES = new Set(["오전반차", "오후반차"]);
 const APPROVAL_REQUIRED = new Set(["연차", "오전반차", "오후반차", "출산휴가", "육아휴직"]);
 const BASIC_DAYOFF = new Set(["휴무", "휴무(공백)"]);
-const MANAGER_ALLOWED = new Set(["휴무", "연차", "오전반차", "오후반차", "출산휴가", "육아휴직", "공가", "경조", "대체휴무", "보상휴가"]);
+const MANAGER_ALLOWED = new Set(["휴무", "연차", "오전반차", "오후반차", "출산휴가", "육아휴직", "공가", "휴가", "경조", "대체휴무", "보상휴가"]);
 const SUBCOMP_STATUSES = new Set(["대체휴무", "보상휴가"]);
-const STATUS_ORDER = ["휴무", "연차", "오전반차", "오후반차", "출산휴가", "육아휴직", "공가", "경조", "대체휴무", "보상휴가"];
+const STATUS_ORDER = ["휴무", "연차", "오전반차", "오후반차", "출산휴가", "육아휴직", "공가", "휴가", "경조", "대체휴무", "보상휴가"];
 
 const STYLE = {
   title: { font: { bold: true, color: { rgb: "FFFFFF" }, sz: 15 }, fill: { fgColor: { rgb: "123B72" } }, alignment: { vertical: "center" } },
@@ -168,13 +168,23 @@ export function buildAnalysis(input) {
   const planRows = parsePlanWorkbook(input.planWorkbook, month);
   const attendance = parseAttendanceWorkbook(input.attendanceWorkbook, month);
   const annual = parseAnnualWorkbook(input.annualWorkbook, month);
-  const evidence = parseEvidenceWorkbook(input.evidenceWorkbook, month);
+  const evidence = mergeEvidenceData(
+    parseEvidenceWorkbook(input.evidenceWorkbook, month),
+    parseWebEvidenceRows(input.webEvidenceRows || [], month),
+  );
   const manager = parseManagerWorkbooks(input.managerWorkbooks || [], month);
   const closingData = input.closingData || emptyClosingData();
   const workforce = (input.workforceRows || []).map(normalizeMember).filter((row) => row.employeeId || row.employeeName);
   const annualLedger = input.annualLedgerRows || [];
-  const subcompLedger = input.subcompLedgerRows || [];
-  const people = buildPeople({ route, planRows, attendanceRows: attendance.rows, workforce });
+  const substituteGrants = input.substituteGrants || [];
+  const people = buildPeople({
+    route,
+    planRows,
+    attendanceRows: attendance.rows,
+    annualRows: annual.rows,
+    managerRows: manager.rows,
+    workforce,
+  });
   const dayoffAllowance = getDayoffAllowance(route, month);
 
   const rows = [];
@@ -229,7 +239,12 @@ export function buildAnalysis(input) {
 
     const dayoffExcess = Math.max(0, roundHalf(basicDayoffCount - dayoffAllowance));
     markDayoffExcessDates(daily, dayoffExcess);
-    const subcompSummary = resolveSubcompLedger(person.employeeId, subcompLedger);
+    const grantSummary = resolveSubstituteGrants(person, substituteGrants, route, month);
+    const subcompSummary = {
+      available: grantSummary.available,
+      carryover: 0,
+      grants: grantSummary.grants,
+    };
     const closingPerson = resolveClosingPerson(person.employeeId, closingData.people);
     const annualLedgerRow = resolveAnnualLedger(person.employeeId, annualLedger, closingPerson);
 
@@ -244,6 +259,8 @@ export function buildAnalysis(input) {
       subcompAvailable: subcompSummary.available,
       subcompCarryover: subcompSummary.carryover,
       subcompShortage: Math.max(0, roundHalf(subcompEvents.reduce((sum, row) => sum + row.amount, 0) - subcompSummary.available)),
+      substituteGrantNotes: subcompSummary.grants.map((grant) => grant.note).filter(Boolean).join(", "),
+      substituteGrantPeriod: subcompSummary.grants.map((grant) => [grant.validFrom, grant.validTo].filter(Boolean).join("~")).filter(Boolean).join(", "),
       annualEvents,
       annualLedger: annualLedgerRow,
       closingPerson,
@@ -297,6 +314,9 @@ export async function buildAttendanceWorkbookFile(analysis) {
   appendMainSheet(workbook, "근태 시트", analysis, "manager");
   appendDayoffExcessSheet(workbook, analysis);
   appendSubcompSheet(workbook, analysis);
+  appendAnnualUserSheet(workbook, analysis);
+  appendAnnualCumulativeSheet(workbook, analysis);
+  appendAnnualPromotionSheet(workbook, analysis);
   appendOtherStatusSheet(workbook, analysis);
   appendAttendanceCheckSheet(workbook, analysis);
   appendRawSheet(workbook, "출근 기록", attendanceRawRows(analysis));
@@ -512,6 +532,40 @@ function parseEvidenceWorkbook(workbook, month) {
   return { map, rows: rowsOut };
 }
 
+function parseWebEvidenceRows(rows, month) {
+  const map = new Map();
+  const rowsOut = [];
+  for (const row of rows || []) {
+    const employeeId = normalizeId(row.employeeId || row["사번"]);
+    const date = normalizeDateText(row.date || row["발생일"] || row["일자"], month);
+    const status = normalizeEvidenceOverrideStatus(row.status || row["처리값"] || row["확인값"]);
+    if (!employeeId || !date || !date.startsWith(month.key) || !status) continue;
+    const item = {
+      employeeId,
+      employeeName: text(row.employeeName || row["이름"]),
+      date,
+      status: status === "제외" ? "" : status,
+      confirmed: true,
+      rawStatus: status,
+      note: text(row.note || row["메모"]),
+      source: "web",
+    };
+    rowsOut.push(item);
+    map.set(`${employeeId}|${date}`, item);
+  }
+  return { map, rows: rowsOut };
+}
+
+function mergeEvidenceData(fileEvidence, webEvidence) {
+  const map = new Map(fileEvidence.map);
+  const rows = [...fileEvidence.rows];
+  for (const row of webEvidence.rows) {
+    map.set(`${row.employeeId}|${row.date}`, row);
+    rows.push(row);
+  }
+  return { map, rows };
+}
+
 function parseManagerWorkbooks(managerWorkbooks, month) {
   const map = new Map();
   const rows = [];
@@ -550,7 +604,12 @@ function parseManagerWorkbook(managerName, workbook, month) {
       const applied = MANAGER_ALLOWED.has(normalized) && !attendanceLike;
       if (!applied && !attendanceLike) continue;
       parsed.push({
+        regionalManager: "",
         manager: managerName,
+        region: text(pick(row, indexes.region)),
+        subRegion: text(pick(row, indexes.subRegion)),
+        storeCode: text(pick(row, indexes.storeCode)),
+        storeName: text(pick(row, indexes.storeName)),
         employeeId,
         employeeName: text(pick(row, indexes.employeeName)),
         date,
@@ -662,7 +721,7 @@ function extractKoreanMonthFromSheetName(sheetName) {
   return matches.length ? matches[matches.length - 1] : 0;
 }
 
-function buildPeople({ route, planRows, attendanceRows, workforce }) {
+function buildPeople({ route, planRows, attendanceRows, annualRows, managerRows, workforce }) {
   const people = new Map();
   const workforceById = new Map();
   for (const member of workforce) {
@@ -681,12 +740,25 @@ function buildPeople({ route, planRows, attendanceRows, workforce }) {
     if (!id || people.has(id)) continue;
     people.set(id, normalizePerson(route, { ...member, plan: null }));
   }
+  for (const row of managerRows || []) addPersonFromSource(people, route, workforceById, row);
   for (const row of attendanceRows) {
-    const id = normalizeId(row.employeeId);
-    if (!id || people.has(id)) continue;
-    people.set(id, normalizePerson(route, { employeeId: id, employeeName: row.employeeName, plan: null }));
+    addPersonFromSource(people, route, workforceById, row);
   }
+  for (const row of annualRows || []) addPersonFromSource(people, route, workforceById, row);
   return [...people.values()];
+}
+
+function addPersonFromSource(people, route, workforceById, row) {
+  const id = normalizeId(row.employeeId);
+  if (!id || people.has(id)) return;
+  const member = workforceById.get(id) || normalizeMember(row);
+  people.set(id, normalizePerson(route, {
+    ...member,
+    ...blankToFallback(normalizeMember(row), member),
+    employeeId: id,
+    employeeName: text(row.employeeName) || member.employeeName,
+    plan: null,
+  }));
 }
 
 function resolveDailyStatus({ date, day, rawPlan, planStatus, attendance, annualInfo, managerInfo, evidenceInfo }) {
@@ -956,7 +1028,7 @@ function appendAttendanceCheckSheet(workbook, analysis) {
 function appendDayoffExcessSheet(workbook, analysis) {
   const rows = [
     [`${analysis.month.year}년 ${analysis.month.monthNo}월 휴무 초과자`],
-    ["상담사근태_관리자반영 기준으로 기본 휴무 가능 개수를 초과한 사람만 표시합니다. 대체ㆍ보상 잔여 개수는 다음 시트에서 확인합니다."],
+    ["상담사근태_관리자반영 기준으로 기본 휴무 가능 개수를 초과한 사람만 표시합니다. 대체휴무 잔여 개수는 다음 시트에서 확인합니다."],
     ["휴무 초과자", analysis.dayoffExcessRows.length],
     [],
     ["No", "지역장", "매니저", "지역", "매장명", "이름", "사번", "휴무 가능 개수", "당월 휴무 사용 개수", "휴무 초과 개수", "초과 휴무일", "비고"],
@@ -985,11 +1057,11 @@ function appendDayoffExcessSheet(workbook, analysis) {
 
 function appendSubcompSheet(workbook, analysis) {
   const rows = [
-    [`${analysis.month.year}년 ${analysis.month.monthNo}월 대체ㆍ보상`],
-    ["전 인원 기준입니다. 좌측에 당월 휴무 초과 여부를 표시하고, 대체ㆍ보상 사용 가능·사용·이월·초과 여부를 분리해 확인합니다."],
-    ["대체ㆍ보상 사용자", analysis.subcompUserRows.length],
+    [`${analysis.month.year}년 ${analysis.month.monthNo}월 대체 사용자`],
+    ["전 인원 기준입니다. 좌측에 당월 휴무 초과 여부를 표시하고, 웹에서 부여한 대체휴무 사용 가능·사용·이월·초과 여부를 분리해 확인합니다."],
+    ["대체 사용자", analysis.subcompUserRows.length],
     [],
-    ["No", "지역장", "매니저", "지역", "매장명", "이름", "사번", "당월 휴무 초과자", "대체ㆍ보상 사용 가능 개수", "당월 사용 개수", "이월 개수", "초과 여부", "사용일자"],
+    ["No", "지역장", "매니저", "지역", "매장명", "이름", "사번", "당월 휴무 초과자", "대체 사용 가능 개수", "당월 사용 개수", "이월 개수", "초과 여부", "사용 가능 기간", "부여 비고", "사용일자"],
   ];
   analysis.people.forEach((row, index) => rows.push([
     index + 1,
@@ -1004,15 +1076,17 @@ function appendSubcompSheet(workbook, analysis) {
     row.subcompUsed,
     row.subcompCarryover,
     row.subcompShortage > 0 ? `초과 ${daysText(row.subcompShortage)}` : "정상",
+    row.substituteGrantPeriod,
+    row.substituteGrantNotes,
     row.subcompEvents.map((event) => `${event.date} ${event.status}`).join(", "),
   ]));
-  const sheet = makeReportSheet(rows, 4, { titleCols: 12 });
-  sheet["!cols"] = [{ wch: 6 }, { wch: 11 }, { wch: 11 }, { wch: 9 }, { wch: 18 }, { wch: 10 }, { wch: 12 }, { wch: 18 }, { wch: 20 }, { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 44 }];
+  const sheet = makeReportSheet(rows, 4, { titleCols: 14 });
+  sheet["!cols"] = [{ wch: 6 }, { wch: 11 }, { wch: 11 }, { wch: 9 }, { wch: 18 }, { wch: 10 }, { wch: 12 }, { wch: 18 }, { wch: 18 }, { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 24 }, { wch: 24 }, { wch: 44 }];
   for (let r = 5; r < rows.length; r += 1) {
     if (text(rows[r][7])) setCellStyle(sheet, r, 7, STYLE.issue);
     if (String(rows[r][11]).startsWith("초과")) setCellStyle(sheet, r, 11, STYLE.issue);
   }
-  XLSX.utils.book_append_sheet(workbook, sheet, "대체ㆍ보상");
+  XLSX.utils.book_append_sheet(workbook, sheet, "대체 사용자");
 }
 
 function appendOtherStatusSheet(workbook, analysis) {
@@ -1209,7 +1283,7 @@ function appendAnnualCumulativeSheet(workbook, analysis) {
 
 function appendAnnualPromotionSheet(workbook, analysis) {
   const rows = [
-    [`${analysis.month.year}년 ${analysis.month.monthNo}월 연차 촉진`],
+    [`${analysis.month.year}년 ${analysis.month.monthNo}월 연차 촉진 관리`],
     ["인력 DB와 연차 누적 DB를 기준으로 촉진 대상 확인용으로 생성합니다. 잔여 연차 기준은 관리자가 최종 확인합니다."],
     [],
     ["No", "지역장", "매니저", "지역", "매장명", "이름", "사번", "입사일", "연차 잔여", "당월 사용", "촉진 확인", "비고"],
@@ -1233,7 +1307,7 @@ function appendAnnualPromotionSheet(workbook, analysis) {
   });
   const sheet = makeReportSheet(rows, 3, { titleCols: 11 });
   sheet["!cols"] = [{ wch: 6 }, { wch: 11 }, { wch: 11 }, { wch: 9 }, { wch: 18 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 14 }, { wch: 28 }];
-  XLSX.utils.book_append_sheet(workbook, sheet, "연차 촉진");
+  XLSX.utils.book_append_sheet(workbook, sheet, "연차 촉진 관리");
 }
 
 function appendClosingPeopleSheet(workbook, analysis) {
@@ -1402,7 +1476,7 @@ function dailyCellStyle(status, daily) {
   if (daily.dayoffExcessDate) return STYLE.issue;
   if (daily.issue) return STYLE.issue;
   if (BASIC_DAYOFF.has(status)) return STYLE.dayoff;
-  if (isAnnualStatus(status) || ["공가", "경조", "출산휴가", "육아휴직"].includes(status)) return STYLE.leave;
+  if (isAnnualStatus(status) || ["공가", "휴가", "경조", "출산휴가", "육아휴직"].includes(status)) return STYLE.leave;
   if (SUBCOMP_STATUSES.has(status)) return STYLE.subcomp;
   if (status === "출근확인") return STYLE.success;
   if (isMissingStatus(status)) return STYLE.issue;
@@ -1647,6 +1721,7 @@ function normalizeStatus(value) {
   if (raw.includes("보상")) return "보상휴가";
   if (raw.includes("연차")) return "연차";
   if (raw.includes("공가")) return "공가";
+  if (raw.includes("휴가")) return "휴가";
   if (raw.includes("경조")) return "경조";
   if (raw.includes("휴무")) return "휴무";
   if (raw.includes("교육")) return "교육";
@@ -1747,12 +1822,37 @@ function statusAmount(rawValue) {
   return 1;
 }
 
-function resolveSubcompLedger(employeeId, rows) {
-  const row = findByEmployeeId(rows, employeeId);
-  if (!row) return { available: 0, carryover: 0 };
-  const available = numberValue(row["대체ㆍ보상 사용 가능 개수"] ?? row["사용 가능 개수"] ?? row["사용가능"] ?? row.available ?? row.availableDays);
-  const carryover = numberValue(row["이월 개수"] ?? row["이월"] ?? row.carryover ?? row.carryoverDays);
-  return { available, carryover };
+function resolveSubstituteGrants(person, grants, route, month) {
+  const matched = (grants || []).filter((grant) => {
+    if (grant.route && grant.route !== route) return false;
+    if (grant.grantMonth && grant.grantMonth !== month.key) return false;
+    if (grant.employeeId && normalizeId(grant.employeeId) !== person.employeeId) return false;
+    if (grant.manager && text(grant.manager) !== text(person.manager)) return false;
+    if (grant.storeName && text(grant.storeName) !== text(person.storeName)) return false;
+    return true;
+  });
+  return {
+    available: roundHalf(matched.reduce((sum, grant) => sum + numberValue(grant.grantedDays ?? grant.days ?? grant.available), 0)),
+    grants: matched,
+  };
+}
+
+function normalizeEvidenceOverrideStatus(value) {
+  const raw = text(value).replace(/\s+/g, "");
+  if (!raw) return "";
+  if (["제외", "무시", "삭제"].includes(raw)) return "제외";
+  if (raw.includes("출근")) return "출근확인";
+  if (raw.includes("휴무")) return "휴무";
+  if (raw.includes("연차")) return "연차";
+  if (raw.includes("오전반차")) return "오전반차";
+  if (raw.includes("오후반차")) return "오후반차";
+  if (raw.includes("공가")) return "공가";
+  if (raw.includes("휴가")) return "휴가";
+  if (raw.includes("경조")) return "경조";
+  if (raw.includes("대체")) return "대체휴무";
+  if (raw.includes("보상")) return "보상휴가";
+  const normalized = normalizeStatus(value);
+  return MANAGER_ALLOWED.has(normalized) || normalized === "출근확인" ? normalized : "";
 }
 
 function resolveAnnualLedger(employeeId, rows, closingPerson = null) {

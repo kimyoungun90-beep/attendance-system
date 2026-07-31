@@ -4,268 +4,355 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#123b72" />
-  <title>전자랜드 · 홈플러스 근태 관리 Clean</title>
-  <link rel="stylesheet" href="./assets/styles.css?v=clean1" />
+  <title>근태 마감 관리 Clean v4</title>
+  <link rel="stylesheet" href="./assets/styles.css?v=clean4" />
 </head>
 <body>
   <div class="app-shell">
     <header class="topbar">
       <div>
-        <p class="eyebrow">ATTENDANCE CLEAN REBUILD</p>
-        <h1>전자랜드 · 홈플러스 근태 관리 <span class="version-tag">clean v3</span></h1>
+        <p class="eyebrow">ATTENDANCE CLEAN MANAGEMENT</p>
+        <h1>근태 마감 관리 <span class="version-tag">clean v4</span></h1>
       </div>
       <div class="topbar-actions">
         <span id="backendBadge" class="badge neutral">저장소 확인 중</span>
+        <button id="exportAttendanceButton" class="btn primary" type="button" disabled>근태 엑셀</button>
+        <button id="exportAnnualButton" class="btn secondary light" type="button" disabled>연차 엑셀</button>
+        <button id="exportClosingButton" class="btn secondary light" type="button" disabled>월마감 누적</button>
       </div>
     </header>
 
-    <nav class="tabs" aria-label="근태 관리 메뉴">
-      <button class="tab active" data-view="analysis" type="button">근태 종합 점검</button>
-      <button class="tab" data-view="manager" type="button">매니저 수정본</button>
-      <button class="tab" data-view="masters" type="button">인력·연차 DB</button>
-      <button class="tab" data-view="snapshots" type="button">중간 저장</button>
-    </nav>
+    <div class="workspace-layout">
+      <aside class="sidebar">
+        <p class="side-label">MAIN MENU</p>
+        <nav class="tabs" aria-label="근태 관리 메뉴">
+          <button class="tab active" data-view="dashboard" type="button">월 마감 대시보드</button>
+          <button class="tab" data-view="substitute" type="button">대체 휴무 부여</button>
+          <button class="tab" data-view="annual" type="button">연차 관리</button>
+          <button class="tab" data-view="workforce" type="button">인력 매칭</button>
+          <button class="tab" data-view="monthly" type="button">월 마감 누적 관리</button>
+        </nav>
+        <div class="month-card">
+          <strong>이번 달 기준</strong>
+          <span id="routeHelp">기본 휴무 기준 확인 중</span>
+        </div>
+      </aside>
 
-    <main>
-      <section id="analysisView" class="view active">
-        <div class="layout-grid">
-          <aside class="panel setup-panel">
-            <div class="panel-heading">
-              <div>
-                <span class="step-label">MONTHLY CHECK</span>
-                <h2>새 기준 분석</h2>
+      <main>
+        <section id="dashboardView" class="view active">
+          <div class="dashboard-head">
+            <div>
+              <h2>월 마감 대시보드</h2>
+              <p class="muted">근태 원본, 매니저 증빙, 누적 DB를 한 화면에서 확인하고 월 마감 엑셀을 생성합니다.</p>
+            </div>
+            <div class="dashboard-actions">
+              <input id="targetMonth" class="input month-input" type="month" />
+              <select id="routeSelect" class="input route-select">
+                <option value="electroland">전자랜드</option>
+                <option value="homeplus">홈플러스</option>
+              </select>
+              <input id="cutoffDate" class="input hidden-input" type="date" />
+              <button id="analyzeButton" class="btn primary" type="button">엑셀 생성 준비</button>
+              <button id="resetButton" class="btn secondary" type="button">초기화</button>
+            </div>
+          </div>
+
+          <div class="metric-grid dashboard-metrics">
+            <article class="metric-card"><span>대체 휴무 부여</span><strong id="grantCount">0건</strong><small>웹에서 직접 부여</small></article>
+            <article class="metric-card danger-card"><span>출근증빙 대상</span><strong id="evidenceCount">0건</strong><small>증빙 확인 필요</small></article>
+            <article class="metric-card warning-card"><span>휴무 초과자</span><strong id="dayoffExcessCount">0명</strong><small>기본 휴무 초과</small></article>
+            <article class="metric-card"><span>인력 매칭</span><strong id="peopleCount">0명</strong><small>사번·매장·매니저</small></article>
+            <article class="metric-card"><span>월 마감 누적</span><strong id="subcompUserCount">0명</strong><small>대체 사용·연차 잔여</small></article>
+          </div>
+
+          <div class="main-grid">
+            <section class="panel">
+              <div class="panel-heading">
+                <div>
+                  <h2>이번 달 마감 흐름</h2>
+                  <p class="muted">자동 추정보다 증빙과 누적 DB 기준으로 확정하는 흐름입니다.</p>
+                </div>
               </div>
-              <button id="resetButton" class="text-button" type="button">초기화</button>
-            </div>
-
-            <div class="field-group">
-              <label class="field-label">경로</label>
-              <div class="company-toggle" role="radiogroup" aria-label="경로 선택">
-                <label><input type="radio" name="route" value="homeplus" checked /><span>홈플러스</span></label>
-                <label><input type="radio" name="route" value="electroland" /><span>전자랜드</span></label>
+              <div class="flow-row">
+                <div class="flow-step"><b>1</b><strong>원본 업로드</strong><small>계획 · 근태</small></div>
+                <div class="flow-step"><b>2</b><strong>수정본 반영</strong><small>매니저별</small></div>
+                <div class="flow-step"><b>3</b><strong>증빙 확인</strong><small>출근 · 반차</small></div>
+                <div class="flow-step success"><b>4</b><strong>마감</strong><small>누적 저장</small></div>
               </div>
-              <p id="routeHelp" class="field-help">홈플러스 기본 휴무는 월 6회입니다.</p>
-            </div>
+            </section>
 
-            <div class="two-cols">
-              <div class="field-group">
-                <label class="field-label" for="targetMonth">대상 월</label>
-                <input id="targetMonth" class="input" type="month" />
+            <aside class="panel quick-panel">
+              <div class="panel-heading compact">
+                <h2>빠른 작업</h2>
               </div>
-              <div class="field-group">
-                <label class="field-label" for="cutoffDate">비교 기준일</label>
-                <input id="cutoffDate" class="input" type="date" />
-              </div>
-            </div>
+              <button class="quick-button" data-jump="workforce" type="button">근태기록 · 선택 근무계획 업로드</button>
+              <button class="quick-button" data-jump="workforce" type="button">매니저별 증빙 파일 등록</button>
+              <button class="quick-button" data-jump="substitute" type="button">대체휴무 웹 부여</button>
+              <button class="quick-button" data-jump="monthly" type="button">월 마감 누적 파일 생성</button>
+            </aside>
+          </div>
 
-            <div class="rule-box">
-              <strong>이번 클린 기준</strong>
-              <p>출근시간이 있으면 무조건 정상 출근 표시이며 빨간색으로 칠하지 않습니다.</p>
-              <p>관리자 수정본은 휴무·연차·반차·공가·경조·대체·보상만 반영하고, 출근·근무·시간값은 제외합니다.</p>
-              <p>출근증빙·휴무확인에서 확정한 값은 빨간색 경고를 다시 붙이지 않습니다.</p>
-              <p>휴무 초과자는 기본 휴무 사용 개수가 회사 기준을 초과한 사람만 따로 표시합니다.</p>
-            </div>
-
-            <div class="field-group">
-              <label class="field-label">근무계획 엑셀</label>
-              <label class="dropzone" id="planDropzone">
-                <input id="planFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
-                <span class="drop-icon">P</span>
-                <strong id="planFileName">근무계획 파일 선택</strong>
-                <small>사번·이름·매장명·01일~31일 열을 자동 인식합니다.</small>
-              </label>
-            </div>
-
-            <div class="field-group">
-              <label class="field-label">근태기록 엑셀</label>
-              <label class="dropzone" id="attendanceDropzone">
-                <input id="attendanceFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
-                <span class="drop-icon">A</span>
-                <strong id="attendanceFileName">근태기록 파일 선택</strong>
-                <small>근무일자·사번·출근시간 열을 자동 인식합니다.</small>
-              </label>
-            </div>
-
-            <div class="field-group optional-upload">
-              <label class="field-label">연차신청현황 엑셀 <span class="optional-label">선택</span></label>
-              <label class="dropzone compact-dropzone" id="annualDropzone">
-                <input id="annualFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
-                <span class="drop-icon">L</span>
-                <strong id="annualFileName">연차 승인·반려 양식 선택</strong>
-                <small>승인된 연차·반차만 정상 휴가로 인정합니다.</small>
-              </label>
-            </div>
-
-            <div class="field-group optional-upload">
-              <label class="field-label">처리 완료본 엑셀 <span class="optional-label">선택</span></label>
-              <label class="dropzone compact-dropzone" id="evidenceDropzone">
-                <input id="evidenceFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
-                <span class="drop-icon">O</span>
-                <strong id="evidenceFileName">출근증빙·휴무확인 O 파일 선택</strong>
-                <small>출근확인·휴무확인·오전반차·오후반차 등 확인 완료값을 반영합니다.</small>
-              </label>
-            </div>
-
-            <div class="field-group optional-upload">
-              <label class="field-label">전월 연차 마감 파일 <span class="optional-label">선택</span></label>
-              <label class="dropzone compact-dropzone" id="closingDropzone">
-                <input id="closingFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
-                <span class="drop-icon">M</span>
-                <strong id="closingFileName">전월 연차 마감 파일 선택</strong>
-                <small>연차 잔여·촉진 상태·월별 사용량을 이어받아 연차 엑셀 디자인 기준으로 생성합니다. 암호가 걸린 파일은 암호 해제 후 업로드하세요.</small>
-              </label>
-            </div>
-
-            <div class="field-group">
-              <button id="openManagerButton" class="btn secondary full" type="button">매니저 수정본 확인</button>
-              <p id="managerSummary" class="field-help">등록된 매니저 수정본 없음</p>
-            </div>
-
-            <button id="analyzeButton" class="btn primary full" type="button">근태 분석 실행</button>
-            <button id="exportAttendanceButton" class="btn secondary full" type="button" disabled>근태 엑셀</button>
-            <button id="exportAnnualButton" class="btn secondary full" type="button" disabled>연차 엑셀</button>
-            <button id="exportClosingButton" class="btn secondary full" type="button" disabled>월 마감 누적 파일</button>
-            <button id="exportButton" class="btn secondary full" type="button" disabled>전체 통합 엑셀</button>
-          </aside>
-
-          <section class="content-column">
-            <div id="emptyState" class="empty-state panel">
-              <div class="empty-mark">01</div>
-              <h2>새 기준으로 다시 계산합니다</h2>
-              <p>기존 패치 로직을 쓰지 않고 업로드한 원본·관리자 수정본·처리 완료본을 기준으로 새 엑셀을 만듭니다.</p>
-            </div>
-
-            <div id="resultArea" class="hidden">
-              <div class="metric-grid">
-                <article class="metric-card"><span>전체 인원</span><strong id="peopleCount">0</strong><small>명</small></article>
-                <article class="metric-card danger-card"><span>출근증빙 대상</span><strong id="evidenceCount">0</strong><small>건</small></article>
-                <article class="metric-card warning-card"><span>휴무 초과자</span><strong id="dayoffExcessCount">0</strong><small>명</small></article>
-                <article class="metric-card"><span>대체·보상 사용자</span><strong id="subcompUserCount">0</strong><small>명</small></article>
-                <article class="metric-card"><span>연차 확인 대상</span><strong id="annualIssueCount">0</strong><small>건</small></article>
-              </div>
-
-              <div class="panel result-panel">
-                <div class="result-toolbar">
-                  <div>
-                    <p class="eyebrow dark">PREVIEW</p>
-                    <h2>확인 대상 미리보기</h2>
-                    <p id="resultDescription" class="muted"></p>
-                    <div class="download-row">
-                      <button id="exportAttendanceButtonTop" class="btn secondary" type="button" disabled>근태 엑셀</button>
-                      <button id="exportAnnualButtonTop" class="btn secondary" type="button" disabled>연차 엑셀</button>
-                      <button id="exportClosingButtonTop" class="btn secondary" type="button" disabled>월 마감 누적 파일</button>
-                    </div>
+          <div class="main-grid lower-grid">
+            <section class="panel result-panel">
+              <div class="result-toolbar">
+                <div>
+                  <h2>월 마감 확인 대상</h2>
+                  <p id="resultDescription" class="muted">분석을 실행하면 출근증빙, 휴무 초과자, 연차 확인 대상이 표시됩니다.</p>
+                  <div class="download-row">
+                    <button id="exportAttendanceButtonTop" class="btn secondary" type="button" disabled>근태 엑셀</button>
+                    <button id="exportAnnualButtonTop" class="btn secondary" type="button" disabled>연차 엑셀</button>
+                    <button id="exportClosingButtonTop" class="btn secondary" type="button" disabled>월 마감 누적 파일</button>
                   </div>
-                  <input id="searchInput" class="input search" type="search" placeholder="이름·사번·매장 검색" />
                 </div>
-                <div class="table-wrap">
-                  <table class="wide-table">
-                    <thead>
-                      <tr>
-                        <th>No</th>
-                        <th>매니저</th>
-                        <th>매장명</th>
-                        <th>이름</th>
-                        <th>사번</th>
-                        <th>발생일</th>
-                        <th>근무계획</th>
-                        <th>관리자반영</th>
-                        <th>확인 구분</th>
-                      </tr>
-                    </thead>
-                    <tbody id="previewBody"></tbody>
-                  </table>
+                <input id="searchInput" class="input search" type="search" placeholder="이름·사번·매장 검색" />
+              </div>
+              <div class="table-wrap">
+                <table class="wide-table">
+                  <thead>
+                    <tr>
+                      <th>No</th>
+                      <th>매니저</th>
+                      <th>매장명</th>
+                      <th>이름</th>
+                      <th>사번</th>
+                      <th>발생일</th>
+                      <th>근무계획</th>
+                      <th>관리자반영</th>
+                      <th>확인 구분</th>
+                    </tr>
+                  </thead>
+                  <tbody id="previewBody">
+                    <tr><td colspan="9">아직 분석 결과가 없습니다.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <aside class="panel">
+              <div class="panel-heading compact">
+                <h2>기능별 화면 구성</h2>
+                <p class="muted">처음부터 다시 만든 기준은 메뉴를 다섯 가지로 고정합니다.</p>
+              </div>
+              <div class="feature-list">
+                <button class="quick-button active" data-jump="substitute" type="button">1. 대체 휴무 부여</button>
+                <button class="quick-button" data-jump="annual" type="button">2. 연차 관리</button>
+                <button class="quick-button" data-jump="workforce" type="button">3. 인력 매칭</button>
+                <button class="quick-button" data-jump="monthly" type="button">4. 월 마감 누적 관리</button>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section id="substituteView" class="view">
+          <div class="two-panel-grid">
+            <section class="panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="step-label">SUBSTITUTE GRANT</span>
+                  <h2>대체 휴무 부여</h2>
+                  <p class="muted">대체휴무는 엑셀 업로드가 아니라 웹에서 경로·월·사용 가능 기간을 지정해 부여합니다.</p>
                 </div>
               </div>
-            </div>
-          </section>
-        </div>
-      </section>
-
-      <section id="managerView" class="view">
-        <div class="panel">
-          <div class="panel-heading">
-            <div>
-              <span class="step-label">MANAGER FILES</span>
-              <h2>전자랜드 매니저별 월마감 수정본</h2>
-              <p class="muted">수정본의 휴무·연차·반차·공가·경조·대체·보상만 관리자반영 시트에 반영합니다.</p>
-            </div>
-            <button id="clearManagerFiles" class="btn secondary" type="button">전체 제거</button>
-          </div>
-          <div id="managerUploadGrid" class="manager-grid"></div>
-        </div>
-      </section>
-
-      <section id="mastersView" class="view">
-        <div class="panel">
-          <div class="panel-heading">
-            <div>
-              <span class="step-label">MASTER DATA</span>
-              <h2>인력·연차 DB</h2>
-              <p class="muted">새 앱은 등록 데이터를 JSON 단위로 저장합니다. 기존 기능과 섞이지 않도록 clean 전용 테이블을 씁니다.</p>
-            </div>
-          </div>
-
-          <div class="master-grid">
-            <article class="master-card">
-              <h3>인력 매칭 DB</h3>
-              <p>사번·매장·매니저·지역장 정보가 있으면 관리자 수정본 매칭이 안정됩니다.</p>
-              <input id="workforceFile" class="input" type="file" accept=".xlsx,.xls,.xlsb" />
-              <div class="button-row">
-                <button id="saveWorkforceButton" class="btn primary" type="button">저장</button>
-                <button id="loadWorkforceButton" class="btn secondary" type="button">불러오기</button>
+              <form id="substituteGrantForm" class="form-grid">
+                <label>경로
+                  <select id="substituteRoute" class="input">
+                    <option value="electroland">전자랜드</option>
+                    <option value="homeplus">홈플러스</option>
+                  </select>
+                </label>
+                <label>발생 월
+                  <input id="substituteGrantMonth" class="input" type="month" />
+                </label>
+                <label>1인당 부여 일수
+                  <input id="substituteGrantDays" class="input" type="number" step="0.5" min="0" value="1" />
+                </label>
+                <label>사용 가능 시작일
+                  <input id="substituteValidFrom" class="input" type="date" />
+                </label>
+                <label>사용 가능 종료일
+                  <input id="substituteValidTo" class="input" type="date" />
+                </label>
+                <label class="full-span">비고
+                  <input id="substituteGrantNote" class="input" type="text" placeholder="예: 7월 경로 일괄 부여" />
+                </label>
+                <div class="button-row full-span">
+                  <button class="btn primary" type="submit">부여 저장</button>
+                  <button id="loadSubstituteGrantsButton" class="btn secondary" type="button">불러오기</button>
+                </div>
+              </form>
+            </section>
+            <section class="panel">
+              <div class="panel-heading compact">
+                <h2>부여 내역</h2>
+                <p class="muted">저장된 부여값은 대체 사용자 시트와 월 마감 누적 파일에 반영됩니다.</p>
               </div>
-              <small id="workforceStatus" class="field-help">등록된 인력 DB 없음</small>
-            </article>
-
-            <article class="master-card">
-              <h3>연차 누적 DB</h3>
-              <p>연차 촉진 시트의 참고 잔여값으로 사용합니다.</p>
-              <input id="annualLedgerFile" class="input" type="file" accept=".xlsx,.xls,.xlsb" />
-              <div class="button-row">
-                <button id="saveAnnualLedgerButton" class="btn primary" type="button">저장</button>
-                <button id="loadAnnualLedgerButton" class="btn secondary" type="button">불러오기</button>
+              <div class="table-wrap tight">
+                <table class="wide-table">
+                  <thead><tr><th>경로</th><th>발생 월</th><th>1인당</th><th>사용 기간</th><th>비고</th><th></th></tr></thead>
+                  <tbody id="substituteGrantBody"><tr><td colspan="6">등록된 대체휴무 부여 내역이 없습니다.</td></tr></tbody>
+                </table>
               </div>
-              <small id="annualLedgerStatus" class="field-help">등록된 연차 누적 DB 없음</small>
-            </article>
-
-            <article class="master-card">
-              <h3>대체·보상 DB</h3>
-              <p>대체ㆍ보상 시트의 사용 가능·이월 참고값으로 사용합니다.</p>
-              <input id="subcompLedgerFile" class="input" type="file" accept=".xlsx,.xls,.xlsb" />
-              <div class="button-row">
-                <button id="saveSubcompLedgerButton" class="btn primary" type="button">저장</button>
-                <button id="loadSubcompLedgerButton" class="btn secondary" type="button">불러오기</button>
-              </div>
-              <small id="subcompLedgerStatus" class="field-help">등록된 대체·보상 DB 없음</small>
-            </article>
+            </section>
           </div>
-        </div>
-      </section>
+        </section>
 
-      <section id="snapshotsView" class="view">
-        <div class="panel">
-          <div class="panel-heading">
-            <div>
-              <span class="step-label">MIDMONTH</span>
-              <h2>중간 저장</h2>
-              <p class="muted">현재 분석 결과를 기준일 단위로 저장하고 다시 불러올 수 있습니다.</p>
+        <section id="annualView" class="view">
+          <div class="two-panel-grid">
+            <section class="panel setup-panel">
+              <div class="panel-heading compact">
+                <h2>연차 관리</h2>
+                <p class="muted">연차는 승인·반려 양식에서 승인된 건만 근태에 반영하고, 전월 연차 마감 파일 디자인 기준으로 연차 엑셀을 생성합니다.</p>
+              </div>
+              <div class="field-group">
+                <label class="field-label">연차신청현황 엑셀</label>
+                <label class="dropzone compact-dropzone" id="annualDropzone">
+                  <input id="annualFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
+                  <span class="drop-icon">L</span>
+                  <strong id="annualFileName">연차 승인·반려 양식 선택</strong>
+                  <small>승인된 연차·반차만 정상 휴가로 인정합니다.</small>
+                </label>
+              </div>
+              <div class="field-group">
+                <label class="field-label">전월 연차 마감 파일</label>
+                <label class="dropzone compact-dropzone" id="closingDropzone">
+                  <input id="closingFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
+                  <span class="drop-icon">M</span>
+                  <strong id="closingFileName">전월 연차 마감 파일 선택</strong>
+                  <small>연차 잔여·촉진 상태·월별 사용량을 이어받습니다. 암호 파일은 암호 해제 후 업로드하세요.</small>
+                </label>
+              </div>
+              <div class="field-group">
+                <label class="field-label">연차 누적 DB <span class="optional-label">현재 경로·월 기준 저장</span></label>
+                <input id="annualLedgerFile" class="input" type="file" accept=".xlsx,.xls,.xlsb" />
+                <div class="button-row">
+                  <button id="saveAnnualLedgerButton" class="btn primary" type="button">저장</button>
+                  <button id="loadAnnualLedgerButton" class="btn secondary" type="button">불러오기</button>
+                </div>
+                <small id="annualLedgerStatus" class="field-help">현재 대상 월에 등록된 연차 누적 DB 없음</small>
+              </div>
+            </section>
+            <section class="panel">
+              <div class="panel-heading compact">
+                <h2>연차 출력 기준</h2>
+                <p class="muted">근태 엑셀에는 승인 연차·반차만 입력되고, 연차 엑셀에는 사용자·누적관리·촉진 관리가 따로 생성됩니다.</p>
+              </div>
+              <div class="rule-box">
+                <p>반려·취소·철회 건은 정상 연차로 보지 않습니다.</p>
+                <p>근무계획에는 연차인데 승인 양식에 없는 건은 연차 확인 대상으로 분리합니다.</p>
+                <p>전월 마감 파일은 연차 잔여와 촉진 상태를 이어받는 기준 파일입니다.</p>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="workforceView" class="view">
+          <div class="two-panel-grid">
+            <section class="panel setup-panel">
+              <div class="panel-heading compact">
+                <h2>원본 업로드</h2>
+                <p class="muted">출근은 제모스 근태기록 기준, 휴무·공가·휴가·경조는 매니저별 파일 기준으로 반영합니다.</p>
+              </div>
+              <div class="two-cols">
+                <div class="field-group">
+                  <label class="field-label">근무계획 엑셀 <span class="optional-label">선택</span></label>
+                  <label class="dropzone" id="planDropzone">
+                    <input id="planFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
+                    <span class="drop-icon">P</span>
+                    <strong id="planFileName">근무계획 파일 선택</strong>
+                    <small>있으면 참고값으로 쓰고, 없어도 매니저 파일·출근 기록·연차 기록으로 생성합니다.</small>
+                  </label>
+                </div>
+                <div class="field-group">
+                  <label class="field-label">제모스 근태기록 엑셀</label>
+                  <label class="dropzone" id="attendanceDropzone">
+                    <input id="attendanceFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
+                    <span class="drop-icon">A</span>
+                    <strong id="attendanceFileName">근태기록 파일 선택</strong>
+                    <small>근무일자·사번·출근시간 자동 인식</small>
+                  </label>
+                </div>
+              </div>
+              <div class="field-group">
+                <label class="field-label">인력 매칭 DB <span class="optional-label">현재 경로·월 기준 저장</span></label>
+                <input id="workforceFile" class="input" type="file" accept=".xlsx,.xls,.xlsb" />
+                <div class="button-row">
+                  <button id="saveWorkforceButton" class="btn primary" type="button">저장</button>
+                  <button id="loadWorkforceButton" class="btn secondary" type="button">불러오기</button>
+                </div>
+                <small id="workforceStatus" class="field-help">현재 대상 월에 등록된 인력 DB 없음</small>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <div>
+                  <h2>매니저별 증빙 파일 등록</h2>
+                  <p class="muted">전자랜드 매니저별 파일에서 휴무·공가·휴가·경조·대체휴무 등 확정값을 가져옵니다.</p>
+                </div>
+                <button id="clearManagerFiles" class="btn secondary" type="button">전체 제거</button>
+              </div>
+              <div id="managerUploadGrid" class="manager-grid"></div>
+              <p id="managerSummary" class="manager-summary">등록된 매니저 수정본 없음</p>
+            </section>
+          </div>
+        </section>
+
+        <section id="monthlyView" class="view">
+          <div class="two-panel-grid">
+            <section class="panel setup-panel">
+              <div class="panel-heading compact">
+                <h2>출근증빙 처리 완료본</h2>
+                <p class="muted">증빙 확인된 출근·반차 값은 웹에서 바로 저장할 수 있고, 완료본 엑셀 업로드도 보조로 사용할 수 있습니다.</p>
+              </div>
+              <div class="field-group">
+                <label class="field-label">처리 완료본 엑셀</label>
+                <label class="dropzone compact-dropzone" id="evidenceDropzone">
+                  <input id="evidenceFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
+                  <span class="drop-icon">O</span>
+                  <strong id="evidenceFileName">출근증빙·휴무확인 O 파일 선택</strong>
+                  <small>출근확인·휴무확인·오전반차·오후반차 등 확인 완료값을 반영합니다.</small>
+                </label>
+              </div>
+              <div class="button-row">
+                <button id="loadWebEvidenceButton" class="btn secondary" type="button">웹 증빙 불러오기</button>
+                <button id="clearWebEvidenceButton" class="btn danger" type="button">웹 증빙 초기화</button>
+              </div>
+            </section>
+            <section class="panel">
+              <div class="panel-heading compact">
+                <h2>웹 출근증빙 확인</h2>
+                <p class="muted">분석 후 확인 대상을 선택하면 현재 경로·월 기준으로 저장되고, 재분석 시 근태 시트에 반영됩니다.</p>
+              </div>
+              <div class="table-wrap tight">
+                <table class="wide-table">
+                  <thead>
+                    <tr><th>이름</th><th>사번</th><th>발생일</th><th>확인 구분</th><th>처리값</th><th>메모</th><th></th></tr>
+                  </thead>
+                  <tbody id="webEvidenceBody"><tr><td colspan="7">분석 후 출근증빙 대상이 표시됩니다.</td></tr></tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+
+          <div class="panel monthly-note">
+            <div class="panel-heading compact">
+              <h2>월 마감 누적 관리</h2>
+              <p class="muted">중간 저장은 사용하지 않습니다. 월 마감 누적 파일만 별도로 내려받아 다음 달 연차·대체 기준으로 씁니다.</p>
+            </div>
+            <div class="rule-box">
+              <p>근태 엑셀: 근태 시트, 휴무 초과자, 대체 사용자, 연차 사용자, 연차 누적관리, 연차 촉진 관리, 그 외 사용자, 근태 확인 인원, 출근 기록</p>
+              <p>연차 엑셀: 전월 연차 마감 파일 디자인 기준으로 별도 생성</p>
+              <p>월 마감 누적 파일: 대체 사용 여부와 연차 잔여 개수 추적용</p>
             </div>
           </div>
-          <div class="snapshot-row">
-            <input id="snapshotName" class="input" type="text" placeholder="예: 7/10 중간 확인 완료" />
-            <button id="saveSnapshotButton" class="btn primary" type="button" disabled>현재 결과 저장</button>
-            <button id="loadSnapshotsButton" class="btn secondary" type="button">목록 불러오기</button>
-          </div>
-          <div id="snapshotList" class="snapshot-list"></div>
-        </div>
-      </section>
-    </main>
+        </section>
+      </main>
+    </div>
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-  <script type="module" src="./assets/app.js?v=clean3"></script>
+  <script type="module" src="./assets/app.js?v=clean4"></script>
 </body>
 </html>

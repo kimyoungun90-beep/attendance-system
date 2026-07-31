@@ -2,7 +2,7 @@ export async function onRequest(context) {
   return json({
     ok: Boolean(context.env.DB),
     storage: context.env.DB ? "d1" : "browser",
-    version: "clean-v3",
+    version: "clean-v4",
   });
 }
 
