@@ -11,7 +11,7 @@ import {
   parseMasterWorkbook,
   parseTargetMonth,
   readWorkbook,
-} from "./attendance-engine.js?v=clean4";
+} from "./attendance-engine.js?v=clean5";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];

@@ -311,7 +311,7 @@ export async function buildWorkbookFile(analysis) {
 
 export async function buildAttendanceWorkbookFile(analysis) {
   const workbook = XLSX.utils.book_new();
-  appendMainSheet(workbook, "근태 시트", analysis, "manager");
+  appendMainSheet(workbook, "상담사근태_관리자반영", analysis, "manager");
   appendDayoffExcessSheet(workbook, analysis);
   appendSubcompSheet(workbook, analysis);
   appendAnnualUserSheet(workbook, analysis);
@@ -352,7 +352,7 @@ export async function buildClosingWorkbookFile(analysis) {
 
 export function buildWorkbook(analysis) {
   const workbook = XLSX.utils.book_new();
-  appendMainSheet(workbook, "근태 시트", analysis, "manager");
+  appendMainSheet(workbook, "상담사근태_관리자반영", analysis, "manager");
   appendManagerCompareSheet(workbook, analysis);
   appendAttendanceCheckSheet(workbook, analysis);
   appendDayoffExcessSheet(workbook, analysis);
@@ -375,7 +375,14 @@ function parsePlanWorkbook(workbook, month) {
   const headerIndex = findHeaderRow(rows, [["사번", "직원번호", "사원번호"], ["이름", "성명", "직원명"]]);
   if (headerIndex < 0) return [];
   const headers = rows[headerIndex].map((cell) => cleanHeader(cell));
-  const dayColumns = headers.map((header, index) => ({ index, day: parseDayHeader(header, month) })).filter((row) => row.day);
+  const dateHeaderRow = rows[headerIndex - 1] || [];
+  const backupDateHeaderRow = rows[headerIndex - 2] || [];
+  const dayColumns = headers
+    .map((header, index) => ({
+      index,
+      day: parseDayHeader(dateHeaderRow[index], month) || parseDayHeader(backupDateHeaderRow[index], month) || parseDayHeader(header, month),
+    }))
+    .filter((row) => row.day);
   const indexes = buildHeaderIndexes(headers);
   const parsed = [];
 
@@ -410,15 +417,19 @@ function parseAttendanceWorkbook(workbook, month) {
   const map = new Map();
   const parsedRows = [];
   if (!workbook) return { map, rows: parsedRows };
-  for (const sheetName of workbook.SheetNames) {
+  const sheetNames = attendanceSheetNames(workbook);
+  for (const sheetName of sheetNames) {
     const rows = sheetRows(workbook.Sheets[sheetName]);
     const headerIndex = findHeaderRow(rows, [["사번", "직원번호", "사원번호"], ["근무일자", "일자", "날짜"]]);
     if (headerIndex < 0) continue;
     const headers = rows[headerIndex].map((cell) => cleanHeader(cell));
     const indexes = buildHeaderIndexes(headers);
-    const dateIndex = indexes.date;
+    const dateIndex = firstHeaderIndex(headers, ["근무일자", "일자", "날짜"]);
     if (indexes.employeeId < 0 || dateIndex < 0) continue;
-    const clockIndexes = allHeaderIndexes(headers, ["출근", "출근시간", "실제출근", "변경출근", "입실"]).filter((index) => !cleanHeader(headers[index]).includes("퇴근"));
+    const clockIndexes = allHeaderIndexes(headers, ["출근시간", "실제출근", "변경출근", "입실", "출근"]).filter((index) => {
+      const header = cleanHeader(headers[index]);
+      return !header.includes("퇴근") && !header.includes("지점");
+    });
     const statusIndex = firstHeaderIndex(headers, ["근태", "근태상태", "근무상태", "실제근태", "상태"]);
     for (let r = headerIndex + 1; r < rows.length; r += 1) {
       const row = rows[r];
@@ -589,7 +600,14 @@ function parseManagerWorkbook(managerName, workbook, month) {
   if (headerIndex < 0) return [];
   const headers = rows[headerIndex].map((cell) => cleanHeader(cell));
   const indexes = buildHeaderIndexes(headers);
-  const dayColumns = headers.map((header, index) => ({ index, day: parseDayHeader(header, month) })).filter((row) => row.day);
+  const dateHeaderRow = rows[headerIndex - 1] || [];
+  const backupDateHeaderRow = rows[headerIndex - 2] || [];
+  const dayColumns = headers
+    .map((header, index) => ({
+      index,
+      day: parseDayHeader(dateHeaderRow[index], month) || parseDayHeader(backupDateHeaderRow[index], month) || parseDayHeader(header, month),
+    }))
+    .filter((row) => row.day);
   const parsed = [];
   for (let r = headerIndex + 1; r < rows.length; r += 1) {
     const row = rows[r];
@@ -604,8 +622,8 @@ function parseManagerWorkbook(managerName, workbook, month) {
       const applied = MANAGER_ALLOWED.has(normalized) && !attendanceLike;
       if (!applied && !attendanceLike) continue;
       parsed.push({
-        regionalManager: "",
-        manager: managerName,
+        regionalManager: text(pick(row, indexes.regionalManager)),
+        manager: managerName || text(pick(row, indexes.manager)),
         region: text(pick(row, indexes.region)),
         subRegion: text(pick(row, indexes.subRegion)),
         storeCode: text(pick(row, indexes.storeCode)),
@@ -1557,6 +1575,27 @@ function chooseSheetName(workbook, preferred = []) {
   return workbook.SheetNames[0];
 }
 
+function attendanceSheetNames(workbook) {
+  const names = workbook?.SheetNames || [];
+  const preferred = names.filter((name) => {
+    const compact = cleanHeader(name);
+    return compact.includes("근태raw") || compact.includes("출퇴근") || compact.includes("출근기록");
+  });
+  if (preferred.length) return preferred;
+  return names.filter((name) => {
+    const compact = cleanHeader(name);
+    return !compact.includes("상담사근태")
+      && !compact.includes("관리자")
+      && !compact.includes("증빙")
+      && !compact.includes("휴무초과")
+      && !compact.includes("대체")
+      && !compact.includes("연차")
+      && !compact.includes("요약")
+      && !compact.includes("확인자")
+      && !compact.includes("정산");
+  });
+}
+
 function sheetRows(sheet) {
   return XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false, blankrows: false });
 }
@@ -1592,7 +1631,7 @@ function buildHeaderIndexes(headers) {
     route: firstHeaderIndex(headers, ["경로", "회사"]),
     regionalManager: firstHeaderIndex(headers, ["지역장", "총괄"]),
     manager: firstHeaderIndex(headers, ["매니저", "담당매니저", "관리자"]),
-    region: firstHeaderIndex(headers, ["지역", "권역"]),
+    region: firstHeaderIndex(headers, ["지역1", "지역", "권역"]),
     subRegion: firstHeaderIndex(headers, ["지역2", "세부지역", "상세지역"]),
     storeCode: firstHeaderIndex(headers, ["매장코드", "점포코드", "코드"]),
     storeName: firstHeaderIndex(headers, ["매장명", "점포명", "매장", "점포"]),
@@ -1612,9 +1651,14 @@ function buildHeaderIndexes(headers) {
 
 function firstHeaderIndex(headers, aliases) {
   const normalizedAliases = aliases.map(cleanHeader);
+  const exactIndex = headers.findIndex((header) => {
+    const clean = cleanHeader(header);
+    return normalizedAliases.some((alias) => clean === alias);
+  });
+  if (exactIndex >= 0) return exactIndex;
   return headers.findIndex((header) => {
     const clean = cleanHeader(header);
-    return normalizedAliases.some((alias) => clean === alias || clean.includes(alias));
+    return normalizedAliases.some((alias) => clean.includes(alias));
   });
 }
 
@@ -1935,6 +1979,10 @@ function normalizeDateText(value, month = null) {
     return `${month.year}-${String(parsed.month).padStart(2, "0")}-${String(parsed.day).padStart(2, "0")}`;
   }
   const raw = text(value);
+  const compactDate = raw.replace(/\D/g, "");
+  if (/^\d{8}$/.test(compactDate)) {
+    return `${compactDate.slice(0, 4)}-${compactDate.slice(4, 6)}-${compactDate.slice(6, 8)}`;
+  }
   const dayOnly = raw.match(/^(\d{1,2})일?$/);
   if (dayOnly && month) return `${month.key}-${String(Number(dayOnly[1])).padStart(2, "0")}`;
   return raw;
