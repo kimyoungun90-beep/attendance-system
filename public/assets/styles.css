@@ -259,7 +259,20 @@ main { padding: 30px 44px 60px; min-width: 0; }
   color: var(--blue);
   font-weight: 900;
 }
-.dropzone strong { display: block; margin-bottom: 4px; }
+.dropzone strong {
+  grid-column: 2;
+  display: block;
+  margin-bottom: 2px;
+  line-height: 1.45;
+}
+.dropzone small {
+  grid-column: 2;
+  display: block;
+  max-width: 100%;
+  line-height: 1.8;
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
 .btn, .text-button {
   border: 0;
   border-radius: 8px;
@@ -323,7 +336,7 @@ main { padding: 30px 44px 60px; min-width: 0; }
 .flow-row {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 32px;
+  gap: 24px;
   padding: 18px 24px 32px;
 }
 .flow-step {
@@ -357,6 +370,15 @@ main { padding: 30px 44px 60px; min-width: 0; }
   color: #fff;
 }
 .flow-step strong, .flow-step small { display: block; }
+.flow-step strong {
+  white-space: nowrap;
+  line-height: 1.35;
+}
+.flow-step small {
+  grid-column: 2;
+  line-height: 1.65;
+  word-break: keep-all;
+}
 .flow-step.success b { background: #0b8a36; }
 .quick-panel { padding-bottom: 22px; }
 .quick-button {

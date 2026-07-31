@@ -72,6 +72,7 @@ function bindEvents() {
   $("#loadAnnualLedgerButton").addEventListener("click", () => loadMasterData("annual-ledger", "annualLedgerRows", "annualLedgerStatus", "연차 누적 DB"));
 
   $("#substituteGrantForm").addEventListener("submit", saveSubstituteGrant);
+  $("#substituteGrantMonth").addEventListener("change", syncSubstitutePeriodFromGrantMonth);
   $("#loadSubstituteGrantsButton").addEventListener("click", loadSubstituteGrants);
   $("#loadWebEvidenceButton").addEventListener("click", loadWebEvidenceData);
   $("#clearWebEvidenceButton").addEventListener("click", clearWebEvidenceData);
@@ -119,6 +120,14 @@ function syncSubstituteDefaults() {
   const month = parseTargetMonth($("#targetMonth").value);
   $("#substituteRoute").value = selectedRoute();
   $("#substituteGrantMonth").value = $("#targetMonth").value;
+  syncSubstitutePeriod(month);
+}
+
+function syncSubstitutePeriodFromGrantMonth() {
+  syncSubstitutePeriod(parseTargetMonth($("#substituteGrantMonth").value));
+}
+
+function syncSubstitutePeriod(month) {
   if (month.valid) {
     $("#substituteValidFrom").value = `${month.key}-01`;
     $("#substituteValidTo").value = `${month.key}-${String(month.daysInMonth).padStart(2, "0")}`;
@@ -532,7 +541,7 @@ function resetAnalysisInputs() {
   $("#attendanceFileName").textContent = "근태기록 파일 선택";
   $("#annualFileName").textContent = "연차 승인·반려 양식 선택";
   $("#evidenceFileName").textContent = "출근증빙·휴무확인 O 파일 선택";
-  $("#closingFileName").textContent = "전월 연차 마감 파일 선택";
+  $("#closingFileName").textContent = "전월 마감 파일 선택";
   state.analysis = null;
   renderEmptyPreview();
   syncActionState();

@@ -74,10 +74,10 @@
                 </div>
               </div>
               <div class="flow-row">
-                <div class="flow-step"><b>1</b><strong>원본 업로드</strong><small>계획 · 근태</small></div>
-                <div class="flow-step"><b>2</b><strong>수정본 반영</strong><small>매니저별</small></div>
-                <div class="flow-step"><b>3</b><strong>증빙 확인</strong><small>출근 · 반차</small></div>
-                <div class="flow-step success"><b>4</b><strong>마감</strong><small>누적 저장</small></div>
+                <div class="flow-step"><b>1</b><strong>원본 업로드</strong><small>근태 중심</small></div>
+                <div class="flow-step"><b>2</b><strong>수정 반영</strong><small>매니저 파일</small></div>
+                <div class="flow-step"><b>3</b><strong>증빙 확인</strong><small>웹 처리</small></div>
+                <div class="flow-step success"><b>4</b><strong>월 마감</strong><small>누적 저장</small></div>
               </div>
             </section>
 
@@ -85,7 +85,7 @@
               <div class="panel-heading compact">
                 <h2>빠른 작업</h2>
               </div>
-              <button class="quick-button" data-jump="workforce" type="button">근태기록 · 선택 근무계획 업로드</button>
+              <button class="quick-button" data-jump="workforce" type="button">근태기록 · 근무계획 업로드</button>
               <button class="quick-button" data-jump="workforce" type="button">매니저별 증빙 파일 등록</button>
               <button class="quick-button" data-jump="substitute" type="button">대체휴무 웹 부여</button>
               <button class="quick-button" data-jump="monthly" type="button">월 마감 누적 파일 생성</button>
@@ -201,7 +201,7 @@
             <section class="panel setup-panel">
               <div class="panel-heading compact">
                 <h2>연차 관리</h2>
-                <p class="muted">연차는 승인·반려 양식에서 승인된 건만 근태에 반영하고, 전월 연차 마감 파일 디자인 기준으로 연차 엑셀을 생성합니다.</p>
+                <p class="muted">연차 승인 파일과 전월 마감 파일을 기준으로 이번 달 연차 엑셀을 생성합니다.</p>
               </div>
               <div class="field-group">
                 <label class="field-label">연차신청현황 엑셀</label>
@@ -209,16 +209,16 @@
                   <input id="annualFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
                   <span class="drop-icon">L</span>
                   <strong id="annualFileName">연차 승인·반려 양식 선택</strong>
-                  <small>승인된 연차·반차만 정상 휴가로 인정합니다.</small>
+                  <small>승인 완료된 연차·반차만 반영</small>
                 </label>
               </div>
               <div class="field-group">
-                <label class="field-label">전월 연차 마감 파일</label>
+                <label class="field-label">전월 마감 파일 <span class="optional-label">선택</span></label>
                 <label class="dropzone compact-dropzone" id="closingDropzone">
                   <input id="closingFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
                   <span class="drop-icon">M</span>
-                  <strong id="closingFileName">전월 연차 마감 파일 선택</strong>
-                  <small>연차 잔여·촉진 상태·월별 사용량을 이어받습니다. 암호 파일은 암호 해제 후 업로드하세요.</small>
+                  <strong id="closingFileName">전월 마감 파일 선택</strong>
+                  <small>예: 7월 검사 시 6월 마감 후 내려받은 파일 사용</small>
                 </label>
               </div>
               <div class="field-group">
@@ -234,12 +234,12 @@
             <section class="panel">
               <div class="panel-heading compact">
                 <h2>연차 출력 기준</h2>
-                <p class="muted">근태 엑셀에는 승인 연차·반차만 입력되고, 연차 엑셀에는 사용자·누적관리·촉진 관리가 따로 생성됩니다.</p>
+                <p class="muted">승인 파일에 없는 연차는 확인 대상으로 분리합니다.</p>
               </div>
               <div class="rule-box">
                 <p>반려·취소·철회 건은 정상 연차로 보지 않습니다.</p>
                 <p>근무계획에는 연차인데 승인 양식에 없는 건은 연차 확인 대상으로 분리합니다.</p>
-                <p>전월 마감 파일은 연차 잔여와 촉진 상태를 이어받는 기준 파일입니다.</p>
+                <p>전월 마감 파일은 직전 달 마감 후 내려받은 파일입니다.</p>
               </div>
             </section>
           </div>
@@ -250,7 +250,7 @@
             <section class="panel setup-panel">
               <div class="panel-heading compact">
                 <h2>원본 업로드</h2>
-                <p class="muted">출근은 제모스 근태기록 기준, 휴무·공가·휴가·경조는 매니저별 파일 기준으로 반영합니다.</p>
+                <p class="muted">제모스 출근 기록을 우선 반영하고, 휴무·공가·휴가·경조는 매니저별 파일로 확정합니다.</p>
               </div>
               <div class="two-cols">
                 <div class="field-group">
@@ -259,7 +259,7 @@
                     <input id="planFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
                     <span class="drop-icon">P</span>
                     <strong id="planFileName">근무계획 파일 선택</strong>
-                    <small>있으면 참고값으로 쓰고, 없어도 매니저 파일·출근 기록·연차 기록으로 생성합니다.</small>
+                    <small>선택 입력 · 없으면 출근/매니저/연차 기록 기준 생성</small>
                   </label>
                 </div>
                 <div class="field-group">
@@ -268,7 +268,7 @@
                     <input id="attendanceFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
                     <span class="drop-icon">A</span>
                     <strong id="attendanceFileName">근태기록 파일 선택</strong>
-                    <small>근무일자·사번·출근시간 자동 인식</small>
+                    <small>근무일자 · 사번 · 출근시간 자동 인식</small>
                   </label>
                 </div>
               </div>
@@ -287,7 +287,7 @@
               <div class="panel-heading">
                 <div>
                   <h2>매니저별 증빙 파일 등록</h2>
-                  <p class="muted">전자랜드 매니저별 파일에서 휴무·공가·휴가·경조·대체휴무 등 확정값을 가져옵니다.</p>
+                  <p class="muted">매니저별 파일에서 휴무·공가·휴가·경조·대체휴무를 가져옵니다.</p>
                 </div>
                 <button id="clearManagerFiles" class="btn secondary" type="button">전체 제거</button>
               </div>
@@ -302,7 +302,7 @@
             <section class="panel setup-panel">
               <div class="panel-heading compact">
                 <h2>출근증빙 처리 완료본</h2>
-                <p class="muted">증빙 확인된 출근·반차 값은 웹에서 바로 저장할 수 있고, 완료본 엑셀 업로드도 보조로 사용할 수 있습니다.</p>
+                <p class="muted">웹에서 직접 처리하거나, 완료본 엑셀을 보조로 업로드합니다.</p>
               </div>
               <div class="field-group">
                 <label class="field-label">처리 완료본 엑셀</label>
@@ -310,7 +310,7 @@
                   <input id="evidenceFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
                   <span class="drop-icon">O</span>
                   <strong id="evidenceFileName">출근증빙·휴무확인 O 파일 선택</strong>
-                  <small>출근확인·휴무확인·오전반차·오후반차 등 확인 완료값을 반영합니다.</small>
+                  <small>출근확인 · 휴무확인 · 반차 처리값 반영</small>
                 </label>
               </div>
               <div class="button-row">
@@ -321,7 +321,7 @@
             <section class="panel">
               <div class="panel-heading compact">
                 <h2>웹 출근증빙 확인</h2>
-                <p class="muted">분석 후 확인 대상을 선택하면 현재 경로·월 기준으로 저장되고, 재분석 시 근태 시트에 반영됩니다.</p>
+                <p class="muted">확인 대상을 선택하면 현재 경로·월 기준으로 저장됩니다.</p>
               </div>
               <div class="table-wrap tight">
                 <table class="wide-table">
@@ -341,7 +341,7 @@
             </div>
             <div class="rule-box">
               <p>근태 엑셀: 근태 시트, 휴무 초과자, 대체 사용자, 연차 사용자, 연차 누적관리, 연차 촉진 관리, 그 외 사용자, 근태 확인 인원, 출근 기록</p>
-              <p>연차 엑셀: 전월 연차 마감 파일 디자인 기준으로 별도 생성</p>
+              <p>연차 엑셀: 전월 마감 파일의 잔여·촉진 상태를 이어받아 생성</p>
               <p>월 마감 누적 파일: 대체 사용 여부와 연차 잔여 개수 추적용</p>
             </div>
           </div>
