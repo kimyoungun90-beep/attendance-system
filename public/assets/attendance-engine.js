@@ -53,24 +53,148 @@ export async function readWorkbook(file) {
   return XLSX.read(buffer, { type: "array", cellDates: true, cellStyles: true, raw: false });
 }
 
-export function parseMasterWorkbook(workbook) {
+export function parseMasterWorkbook(workbook, options = {}) {
   if (!workbook) return [];
+
+  // 인력 및 매장매칭 통합 파일은 사람 시트와 매장매칭 시트를 반드시 합쳐야 합니다.
+  const structured = parseStructuredWorkforceWorkbook(workbook, options);
+  if (structured.length) return structured;
+
   const rows = firstTableRows(workbook);
-  const parsed = parseGenericRows(rows);
-  return parsed.map((row) => normalizeMember({
+  const parsed = parseGenericRows(rows).map((row) => normalizeMember({
     route: row.route || row["경로"] || "",
     regionalManager: row.regionalManager || row["지역장"] || "",
     manager: row.manager || row["매니저"] || row["담당매니저"] || "",
-    region: row.region || row["지역"] || row["권역"] || "",
+    region: row.region || row["지역1"] || row["지역"] || row["권역"] || "",
     subRegion: row.subRegion || row["지역2"] || row["세부지역"] || "",
     storeCode: row.storeCode || row["매장코드"] || row["점포코드"] || "",
     storeName: row.storeName || row["매장명"] || row["점포명"] || row["매장"] || row["점포"] || "",
-    employeeId: row.employeeId || row["사번"] || row["직원번호"] || row["사원번호"] || "",
+    portalId: row.portalId || row["포탈사번"] || row["포털사번"] || row["스핀사번"] || row["스핀사원번호"] || "",
+    employeeId: row.employeeId || row["제니엘사번"] || row["사번"] || row["직원번호"] || row["사원번호"] || "",
     employeeName: row.employeeName || row["이름"] || row["성명"] || row["직원명"] || "",
-    hireDate: row.hireDate || row["입사일"] || "",
-    groupHireDate: row.groupHireDate || row["그룹입사일"] || row["제니엘입사일"] || "",
+    hireDate: row.hireDate || row["제니엘입사일"] || row["입사일"] || "",
+    groupHireDate: row.groupHireDate || row["그룹입사일"] || row["고용승계입사일"] || "",
     note: row.note || row["비고"] || "",
   })).filter((row) => row.employeeId || row.employeeName);
+
+  const routeFilter = options?.route || "";
+  return routeFilter
+    ? parsed.filter((row) => !row.route || normalizeRouteValue(row.route) === routeFilter)
+    : parsed;
+}
+
+function parseStructuredWorkforceWorkbook(workbook, options = {}) {
+  const names = workbook?.SheetNames || [];
+  const matchingName = names.find((name) => cleanHeader(name).includes("매장매칭"));
+  const definitions = [
+    { route: "electroland", keywords: ["랜드인력db", "전자랜드인력db"] },
+    { route: "homeplus", keywords: ["홈플인력db", "홈플러스인력db"] },
+  ];
+  const peopleSheets = definitions.map((definition) => ({
+    ...definition,
+    sheetName: names.find((name) => definition.keywords.some((keyword) => cleanHeader(name).includes(keyword))) || "",
+  })).filter((item) => item.sheetName);
+
+  if (!matchingName || !peopleSheets.length) return [];
+  const storeMap = parseWorkforceStoreMap(workbook.Sheets[matchingName]);
+  const routeFilter = options?.route || "";
+  const rows = [];
+  for (const definition of peopleSheets) {
+    if (routeFilter && definition.route !== routeFilter) continue;
+    rows.push(...parseWorkforcePeopleRows(workbook.Sheets[definition.sheetName], definition.route, storeMap));
+  }
+  return rows;
+}
+
+function parseWorkforceStoreMap(sheet) {
+  const rows = sheetRows(sheet);
+  const headerIndex = findHeaderRow(rows, [["매장코드"], ["경로"], ["지역장"]]);
+  if (headerIndex < 0) return new Map();
+  const headers = rows[headerIndex].map((cell) => cleanHeader(cell));
+  const columns = {
+    storeCode: firstHeaderIndex(headers, ["매장코드", "점포코드"]),
+    region1: firstHeaderIndex(headers, ["권역", "지역1"]),
+    subRegion: firstHeaderIndex(headers, ["지역2", "지역"]),
+    route: firstHeaderIndex(headers, ["경로", "회사"]),
+    storeName: firstHeaderIndex(headers, ["매장명", "점포명", "매장"]),
+    regionalManager: firstHeaderIndex(headers, ["지역장", "총괄"]),
+    manager: firstHeaderIndex(headers, ["매니저", "담당매니저"]),
+    closedDate: firstHeaderIndex(headers, ["폐점날짜", "폐점일"]),
+    note: firstHeaderIndex(headers, ["비고"]),
+  };
+  const map = new Map();
+  for (let r = headerIndex + 1; r < rows.length; r += 1) {
+    const row = rows[r];
+    const storeCode = normalizeStoreCodeValue(pick(row, columns.storeCode));
+    if (!storeCode) continue;
+    map.set(storeCode, {
+      route: normalizeRouteValue(pick(row, columns.route)),
+      region1: text(pick(row, columns.region1)),
+      subRegion: text(pick(row, columns.subRegion)),
+      storeName: text(pick(row, columns.storeName)),
+      regionalManager: text(pick(row, columns.regionalManager)),
+      manager: text(pick(row, columns.manager)),
+      closedDate: normalizeDateText(pick(row, columns.closedDate)),
+      note: text(pick(row, columns.note)),
+    });
+  }
+  return map;
+}
+
+function parseWorkforcePeopleRows(sheet, route, storeMap) {
+  const rows = sheetRows(sheet);
+  const headerIndex = findHeaderRow(rows, [["사번", "제니엘사번", "사원번호"], ["성명", "이름"], ["매장코드"]]);
+  if (headerIndex < 0) return [];
+  const headers = rows[headerIndex].map((cell) => cleanHeader(cell));
+  const columns = {
+    manager: firstHeaderIndex(headers, ["매니저", "담당매니저"]),
+    region: firstHeaderIndex(headers, ["지역1", "지역"]),
+    storeCode: firstHeaderIndex(headers, ["매장코드", "점포코드"]),
+    storeName: firstHeaderIndex(headers, ["매장명", "점포명", "매장"]),
+    portalId: firstHeaderIndex(headers, ["포탈사번", "포털사번", "스핀사번", "스핀사원번호", "포탈id", "포털id"]),
+    employeeId: firstHeaderIndex(headers, ["제니엘사번", "사번", "사원번호"]),
+    employeeName: firstHeaderIndex(headers, ["성명", "이름", "사원명"]),
+    hireDate: firstHeaderIndex(headers, ["제니엘입사일", "입사일"]),
+    groupHireDate: firstHeaderIndex(headers, ["그룹입사일", "고용승계입사일"]),
+    note: firstHeaderIndex(headers, ["비고", "휴퇴사일", "휴/퇴사일"]),
+  };
+  const output = [];
+  for (let r = headerIndex + 1; r < rows.length; r += 1) {
+    const row = rows[r];
+    const employeeId = normalizeId(pick(row, columns.employeeId));
+    const employeeName = text(pick(row, columns.employeeName));
+    if (!employeeId || !employeeName) continue;
+    const storeCode = normalizeStoreCodeValue(pick(row, columns.storeCode));
+    const matched = storeMap.get(storeCode) || {};
+    if (matched.route && matched.route !== route) continue;
+    output.push(normalizeMember({
+      route,
+      regionalManager: matched.regionalManager || "",
+      manager: matched.manager || text(pick(row, columns.manager)),
+      region: text(pick(row, columns.region)) || matched.region1 || "",
+      subRegion: matched.subRegion || "",
+      storeCode,
+      storeName: text(pick(row, columns.storeName)) || matched.storeName || "",
+      portalId: text(pick(row, columns.portalId)),
+      employeeId,
+      employeeName,
+      hireDate: normalizeDateText(pick(row, columns.hireDate)),
+      groupHireDate: normalizeDateText(pick(row, columns.groupHireDate)),
+      note: [text(pick(row, columns.note)), matched.closedDate ? `${matched.closedDate} 폐점` : "", matched.note || ""].filter(Boolean).join(" · "),
+    }));
+  }
+  return output;
+}
+
+function normalizeRouteValue(value) {
+  const raw = cleanHeader(value);
+  if (raw.includes("홈플")) return "homeplus";
+  if (raw.includes("전자랜드") || raw === "랜드" || raw.includes("electroland")) return "electroland";
+  return text(value);
+}
+
+function normalizeStoreCodeValue(value) {
+  return text(value).replace(/\.0+$/, "").replace(/\s+/g, "");
 }
 
 export function parseLedgerWorkbook(workbook) {
@@ -1015,9 +1139,9 @@ function appendMainSheet(workbook, name, analysis, mode) {
 
     const values = [
       person.regionalManager || "", person.manager || "", person.region || "", person.subRegion || "",
-      person.storeCode || "", person.storeName || "", closing.portalId || "", person.employeeId || "",
-      person.employeeName || "", person.hireDate || closing.hireDate || "", person.groupHireDate || closing.groupHireDate || "",
-      closing.resignDate || "",
+      person.storeCode || "", person.storeName || "", closing.portalId || person.portalId || "", person.employeeId || "",
+      person.employeeName || "", outputDateValue(person.hireDate || closing.hireDate || ""), outputDateValue(person.groupHireDate || closing.groupHireDate || ""),
+      outputDateValue(closing.resignDate || ""),
     ];
     values.forEach((value, c) => { matrix[r][c + 1] = value; });
     matrix[r][13] = daily[0]?.planStatus === "공백" ? "" : daily[0]?.planStatus || "";
@@ -1043,9 +1167,10 @@ function appendMainSheet(workbook, name, analysis, mode) {
     { s: { r: 1, c: 1 }, e: { r: 1, c: 9 } },
     { s: { r: 2, c: 1 }, e: { r: 2, c: 9 } },
     { s: { r: 3, c: 1 }, e: { r: 3, c: 9 } },
+    { s: { r: 4, c: 1 }, e: { r: 4, c: 12 } },
     { s: { r: 4, c: 13 }, e: { r: 5, c: 13 } },
   ];
-  sheet["!freeze"] = { xSplit: 13, ySplit: 6, topLeftCell: "N7", activePane: "bottomRight", state: "frozen" };
+  sheet["!freeze"] = { xSplit: 9, ySplit: 6, topLeftCell: "J7", activePane: "bottomRight", state: "frozen" };
   sheet["!views"] = [{ showGridLines: false, zoomScale: 70, zoomScaleNormal: 70 }];
   sheet["!autofilter"] = { ref: `B6:M${Math.max(7, rowCount)}` };
   applyLegacyAttendanceDesign(sheet, analysis, summaryStartCol0, summaryEndCol0, totalCols, rowCount);
@@ -1119,6 +1244,10 @@ function applyLegacyAttendanceDesign(sheet, analysis, summaryStartCol0, summaryE
     }
     const nameAddr = XLSX.utils.encode_cell({ r, c: 9 });
     if (sheet[nameAddr]) sheet[nameAddr].s = { ...(sheet[nameAddr].s || {}), fill: { patternType: "solid", fgColor: { rgb: "FFFFFF00" } } };
+    for (const dateCol of [10, 11, 12]) {
+      const dateAddr = XLSX.utils.encode_cell({ r, c: dateCol });
+      if (sheet[dateAddr] && sheet[dateAddr].v !== "") sheet[dateAddr].z = "yyyy-mm-dd";
+    }
     for (let dayIndex = 0; dayIndex < person.daily.length; dayIndex += 1) {
       const daily = person.daily[dayIndex];
       const c = firstDayCol0 + dayIndex;
@@ -1368,7 +1497,7 @@ function appendAnnualClosingDesignSheet(workbook, analysis, group) {
         closing.storeCode || row.storeCode || "",
         closing.storeName || row.storeName || "",
         "판매상담사",
-        closing.portalId || "",
+        closing.portalId || person.portalId || "",
         closing.employeeId || row.employeeId || "",
         closing.employeeName || row.employeeName || "",
         "",
@@ -1397,7 +1526,7 @@ function appendAnnualClosingDesignSheet(workbook, analysis, group) {
         closing.storeCode || row.storeCode || "",
         closing.storeName || row.storeName || "",
         "판매상담사",
-        closing.portalId || "",
+        closing.portalId || person.portalId || "",
         closing.employeeId || row.employeeId || "",
         closing.employeeName || row.employeeName || "",
         "",
@@ -1523,7 +1652,7 @@ function appendClosingPeopleSheet(workbook, analysis) {
       row.subRegion || row.closingPerson?.subRegion || "",
       row.storeCode || row.closingPerson?.storeCode || "",
       row.storeName || row.closingPerson?.storeName || "",
-      row.closingPerson?.portalId || "",
+      row.closingPerson?.portalId || row.portalId || "",
       row.employeeId,
       row.employeeName || row.closingPerson?.employeeName || "",
       row.closingPerson?.employmentGroup || "",
@@ -1559,7 +1688,7 @@ function appendClosingAnnualUsageSheet(workbook, analysis) {
     months[monthCol] = roundHalf(months[monthCol] + (person.monthlyAnnualUsed || 0));
     const total = roundHalf(Object.values(months).reduce((sum, value) => sum + numberValue(value), 0));
     rows.push([
-      existing.portalId || person.closingPerson?.portalId || "",
+      existing.portalId || person.closingPerson?.portalId || person.portalId || "",
       person.employeeId,
       person.employeeName || person.closingPerson?.employeeName || "",
       ...Array.from({ length: 12 }, (_, index) => months[`${index + 1}월`] || 0),
@@ -1708,7 +1837,7 @@ async function applyWorkbookViewSettings(raw, sheetNames) {
       if (!file) continue;
       const name = sheetNames[index];
       const freeze = name === "상담사근태" || name === "상담사근태_관리자반영" || name === "근태 시트"
-        ? { xSplit: 13, ySplit: 6, topLeftCell: "N7", activePane: "bottomRight" }
+        ? { xSplit: 9, ySplit: 6, topLeftCell: "J7", activePane: "bottomRight" }
         : { xSplit: 0, ySplit: 5, topLeftCell: "A6", activePane: "bottomLeft" };
       const xml = await file.async("string");
       zip.file(path, injectFreezePane(xml, freeze));
@@ -1897,10 +2026,11 @@ function normalizeMember(row = {}) {
     subRegion: text(row.subRegion || row["지역2"] || ""),
     storeCode: text(row.storeCode || row["매장코드"] || ""),
     storeName: text(row.storeName || row["매장명"] || row.store || row["점포명"] || ""),
-    employeeId: normalizeId(row.employeeId || row["사번"] || row["직원번호"] || ""),
+    portalId: text(row.portalId || row["포탈사번"] || row["포털사번"] || row["스핀사번"] || row["스핀사원번호"] || ""),
+    employeeId: normalizeId(row.employeeId || row["제니엘사번"] || row["사번"] || row["직원번호"] || ""),
     employeeName: text(row.employeeName || row.name || row["이름"] || row["성명"] || ""),
-    hireDate: normalizeDateText(row.hireDate || row["입사일"] || ""),
-    groupHireDate: normalizeDateText(row.groupHireDate || row["그룹입사일"] || ""),
+    hireDate: normalizeDateText(row.hireDate || row["제니엘입사일"] || row["입사일"] || ""),
+    groupHireDate: normalizeDateText(row.groupHireDate || row["그룹입사일"] || row["고용승계입사일"] || ""),
     note: text(row.note || row["비고"] || ""),
   };
 }
@@ -1916,7 +2046,7 @@ function normalizePerson(route, row) {
 
 function blankToFallback(primary, fallback) {
   const result = {};
-  for (const key of ["regionalManager", "manager", "region", "subRegion", "storeCode", "storeName", "employeeName", "hireDate", "groupHireDate"]) {
+  for (const key of ["regionalManager", "manager", "region", "subRegion", "storeCode", "storeName", "portalId", "employeeName", "hireDate", "groupHireDate"]) {
     result[key] = text(fallback?.[key]) ? fallback[key] : primary[key];
   }
   result.employeeId = primary.employeeId || fallback?.employeeId || "";
@@ -2140,6 +2270,13 @@ function parseDateObject(value) {
   match = cleaned.match(/^(\d{1,2})-(\d{1,2})$/);
   if (match) return { month: Number(match[1]), day: Number(match[2]) };
   return null;
+}
+
+function outputDateValue(value) {
+  const normalized = normalizeDateText(value);
+  const match = String(normalized || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return normalized || "";
+  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12, 0, 0);
 }
 
 function normalizeDateText(value, month = null) {

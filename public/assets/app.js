@@ -408,7 +408,7 @@ async function saveMasterFile(type, input, parser, stateKey, statusId, label) {
   const file = input.files?.[0];
   if (!file) return showToast("저장할 엑셀 파일을 먼저 선택해주세요.");
   try {
-    const rows = parser(await readWorkbook(file));
+    const rows = parser(await readWorkbook(file), { route: selectedRoute(), month: $("#targetMonth").value });
     state[stateKey] = rows;
     await saveJson(type, { rows, fileName: file.name, savedAt: new Date().toISOString() });
     $(`#${statusId}`).textContent = `${scopeText()} 기준 ${rows.length}건 저장됨 · ${file.name}`;
