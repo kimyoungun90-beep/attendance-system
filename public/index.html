@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#123b72" />
   <title>근태 마감 관리 Clean v5</title>
-  <link rel="stylesheet" href="./assets/styles.css?v=clean5" />
+  <link rel="stylesheet" href="./assets/styles.css?v=uploadcache1" />
 </head>
 <body>
   <div class="app-shell">
@@ -209,7 +209,7 @@
                   <input id="annualFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
                   <span class="drop-icon">L</span>
                   <strong id="annualFileName">연차 승인·반려 양식 선택</strong>
-                  <small>승인 완료된 연차·반차만 반영</small>
+                  <small>승인 완료된 연차·반차만 반영 · 브라우저 자동 저장</small>
                 </label>
               </div>
               <div class="field-group">
@@ -217,7 +217,7 @@
                 <label class="dropzone compact-dropzone" id="closingDropzone">
                   <input id="closingFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
                   <span class="drop-icon">M</span>
-                  <strong id="closingFileName">전월 마감 파일 선택</strong>
+                  <strong id="closingFileName">전월 연차촉진 마감본 선택</strong>
                   <small>예: 7월 검사 시 6월 마감 후 내려받은 파일 사용</small>
                 </label>
               </div>
@@ -259,7 +259,7 @@
                     <input id="planFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
                     <span class="drop-icon">P</span>
                     <strong id="planFileName">근무계획 파일 선택</strong>
-                    <small>선택 입력 · 없으면 출근/매니저/연차 기록 기준 생성</small>
+                    <small>선택 입력 · 없으면 출근/매니저/연차 기록 기준 생성 · 브라우저 자동 저장</small>
                   </label>
                 </div>
                 <div class="field-group">
@@ -268,7 +268,7 @@
                     <input id="attendanceFile" type="file" accept=".xlsx,.xls,.xlsb" hidden />
                     <span class="drop-icon">A</span>
                     <strong id="attendanceFileName">근태기록 파일 선택</strong>
-                    <small>근무일자 · 사번 · 출근시간 자동 인식</small>
+                    <small>근무일자 · 사번 · 출근시간 자동 인식 · 브라우저 자동 저장</small>
                   </label>
                 </div>
               </div>
@@ -287,7 +287,7 @@
               <div class="panel-heading">
                 <div>
                   <h2>매니저별 증빙 파일 등록</h2>
-                  <p class="muted">매니저별 파일에서 휴무·공가·휴가·경조·대체휴무를 가져옵니다.</p>
+                  <p class="muted">매니저별 파일에서 휴무·공가·휴가·경조·대체휴무를 가져옵니다. 파일은 자동 저장되며 개별 제거할 수 있습니다.</p>
                 </div>
                 <button id="clearManagerFiles" class="btn secondary" type="button">전체 제거</button>
               </div>
@@ -353,6 +353,6 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-  <script type="module" src="./assets/app.js?v=clean7"></script>
+  <script type="module" src="./assets/app.js?v=integrated-design1"></script>
 </body>
 </html>

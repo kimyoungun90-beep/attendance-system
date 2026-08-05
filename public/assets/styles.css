@@ -523,3 +523,22 @@ main { padding: 30px 44px 60px; min-width: 0; }
   .dashboard-actions > * { width: 100%; }
   .result-toolbar { flex-direction: column; }
 }
+
+.manager-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.manager-card-head > div { min-width: 0; }
+.manager-card-head strong { margin-bottom: 4px; }
+.manager-remove-button {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 900;
+}
+.manager-remove-button:disabled {
+  color: #9aa8b8;
+  cursor: not-allowed;
+  opacity: .6;
+}

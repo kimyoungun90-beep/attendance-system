@@ -11,10 +11,19 @@ import {
   parseMasterWorkbook,
   parseTargetMonth,
   readWorkbook,
-} from "./attendance-engine.js?v=clean5";
+} from "./attendance-engine.js?v=integrated-design1";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
+
+const UPLOAD_CACHE_DB = "attendance-clean-upload-cache-v1";
+const UPLOAD_CACHE_STORE = "files";
+const PERSISTED_SINGLE_FILES = {
+  planFile: { kind: "plan", labelId: "planFileName", emptyLabel: "근무계획 파일 선택" },
+  attendanceFile: { kind: "attendance", labelId: "attendanceFileName", emptyLabel: "근태기록 파일 선택" },
+  annualFile: { kind: "annual", labelId: "annualFileName", emptyLabel: "연차 승인·반려 양식 선택" },
+  closingFile: { kind: "closing", labelId: "closingFileName", emptyLabel: "전월 연차촉진 마감본 선택" },
+};
 
 const state = {
   backendAvailable: false,
@@ -31,9 +40,9 @@ const state = {
   analysis: null,
 };
 
-init();
+void init();
 
-function init() {
+async function init() {
   setDefaultDates();
   renderManagerUploadGrid();
   bindEvents();
@@ -42,6 +51,7 @@ function init() {
   setupDropzone("annualDropzone", "annualFile", "annualFileName", "annualFile");
   setupDropzone("evidenceDropzone", "evidenceFile", "evidenceFileName", "evidenceFile");
   setupDropzone("closingDropzone", "closingFile", "closingFileName", "closingFile");
+  await restorePersistedUploads({ silent: true });
   checkBackend().then(loadScopedData);
   syncRouteHelp();
   syncSubstituteDefaults();
@@ -55,7 +65,7 @@ function bindEvents() {
   $("#routeSelect").addEventListener("change", handleScopeChange);
   $("#targetMonth").addEventListener("change", handleScopeChange);
   $("#resetButton").addEventListener("click", resetAnalysisInputs);
-  $("#clearManagerFiles").addEventListener("click", clearManagerFiles);
+  $("#clearManagerFiles").addEventListener("click", () => void clearManagerFiles());
   $("#analyzeButton").addEventListener("click", () => runAnalysis());
   $("#searchInput").addEventListener("input", renderPreview);
 
@@ -94,9 +104,11 @@ async function handleScopeChange() {
   state.annualLedgerRows = [];
   state.substituteGrants = [];
   state.webEvidenceRows = [];
+  clearPersistedUploadsFromMemory();
   syncRouteHelp();
   syncSubstituteDefaults();
   syncScopedStatuses();
+  await restorePersistedUploads({ silent: true });
   await loadScopedData();
   renderEmptyPreview();
   syncActionState();
@@ -161,7 +173,7 @@ function setupDropzone(dropzoneId, inputId, labelId, stateKey) {
   const input = $(`#${inputId}`);
   const label = $(`#${labelId}`);
   if (!dropzone || !input || !label) return;
-  input.addEventListener("change", () => setFileState(input.files?.[0] || null, input, label, stateKey));
+  input.addEventListener("change", () => void setFileState(input.files?.[0] || null, input, label, stateKey));
   ["dragenter", "dragover"].forEach((eventName) => {
     dropzone.addEventListener(eventName, (event) => {
       event.preventDefault();
@@ -177,16 +189,27 @@ function setupDropzone(dropzoneId, inputId, labelId, stateKey) {
   dropzone.addEventListener("drop", (event) => {
     const file = [...(event.dataTransfer?.files || [])].find(isExcelFile);
     if (!file) return showToast("엑셀 파일만 등록할 수 있습니다.");
-    setFileState(file, input, label, stateKey);
+    void setFileState(file, input, label, stateKey);
   });
 }
 
-function setFileState(file, input, label, stateKey) {
+async function setFileState(file, input, label, stateKey) {
   state[stateKey] = file;
   label.textContent = file ? file.name : "파일 선택";
   if (input) input.value = "";
   state.analysis = null;
   syncActionState();
+
+  const persisted = PERSISTED_SINGLE_FILES[stateKey];
+  if (!file || !persisted) return;
+  try {
+    await saveUploadFile(persisted.kind, file);
+    label.textContent = `${file.name} · 자동 저장됨`;
+    showToast(`${file.name} 파일을 현재 경로·월에 자동 저장했습니다.`);
+  } catch (error) {
+    console.error(error);
+    showToast("파일은 현재 화면에 등록됐지만 브라우저 저장에는 실패했습니다.");
+  }
 }
 
 function renderManagerUploadGrid() {
@@ -195,26 +218,61 @@ function renderManagerUploadGrid() {
   for (const item of ELECTROLAND_MANAGERS) {
     const card = document.createElement("article");
     card.className = "manager-card";
+    card.dataset.managerCard = item.manager;
     card.innerHTML = `
-      <strong>${item.manager}</strong>
-      <small>${item.regionalManager || "-"} · ${item.region || "-"}</small>
+      <div class="manager-card-head">
+        <div>
+          <strong>${item.manager}</strong>
+          <small>${item.regionalManager || "-"} · ${item.region || "-"}</small>
+        </div>
+        <button class="text-button danger-text manager-remove-button" data-remove-manager="${item.manager}" type="button" disabled>개별 제거</button>
+      </div>
       <input type="file" accept=".xlsx,.xls,.xlsb" data-manager="${item.manager}" />
       <p class="field-help" data-manager-label="${item.manager}">파일 없음</p>
     `;
     const input = card.querySelector("input");
-    input.addEventListener("change", () => {
+    const label = card.querySelector("[data-manager-label]");
+    const removeButton = card.querySelector("[data-remove-manager]");
+
+    input.addEventListener("change", async () => {
       const file = input.files?.[0] || null;
-      if (file) state.managerFiles.set(item.manager, file);
-      else state.managerFiles.delete(item.manager);
-      card.querySelector("[data-manager-label]").textContent = file ? file.name : "파일 없음";
+      input.value = "";
+      if (!file) return;
+      state.managerFiles.set(item.manager, file);
+      label.textContent = file.name;
+      removeButton.disabled = false;
       state.analysis = null;
       syncManagerSummary();
       syncActionState();
+      try {
+        await saveUploadFile("manager", file, item.manager);
+        label.textContent = `${file.name} · 자동 저장됨`;
+        showToast(`${item.manager} 증빙 파일을 자동 저장했습니다.`);
+      } catch (error) {
+        console.error(error);
+        showToast(`${item.manager} 파일은 등록됐지만 브라우저 저장에는 실패했습니다.`);
+      }
+    });
+
+    removeButton.addEventListener("click", async () => {
+      state.managerFiles.delete(item.manager);
+      input.value = "";
+      label.textContent = "파일 없음";
+      removeButton.disabled = true;
+      state.analysis = null;
+      syncManagerSummary();
+      syncActionState();
+      try {
+        await deleteUploadFile("manager", item.manager);
+        showToast(`${item.manager} 증빙 파일만 제거했습니다.`);
+      } catch (error) {
+        console.error(error);
+        showToast("개별 파일 제거 중 오류가 발생했습니다.");
+      }
     });
     grid.appendChild(card);
   }
 }
-
 function switchView(viewName) {
   $$(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === viewName));
   $$(".view").forEach((view) => view.classList.remove("active"));
@@ -523,29 +581,167 @@ function storeKey(type) {
   return `attendance-clean-v4|${type}|${selectedRoute()}|${$("#targetMonth").value}`;
 }
 
-function clearManagerFiles() {
+
+function uploadScope() {
+  return `${selectedRoute()}|${$("#targetMonth").value || "unknown"}`;
+}
+
+function uploadCacheKey(kind, manager = "") {
+  return `${uploadScope()}|${kind}|${manager}`;
+}
+
+function openUploadCache() {
+  return new Promise((resolve, reject) => {
+    if (!("indexedDB" in window)) return reject(new Error("이 브라우저는 파일 자동 저장을 지원하지 않습니다."));
+    const request = indexedDB.open(UPLOAD_CACHE_DB, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(UPLOAD_CACHE_STORE)) {
+        db.createObjectStore(UPLOAD_CACHE_STORE, { keyPath: "key" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("파일 저장소를 열 수 없습니다."));
+  });
+}
+
+async function runUploadCache(mode, action) {
+  const db = await openUploadCache();
+  try {
+    return await new Promise((resolve, reject) => {
+      const transaction = db.transaction(UPLOAD_CACHE_STORE, mode);
+      const store = transaction.objectStore(UPLOAD_CACHE_STORE);
+      let result;
+      try {
+        result = action(store);
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      transaction.oncomplete = () => resolve(result?.result);
+      transaction.onerror = () => reject(transaction.error || new Error("파일 저장 처리에 실패했습니다."));
+      transaction.onabort = () => reject(transaction.error || new Error("파일 저장 처리가 취소됐습니다."));
+    });
+  } finally {
+    db.close();
+  }
+}
+
+async function saveUploadFile(kind, file, manager = "") {
+  const record = {
+    key: uploadCacheKey(kind, manager),
+    scope: uploadScope(),
+    kind,
+    manager,
+    file,
+    fileName: file.name,
+    fileType: file.type || "application/octet-stream",
+    lastModified: file.lastModified || Date.now(),
+    savedAt: new Date().toISOString(),
+  };
+  await runUploadCache("readwrite", (store) => store.put(record));
+}
+
+async function getUploadFile(kind, manager = "") {
+  const result = await runUploadCache("readonly", (store) => store.get(uploadCacheKey(kind, manager)));
+  if (!result?.file) return null;
+  if (result.file instanceof File) return result.file;
+  return new File([result.file], result.fileName || "saved.xlsx", {
+    type: result.fileType || result.file.type || "application/octet-stream",
+    lastModified: result.lastModified || Date.now(),
+  });
+}
+
+async function deleteUploadFile(kind, manager = "") {
+  await runUploadCache("readwrite", (store) => store.delete(uploadCacheKey(kind, manager)));
+}
+
+function findManagerCard(manager) {
+  return $$("[data-manager-card]").find((card) => card.dataset.managerCard === manager) || null;
+}
+
+function clearPersistedUploadsFromMemory() {
+  for (const [stateKey, meta] of Object.entries(PERSISTED_SINGLE_FILES)) {
+    state[stateKey] = null;
+    const label = $(`#${meta.labelId}`);
+    if (label) label.textContent = meta.emptyLabel;
+    const input = $(`#${stateKey}`);
+    if (input) input.value = "";
+  }
+  state.managerFiles.clear();
+  $$("[data-manager-card]").forEach((card) => {
+    const input = card.querySelector("input[type=file]");
+    const label = card.querySelector("[data-manager-label]");
+    const remove = card.querySelector("[data-remove-manager]");
+    if (input) input.value = "";
+    if (label) label.textContent = "파일 없음";
+    if (remove) remove.disabled = true;
+  });
+  syncManagerSummary();
+}
+
+async function restorePersistedUploads({ silent = false } = {}) {
+  let restored = 0;
+  try {
+    for (const [stateKey, meta] of Object.entries(PERSISTED_SINGLE_FILES)) {
+      const file = await getUploadFile(meta.kind);
+      if (!file) continue;
+      state[stateKey] = file;
+      const label = $(`#${meta.labelId}`);
+      if (label) label.textContent = `${file.name} · 자동 복원됨`;
+      restored += 1;
+    }
+
+    for (const item of ELECTROLAND_MANAGERS) {
+      const file = await getUploadFile("manager", item.manager);
+      if (!file) continue;
+      state.managerFiles.set(item.manager, file);
+      const card = findManagerCard(item.manager);
+      if (card) {
+        const label = card.querySelector("[data-manager-label]");
+        const remove = card.querySelector("[data-remove-manager]");
+        if (label) label.textContent = `${file.name} · 자동 복원됨`;
+        if (remove) remove.disabled = false;
+      }
+      restored += 1;
+    }
+    syncManagerSummary();
+    syncActionState();
+    if (restored && !silent) showToast(`저장된 업로드 파일 ${restored}개를 자동 복원했습니다.`);
+  } catch (error) {
+    console.error(error);
+    if (!silent) showToast("저장된 파일을 자동 복원하지 못했습니다.");
+  }
+}
+
+async function clearManagerFiles() {
   state.managerFiles.clear();
   $$("#managerUploadGrid input").forEach((input) => { input.value = ""; });
   $$("[data-manager-label]").forEach((label) => { label.textContent = "파일 없음"; });
+  $$("[data-remove-manager]").forEach((button) => { button.disabled = true; });
   state.analysis = null;
   syncManagerSummary();
   syncActionState();
+  try {
+    await Promise.all(ELECTROLAND_MANAGERS.map((item) => deleteUploadFile("manager", item.manager)));
+    showToast("현재 경로·월의 매니저 증빙 파일을 모두 제거했습니다.");
+  } catch (error) {
+    console.error(error);
+    showToast("매니저 파일 전체 제거 중 오류가 발생했습니다.");
+  }
 }
 
 function resetAnalysisInputs() {
-  for (const key of ["planFile", "attendanceFile", "annualFile", "evidenceFile", "closingFile"]) state[key] = null;
-  for (const inputId of ["planFile", "attendanceFile", "annualFile", "evidenceFile", "closingFile"]) {
+  state.evidenceFile = null;
+  for (const inputId of ["evidenceFile"]) {
     const input = $(`#${inputId}`);
     if (input) input.value = "";
   }
-  $("#planFileName").textContent = "근무계획 파일 선택";
-  $("#attendanceFileName").textContent = "근태기록 파일 선택";
-  $("#annualFileName").textContent = "연차 승인·반려 양식 선택";
   $("#evidenceFileName").textContent = "출근증빙·휴무확인 O 파일 선택";
-  $("#closingFileName").textContent = "전월 마감 파일 선택";
   state.analysis = null;
   renderEmptyPreview();
   syncActionState();
+  showToast("분석 결과만 초기화했습니다. 자동 저장된 원본과 매니저 파일은 유지됩니다.");
 }
 
 function syncManagerSummary() {

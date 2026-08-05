@@ -951,73 +951,218 @@ function markDayoffExcessDates(daily, dayoffExcess) {
 }
 
 function appendMainSheet(workbook, name, analysis, mode) {
-  const days = [...Array(analysis.month.daysInMonth)].map((_, index) => index + 1);
-  const title = `${analysis.month.year}년 ${analysis.month.monthNo}월 ${analysis.routeLabel} ${name}`;
-  const note = mode === "manager"
-    ? "관리자 수정본과 처리 완료본을 반영한 최종 확인 기준입니다. 출근·근무·시간 수기값은 증빙 전 자동 반영하지 않습니다."
-    : "근무계획과 실제 근태를 기준으로 만든 보기용 원장입니다. 출근시간이 있으면 빨간색 경고를 적용하지 않습니다.";
-  const header = [
-    "지역장", "매니저", "지역", "지역2", "매장코드", "매장명", "사번", "이름", "입사일", "그룹입사일", "휴무 가능 개수", "휴무 사용 개수", "휴무 초과 개수",
-    ...days.map((day) => `${String(day).padStart(2, "0")}일`),
+  const year = analysis.month.year;
+  const monthNo = analysis.month.monthNo;
+  const daysInMonth = analysis.month.daysInMonth;
+  const firstDayCol0 = 14; // O열
+  const summaryHeaders = [
+    "총 등록 현황", "출근 등록 횟수", "휴무 가능 개수", "휴무 등록 개수", "휴무 초과 개수",
+    "대체+보상 가능 개수", "대체+보상 등록 개수", "대체+보상 초과 개수", "출근 수정", "교육",
+    "반차", "연차", "공가", "무급휴무", "경조사", "총 일수", "연차 미신청",
+    "연차 신청(승인)", "출근 증빙", "수정 완료", "비고",
   ];
-  const matrix = [
-    [title],
-    [note],
-    ["전체 인원", analysis.stats.people, "출근증빙 대상", analysis.stats.evidence, "휴무 초과자", analysis.stats.dayoffExcess, "연차 확인 대상", analysis.stats.annualIssues],
-    ["휴무 기준", analysis.route === "electroland" ? `토요일+일요일 ${analysis.people[0]?.dayoffAllowance || getDayoffAllowance(analysis.route, analysis.month)}회` : "월 6회"],
-    [],
-    header,
-  ];
+  const summaryStartCol0 = firstDayCol0 + daysInMonth;
+  const summaryEndCol0 = summaryStartCol0 + summaryHeaders.length - 1;
+  const totalCols = summaryEndCol0 + 1;
+  const rowCount = 6 + analysis.people.length;
+  const matrix = Array.from({ length: Math.max(7, rowCount) }, () => Array(totalCols).fill(""));
 
-  for (const person of analysis.people) {
-    matrix.push([
-      person.regionalManager,
-      person.manager,
-      person.region,
-      person.subRegion,
-      person.storeCode,
-      person.storeName,
-      person.employeeId,
-      person.employeeName,
-      person.hireDate,
-      person.groupHireDate,
-      person.dayoffAllowance,
-      person.basicDayoffCount,
-      person.dayoffExcess,
-      ...person.daily.map((daily) => mode === "manager" ? daily.managerStatus : daily.baseStatus),
-    ]);
+  matrix[1][1] = `■${year}년 ${monthNo}월 출퇴근 현황`;
+  matrix[2][1] = '- 휴무 → "출근" or "연차" 수정 시, 출근 증빙자료 및 제모스 해당일자 연차신청 필수';
+  matrix[3][1] = '- "연차미신청"으로 수정된 날짜는 모두 제모스에 연차신청 가이드 바랍니다.';
+  matrix[4][13] = `${monthNo}월1일 \n근무계획\n일치확인`;
+
+  const metaHeaders = ["지역장", "매니저", "지역1", "지역2", "매장코드", "매장명", "포탈사번", "사번", "성명", "제니엘입사일", "그룹입사일", "휴/퇴사일"];
+  metaHeaders.forEach((value, index) => { matrix[5][index + 1] = value; });
+
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    const col = firstDayCol0 + day - 1;
+    const date = new Date(year, monthNo - 1, day);
+    matrix[4][col] = date;
+    matrix[5][col] = WEEKDAYS[date.getDay()];
   }
-  const sheet = XLSX.utils.aoa_to_sheet(matrix);
-  const colCount = header.length;
+  summaryHeaders.forEach((value, index) => { matrix[4][summaryStartCol0 + index] = value; });
+  matrix[5][summaryStartCol0 + 2] = "(기본 휴무)";
+  matrix[5][summaryStartCol0 + 3] = "(최종 표시)";
+  matrix[5][summaryStartCol0 + 4] = "(초과)";
+  matrix[5][summaryStartCol0 + 5] = "(이월+당월)";
+  matrix[5][summaryStartCol0 + 6] = "(최종 사용)";
+  matrix[5][summaryStartCol0 + 7] = "(초과)";
+
+  analysis.people.forEach((person, index) => {
+    const r = 6 + index;
+    const closing = person.closingPerson || {};
+    const daily = person.daily || [];
+    const displayed = daily.map((item) => mode === "manager" ? item.managerStatus : item.baseStatus);
+    const planValues = daily.map((item) => item.planStatus);
+    const registeredCount = displayed.filter((value) => value && !String(value).includes("미입력") && value !== "미등록").length;
+    const clockCount = daily.filter((item) => item.hasClockIn).length;
+    const dayoffCount = displayed.reduce((sum, value) => sum + (BASIC_DAYOFF.has(value) ? statusAmount(value) : 0), 0);
+    const combinedAvailable = roundHalf(Number(person.subcompAvailable || 0) + Number(person.subcompCarryover || 0));
+    const combinedUsed = roundHalf(Number(person.subcompUsed || 0));
+    const combinedShortage = roundHalf(Math.max(0, combinedUsed - combinedAvailable));
+    const clockCorrection = daily.filter((item) => item.hasClockIn && ["휴무", "휴무(공백)", "연차", "오전반차", "오후반차", "공가", "휴가", "경조", "출산휴가", "육아휴직", "대체휴무", "보상휴가"].includes(item.planStatus)).length;
+    const annualRows = (analysis.annualRows || []).filter((item) => normalizeId(item.employeeId) === normalizeId(person.employeeId));
+    const approvedAnnual = annualRows.filter((item) => item.applicationStatus && !String(item.applicationStatus).includes("반려") && !String(item.applicationStatus).includes("취소") && !String(item.applicationStatus).includes("철회") && item.result === "정상").reduce((sum, item) => sum + statusAmount(item.finalStatus), 0);
+    const missingAnnual = annualRows.filter((item) => item.result === "승인 양식 없음").reduce((sum, item) => sum + statusAmount(item.finalStatus || item.planStatus), 0);
+    const evidenceNeeded = daily.some((item) => Boolean(item.issue));
+    const evidenceCompleted = daily.some((item) => Boolean(item.evidenceConfirmed));
+    const noteParts = [];
+    if (person.note) noteParts.push(person.note);
+    if (person.dayoffExcess > 0) noteParts.push(`기본 휴무 ${compactNumber(person.dayoffExcess)}일 초과`);
+    if (person.subcompShortage > 0) noteParts.push(`대체+보상 ${compactNumber(person.subcompShortage)}일 부족`);
+    for (const item of daily) if (item.issue) noteParts.push(`${monthNo}/${item.day} ${item.issue}`);
+
+    const values = [
+      person.regionalManager || "", person.manager || "", person.region || "", person.subRegion || "",
+      person.storeCode || "", person.storeName || "", closing.portalId || "", person.employeeId || "",
+      person.employeeName || "", person.hireDate || closing.hireDate || "", person.groupHireDate || closing.groupHireDate || "",
+      closing.resignDate || "",
+    ];
+    values.forEach((value, c) => { matrix[r][c + 1] = value; });
+    matrix[r][13] = daily[0]?.planStatus === "공백" ? "" : daily[0]?.planStatus || "";
+    displayed.forEach((value, dayIndex) => { matrix[r][firstDayCol0 + dayIndex] = value || ""; });
+
+    const summaryValues = [
+      registeredCount, clockCount, person.dayoffAllowance || 0, roundHalf(dayoffCount), roundHalf(person.dayoffExcess || 0),
+      combinedAvailable, combinedUsed, combinedShortage, clockCorrection,
+      planValues.filter((value) => value === "교육").length,
+      planValues.filter((value) => HALF_DAY_STATUSES.has(value)).length,
+      planValues.filter((value) => value === "연차").length,
+      planValues.filter((value) => value === "공가").length,
+      planValues.filter((value) => value === "무급휴가").length,
+      planValues.filter((value) => value === "경조").length,
+      daysInMonth, roundHalf(missingAnnual), roundHalf(approvedAnnual), evidenceCompleted ? "완료" : evidenceNeeded ? "필요" : "", "",
+      [...new Set(noteParts)].join(" · "),
+    ];
+    summaryValues.forEach((value, c) => { matrix[r][summaryStartCol0 + c] = value; });
+  });
+
+  const sheet = XLSX.utils.aoa_to_sheet(matrix, { cellDates: true });
   sheet["!merges"] = [
-    { s: { r: 0, c: 0 }, e: { r: 0, c: colCount - 1 } },
-    { s: { r: 1, c: 0 }, e: { r: 1, c: colCount - 1 } },
+    { s: { r: 1, c: 1 }, e: { r: 1, c: 9 } },
+    { s: { r: 2, c: 1 }, e: { r: 2, c: 9 } },
+    { s: { r: 3, c: 1 }, e: { r: 3, c: 9 } },
+    { s: { r: 4, c: 13 }, e: { r: 5, c: 13 } },
   ];
-  sheet["!cols"] = [
-    { wch: 11 }, { wch: 12 }, { wch: 10 }, { wch: 10 }, { wch: 11 }, { wch: 18 }, { wch: 12 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 },
-    ...days.map(() => ({ wch: 9 })),
-  ];
-  sheet["!rows"] = matrix.map((_, index) => ({ hpt: index === 0 ? 28 : index === 5 ? 34 : 22 }));
   sheet["!freeze"] = { xSplit: 13, ySplit: 6, topLeftCell: "N7", activePane: "bottomRight", state: "frozen" };
   sheet["!views"] = [{ showGridLines: false, zoomScale: 70, zoomScaleNormal: 70 }];
-  styleRange(sheet, 0, 0, 0, colCount - 1, STYLE.title);
-  styleRange(sheet, 1, 0, 1, colCount - 1, STYLE.note);
-  styleRange(sheet, 2, 0, 3, colCount - 1, STYLE.metric);
-  styleRange(sheet, 5, 0, 5, colCount - 1, STYLE.header);
-  for (let r = 6; r < matrix.length; r += 1) {
-    styleRange(sheet, r, 0, r, 12, STYLE.meta);
-    const person = analysis.people[r - 6];
-    for (let dayIndex = 0; dayIndex < person.daily.length; dayIndex += 1) {
-      const daily = person.daily[dayIndex];
-      const col = 13 + dayIndex;
-      const status = mode === "manager" ? daily.managerStatus : daily.baseStatus;
-      setCellStyle(sheet, r, col, dailyCellStyle(status, daily));
-    }
-    if (person.dayoffExcess > 0) {
-      setCellStyle(sheet, r, 12, STYLE.issue);
+  sheet["!autofilter"] = { ref: `B6:M${Math.max(7, rowCount)}` };
+  applyLegacyAttendanceDesign(sheet, analysis, summaryStartCol0, summaryEndCol0, totalCols, rowCount);
+  XLSX.utils.book_append_sheet(workbook, sheet, name);
+}
+
+function applyLegacyAttendanceDesign(sheet, analysis, summaryStartCol0, summaryEndCol0, totalCols, rowCount) {
+  const year = analysis.month.year;
+  const monthNo = analysis.month.monthNo;
+  const daysInMonth = analysis.month.daysInMonth;
+  const firstDayCol0 = 14;
+  const lastDayCol0 = firstDayCol0 + daysInMonth - 1;
+  const lastRow0 = Math.max(6, rowCount - 1);
+  const cols = Array.from({ length: totalCols }, () => ({ wch: 10 }));
+  cols[0] = { wch: 2 };
+  [1, 2, 3, 4].forEach((i) => { cols[i] = { wch: 11 }; });
+  cols[5] = { wch: 12 }; cols[6] = { wch: 16 }; cols[7] = { wch: 15 }; cols[8] = { wch: 12 }; cols[9] = { wch: 11 };
+  [10, 11, 12].forEach((i) => { cols[i] = { wch: 12 }; });
+  cols[13] = { wch: 13 };
+  for (let c = firstDayCol0; c <= lastDayCol0; c += 1) cols[c] = { wch: 10.5 };
+  for (let c = summaryStartCol0; c <= summaryEndCol0; c += 1) cols[c] = { wch: 12 };
+  cols[summaryStartCol0 + 2] = { wch: 13.8 }; cols[summaryStartCol0 + 3] = { wch: 13.8 }; cols[summaryStartCol0 + 4] = { wch: 13.8 };
+  cols[summaryStartCol0 + 5] = { wch: 10.9 }; cols[summaryStartCol0 + 6] = { wch: 10.9 }; cols[summaryStartCol0 + 7] = { wch: 10.9 };
+  cols[summaryEndCol0] = { wch: 46 };
+  sheet["!cols"] = cols;
+  sheet["!rows"] = Array.from({ length: Math.max(7, rowCount) }, (_, r) => ({ hpt: r === 1 || r === 2 || r === 3 ? 27 : r === 4 ? 33 : r === 5 ? 18 : 20 }));
+
+  const white = { fill: { patternType: "solid", fgColor: { rgb: "FFFFFFFF" } }, font: { name: "맑은 고딕", sz: 10, color: { rgb: "FF000000" } }, alignment: { horizontal: "left", vertical: "center", wrapText: true } };
+  const title = { ...white, font: { name: "맑은 고딕", sz: 18, bold: true, color: { rgb: "FF000000" } } };
+  const note = { ...white, font: { name: "맑은 고딕", sz: 15, bold: true, color: { rgb: "FF0000FF" } } };
+  const navy = { fill: { patternType: "solid", fgColor: { rgb: "FF203764" } }, font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FFFFFFFF" } }, alignment: { horizontal: "center", vertical: "center", wrapText: true }, border: thinBorder("FFFFFFFF") };
+  const dateHeader = { fill: { patternType: "solid", fgColor: { rgb: "FFD9E1F2" } }, font: { name: "맑은 고딕", sz: 10, color: { rgb: "FF000000" } }, alignment: { horizontal: "center", vertical: "center" }, border: thinBorder("FFB4C7DC") };
+  const meta = { font: { name: "맑은 고딕", sz: 10, color: { rgb: "FF000000" } }, alignment: { horizontal: "center", vertical: "center", wrapText: true }, border: thinBorder("FFD9E1E8") };
+  const planCheck = { fill: { patternType: "solid", fgColor: { rgb: "FFFFF2CC" } }, font: { name: "맑은 고딕", sz: 10, bold: true, color: { rgb: "FF000000" } }, alignment: { horizontal: "center", vertical: "center", wrapText: true }, border: thinBorder("FFD9E1E8") };
+
+  styleRange(sheet, 1, 1, 1, 9, title);
+  styleRange(sheet, 2, 1, 3, 9, note);
+  styleRange(sheet, 4, 1, 5, 12, navy);
+  styleRange(sheet, 4, 13, lastRow0, 13, planCheck);
+  styleRange(sheet, 4, firstDayCol0, 4, lastDayCol0, dateHeader);
+  styleRange(sheet, 5, firstDayCol0, 5, lastDayCol0, navy);
+  styleRange(sheet, 4, summaryStartCol0, 5, summaryEndCol0, navy);
+  styleRange(sheet, 6, 1, lastRow0, 12, meta);
+  styleRange(sheet, 6, summaryStartCol0, lastRow0, summaryEndCol0, meta);
+
+  const dayoffHead = { ...navy, fill: { patternType: "solid", fgColor: { rgb: "FF5B9BD5" } } };
+  const extraHead = { ...navy, fill: { patternType: "solid", fgColor: { rgb: "FF8064A2" } } };
+  styleRange(sheet, 4, summaryStartCol0 + 2, 4, summaryStartCol0 + 4, dayoffHead);
+  styleRange(sheet, 4, summaryStartCol0 + 5, 4, summaryStartCol0 + 7, extraHead);
+
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    const c = firstDayCol0 + day - 1;
+    const ref = XLSX.utils.encode_cell({ r: 4, c });
+    if (sheet[ref]) sheet[ref].z = "yyyymmdd";
+    const date = new Date(year, monthNo - 1, day);
+    if (date.getDay() === 0 || date.getDay() === 6) {
+      for (const r of [4, 5]) {
+        const addr = XLSX.utils.encode_cell({ r, c });
+        if (sheet[addr]) sheet[addr].s = { ...(sheet[addr].s || {}), font: { ...((sheet[addr].s || {}).font || {}), color: { rgb: "FFFF0000" }, bold: r === 5 } };
+      }
     }
   }
-  XLSX.utils.book_append_sheet(workbook, sheet, name);
+
+  analysis.people.forEach((person, index) => {
+    const r = 6 + index;
+    const altFill = index % 2 ? "FFF9FBFD" : "FFFFFFFF";
+    for (let c = 1; c <= 12; c += 1) {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      if (!sheet[addr]) sheet[addr] = { t: "s", v: "" };
+      sheet[addr].s = { ...(sheet[addr].s || {}), fill: { patternType: "solid", fgColor: { rgb: altFill } } };
+    }
+    const nameAddr = XLSX.utils.encode_cell({ r, c: 9 });
+    if (sheet[nameAddr]) sheet[nameAddr].s = { ...(sheet[nameAddr].s || {}), fill: { patternType: "solid", fgColor: { rgb: "FFFFFF00" } } };
+    for (let dayIndex = 0; dayIndex < person.daily.length; dayIndex += 1) {
+      const daily = person.daily[dayIndex];
+      const c = firstDayCol0 + dayIndex;
+      const status = daily.managerStatus;
+      const addr = XLSX.utils.encode_cell({ r, c });
+      setCellStyle(sheet, r, c, legacyDailyStyle(status, daily));
+    }
+    const tones = ["normal", "normal", "dayoffAvailable", "dayoffUsed", person.dayoffExcess > 0 ? "danger" : "safe", "extraAvailable", person.subcompUsed > 0 ? "extraUsed" : "extraAvailable", person.subcompShortage > 0 ? "danger" : "safe"];
+    for (let offset = 0; offset <= summaryEndCol0 - summaryStartCol0; offset += 1) {
+      const addr = XLSX.utils.encode_cell({ r, c: summaryStartCol0 + offset });
+      const tone = tones[offset] || (offset === 20 ? "note" : "normal");
+      setCellStyle(sheet, r, summaryStartCol0 + offset, legacySummaryStyle(tone, offset === 20));
+    }
+  });
+}
+
+function legacyDailyStyle(status, daily) {
+  const base = { font: { name: "맑은 고딕", sz: 10, color: { rgb: "FF000000" } }, fill: { patternType: "solid", fgColor: { rgb: "FFFFFFFF" } }, alignment: { horizontal: "center", vertical: "center", wrapText: true }, border: thinBorder("FFD9E1E8") };
+  const text = String(status || "");
+  if (daily?.hasClockIn) return base;
+  if (daily?.dayoffExcessDate) return { ...base, fill: { patternType: "solid", fgColor: { rgb: "FFF4B183" } }, font: { ...base.font, bold: true, color: { rgb: "FF9C5700" } } };
+  if (daily?.issue || text === "출근 미입력" || text === "미등록" || text === "출ㆍ계 미입력") return { ...base, fill: { patternType: "solid", fgColor: { rgb: "FFF33E0D" } }, font: { ...base.font, sz: 8, bold: true, color: { rgb: "FFFFFFFF" } } };
+  if (text === "계획 미입력") return { ...base, fill: { patternType: "solid", fgColor: { rgb: "FFFFC000" } }, font: { ...base.font, bold: true, color: { rgb: "FF7F4100" } } };
+  if (BASIC_DAYOFF.has(text)) return { ...base, fill: { patternType: "solid", fgColor: { rgb: "FFDDEBF7" } } };
+  if (SUBCOMP_STATUSES.has(text) || text.includes("대체") || text.includes("보상")) return { ...base, fill: { patternType: "solid", fgColor: { rgb: "FF2F5597" } }, font: { ...base.font, bold: true, color: { rgb: "FFFFFFFF" } } };
+  if (isAnnualStatus(text) || ["오전반차", "오후반차"].includes(text)) return { ...base, fill: { patternType: "solid", fgColor: { rgb: "FFC6E0B4" } } };
+  if (["공가", "휴가", "경조", "무급휴가", "교육", "출산휴가", "육아휴직"].includes(text)) return { ...base, fill: { patternType: "solid", fgColor: { rgb: "FFDDEBF7" } } };
+  if (text === "출근확인") return { ...base, fill: { patternType: "solid", fgColor: { rgb: "FFE2F0D9" } }, font: { ...base.font, bold: true, color: { rgb: "FF107C41" } } };
+  return base;
+}
+
+function legacySummaryStyle(tone = "normal", leftAlign = false) {
+  const palette = {
+    normal: ["FFF7FAFC", "FF1F2937"], safe: ["FFE2F0D9", "FF375623"], dayoffAvailable: ["FFDDEBF7", "FF1F4E78"],
+    dayoffUsed: ["FFE7E6E6", "FF404040"], extraAvailable: ["FFE4DFEC", "FF5F497A"], extraUsed: ["FFFCE4D6", "FF9E480E"],
+    danger: ["FFF33E0D", "FFFFFFFF"], note: ["FFFFF2CC", "FF7F6000"],
+  };
+  const [fill, font] = palette[tone] || palette.normal;
+  return { fill: { patternType: "solid", fgColor: { rgb: fill } }, font: { name: "맑은 고딕", sz: 10, bold: tone === "danger", color: { rgb: font } }, alignment: { horizontal: leftAlign ? "left" : "center", vertical: "center", wrapText: true }, border: thinBorder("FFD9E1E8") };
+}
+
+function compactNumber(value) {
+  const n = Number(value || 0);
+  return Number.isInteger(n) ? String(n) : n.toFixed(1).replace(/\.0$/, "");
 }
 
 function appendManagerCompareSheet(workbook, analysis) {
