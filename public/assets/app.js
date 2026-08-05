@@ -262,6 +262,7 @@ async function runAnalysis({ silent = false } = {}) {
       substituteGrants: state.substituteGrants,
       webEvidenceRows: state.webEvidenceRows,
     });
+    state.analysis.annualTemplateFile = state.closingFile || null;
     renderAnalysis();
     if (!silent) showToast("분석이 완료됐습니다.");
   } catch (error) {

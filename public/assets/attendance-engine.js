@@ -1,3 +1,5 @@
+import { buildAnnualTemplateWorkbookFile } from "./annual-template-export.js";
+
 export const ROUTE_LABELS = {
   homeplus: "홈플러스",
   electroland: "전자랜드",
@@ -86,7 +88,9 @@ export function parseClosingWorkbook(workbook, targetMonth = "") {
   for (const sheetName of workbook.SheetNames || []) {
     const compact = sheetName.replace(/\s+/g, "");
     const sheetMonth = extractKoreanMonthFromSheetName(sheetName);
-    if (compact.includes("재직1년이상") && compact.includes("월") && !compact.includes("미사용") && sheetMonth === latestClosingMonth) {
+    if (compact.includes("상담사") && compact.includes("재직1년") && compact.includes("월") && !compact.includes("미사용") && !compact.includes("숨기기") && sheetMonth === latestClosingMonth && parseGeneratedClosingPeopleSheet(workbook.Sheets[sheetName], people, compact.includes("미만") ? "재직 1년 미만" : "재직 1년 이상")) {
+      continue;
+    } else if (compact.includes("재직1년이상") && compact.includes("월") && !compact.includes("미사용") && sheetMonth === latestClosingMonth) {
       parseClosingPeopleSheet(workbook.Sheets[sheetName], {
         people,
         group: "재직 1년 이상",
@@ -327,16 +331,7 @@ export async function buildAttendanceWorkbookFile(analysis) {
 }
 
 export async function buildAnnualWorkbookFile(analysis) {
-  const workbook = XLSX.utils.book_new();
-  appendAnnualClosingDesignSheet(workbook, analysis, "재직 1년 이상");
-  appendAnnualClosingDesignSheet(workbook, analysis, "재직 1년 미만");
-  appendAnnualUserSheet(workbook, analysis);
-  appendAnnualCumulativeSheet(workbook, analysis);
-  appendAnnualPromotionSheet(workbook, analysis);
-  workbook.Props = workbookProps(analysis, "연차 엑셀");
-  const raw = XLSX.write(workbook, { bookType: "xlsx", type: "array", cellStyles: true });
-  const buffer = await applyWorkbookViewSettings(raw, workbook.SheetNames);
-  return namedWorkbookFile(buffer, `${analysis.targetMonth.replace("-", "년 ")}월_${analysis.routeLabel}_연차_엑셀.xlsx`);
+  return buildAnnualTemplateWorkbookFile(analysis);
 }
 
 export async function buildClosingWorkbookFile(analysis) {
@@ -641,6 +636,44 @@ function parseManagerWorkbook(managerName, workbook, month) {
     }
   }
   return parsed;
+}
+
+function parseGeneratedClosingPeopleSheet(sheet, people, group) {
+  const rows = sheetRows(sheet);
+  const headerIndex = findHeaderRow(rows, [["제니엘사번", "제니엘 사번", "사번"], ["사원명", "이름"], ["잔여연차"]]);
+  if (headerIndex < 0) return false;
+  const headers = rows[headerIndex].map((cell) => cleanHeader(cell));
+  const index = (aliases) => firstHeaderIndex(headers, aliases);
+  const indexes = {
+    regionalManager: index(["지역장"]), manager: index(["매니저"]), region: index(["지역1", "지역"]), subRegion: index(["지역2"]),
+    storeCode: index(["근무처코드", "매장코드"]), storeName: index(["근무처명", "매장명"]), portalId: index(["스핀사원번호", "포탈사번"]),
+    employeeId: index(["제니엘사번", "사번"]), employeeName: index(["사원명", "이름"]), hireDate: index(["제니엘입사일"]), groupHireDate: index(["고용승계입사일"]),
+    job: index(["직무"]), granted: index(["연차", "발생"]), currentUsed: index(["년사용", "현재연도사용"]), priorUsed: index(["전년사용"]), remaining: index(["잔여연차"]),
+    period: index(["사용기간"]), firstDate: index(["1차촉진"]), firstDone: index(["1차촉진유무", "촉진유무"]), secondDate: index(["2차촉진"]),
+    exhaustion: index(["연차소진일"]), note: index(["비고"]), employmentGroup: index(["입사구분", "구분"]),
+  };
+  // 같은 이름의 '촉진 유무' 열이 두 개인 경우 위치로 1차/2차를 구분합니다.
+  const promotionDoneIndexes = allHeaderIndexes(headers, ["촉진유무"]);
+  if (promotionDoneIndexes.length) indexes.firstDone = promotionDoneIndexes[0];
+  indexes.secondDone = promotionDoneIndexes.length > 1 ? promotionDoneIndexes[1] : -1;
+  if (indexes.employeeId < 0 || indexes.employeeName < 0 || indexes.remaining < 0) return false;
+  for (let r = headerIndex + 1; r < rows.length; r += 1) {
+    const row = rows[r];
+    const employeeId = normalizeId(pick(row, indexes.employeeId));
+    const employeeName = text(pick(row, indexes.employeeName));
+    if (!employeeId || !employeeName || employeeName === "필터용") continue;
+    people.set(employeeId, {
+      employmentGroup: text(pick(row, indexes.employmentGroup)) || group,
+      regionalManager: text(pick(row, indexes.regionalManager)), manager: text(pick(row, indexes.manager)), region: text(pick(row, indexes.region)), subRegion: text(pick(row, indexes.subRegion)),
+      storeCode: text(pick(row, indexes.storeCode)), storeName: text(pick(row, indexes.storeName)), portalId: text(pick(row, indexes.portalId)), employeeId, employeeName,
+      hireDate: normalizeDateText(pick(row, indexes.hireDate)), groupHireDate: normalizeDateText(pick(row, indexes.groupHireDate)), job: text(pick(row, indexes.job)),
+      currentYearGranted: numberOrBlank(pick(row, indexes.granted)), currentYearUsed: numberOrBlank(pick(row, indexes.currentUsed)), priorYearUsed: numberOrBlank(pick(row, indexes.priorUsed)),
+      remainingAnnual: numberOrBlank(pick(row, indexes.remaining)), annualPeriod: text(pick(row, indexes.period)), firstPromotionDate: normalizeDateText(pick(row, indexes.firstDate)),
+      firstPromotionDone: text(pick(row, indexes.firstDone)), secondPromotionDate: normalizeDateText(pick(row, indexes.secondDate)), secondPromotionDone: text(pick(row, indexes.secondDone)),
+      annualExhaustionDate: normalizeDateText(pick(row, indexes.exhaustion)), note: text(pick(row, indexes.note)),
+    });
+  }
+  return true;
 }
 
 function parseClosingPeopleSheet(sheet, options) {
@@ -1302,29 +1335,27 @@ function appendAnnualCumulativeSheet(workbook, analysis) {
 function appendAnnualPromotionSheet(workbook, analysis) {
   const rows = [
     [`${analysis.month.year}년 ${analysis.month.monthNo}월 연차 촉진 관리`],
-    ["인력 DB와 연차 누적 DB를 기준으로 촉진 대상 확인용으로 생성합니다. 잔여 연차 기준은 관리자가 최종 확인합니다."],
+    ["누적 잔여와 당월 승인 사용량을 반영하고, 전월 1·2차 촉진 상태를 별도로 이어받습니다."],
+    ["※ 촉진일·촉진 유무·소진일은 다음 달 마감본에 그대로 승계됩니다."],
     [],
-    ["No", "지역장", "매니저", "지역", "매장명", "이름", "사번", "입사일", "연차 잔여", "당월 사용", "촉진 확인", "비고"],
+    ["No", "지역장", "매니저", "지역", "매장명", "이름", "사번", "입사구분", "입사일", "기존 잔여", "당월 사용", "마감 후 잔여", "1차 촉진일", "1차 촉진 유무", "2차 촉진일", "2차 촉진 유무", "연차 소진일", "비고"],
   ];
   analysis.people.forEach((row, index) => {
-    const annualUsed = roundHalf(row.annualEvents.reduce((sum, event) => sum + statusAmount(event.status), 0));
+    const closing = row.closingPerson || {};
+    const previous = numberOrBlank(row.annualLedger.remaining);
+    const after = previous === "" ? "" : roundHalf(previous - (row.monthlyAnnualUsed || 0));
     rows.push([
-      index + 1,
-      row.regionalManager,
-      row.manager,
-      row.region,
-      row.storeName,
-      row.employeeName,
-      row.employeeId,
-      row.hireDate,
-      row.annualLedger.remaining ?? "",
-      annualUsed,
-      "",
-      row.annualLedger.note || "",
+      index + 1, row.regionalManager || closing.regionalManager || "", row.manager || closing.manager || "", row.region || closing.region || "", row.storeName || closing.storeName || "",
+      row.employeeName || closing.employeeName || "", row.employeeId, closing.employmentGroup || "", row.hireDate || closing.hireDate || "", previous, row.monthlyAnnualUsed || 0, after,
+      closing.firstPromotionDate || "", closing.firstPromotionDone || "", closing.secondPromotionDate || "", closing.secondPromotionDone || "", closing.annualExhaustionDate || "", closing.note || row.annualLedger.note || "",
     ]);
   });
-  const sheet = makeReportSheet(rows, 3, { titleCols: 11 });
-  sheet["!cols"] = [{ wch: 6 }, { wch: 11 }, { wch: 11 }, { wch: 9 }, { wch: 18 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 14 }, { wch: 28 }];
+  const sheet = makeReportSheet(rows, 4, { titleCols: 17 });
+  sheet["!cols"] = [{ wch: 6 }, { wch: 11 }, { wch: 11 }, { wch: 9 }, { wch: 18 }, { wch: 10 }, { wch: 13 }, { wch: 14 }, { wch: 13 }, { wch: 11 }, { wch: 11 }, { wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 30 }];
+  for (let r = 5; r < rows.length; r += 1) {
+    setCellStyle(sheet, r, 11, STYLE.warning);
+    for (const c of [12, 13, 14, 15, 16, 17]) setCellStyle(sheet, r, c, STYLE.input);
+  }
   XLSX.utils.book_append_sheet(workbook, sheet, "연차 촉진 관리");
 }
 
@@ -1900,15 +1931,14 @@ function normalizeEvidenceOverrideStatus(value) {
 }
 
 function resolveAnnualLedger(employeeId, rows, closingPerson = null) {
-  const row = findByEmployeeId(rows, employeeId);
-  if (!row) {
-    return {
-      remaining: closingPerson ? numberOrBlank(closingPerson.remainingAnnual) : "",
-      note: closingPerson?.note || "",
-    };
+  // 사용자가 올린 전월 마감본을 최우선 기준으로 사용합니다. 저장된 웹 DB가 오래된 경우 중복 차감을 막습니다.
+  if (closingPerson && numberOrBlank(closingPerson.remainingAnnual) !== "") {
+    return { remaining: numberOrBlank(closingPerson.remainingAnnual), note: closingPerson.note || "" };
   }
+  const row = findByEmployeeId(rows, employeeId);
+  if (!row) return { remaining: "", note: closingPerson?.note || "" };
   return {
-    remaining: numberOrBlank(row["연차 잔여"] ?? row["잔여"] ?? row.remaining ?? row.remainingDays),
+    remaining: numberOrBlank(row["연차 잔여"] ?? row["잔여연차"] ?? row["잔여"] ?? row.remaining ?? row.remainingDays),
     note: text(row["비고"] ?? row.note ?? ""),
   };
 }
